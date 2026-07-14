@@ -15,6 +15,10 @@
 ```bash
 git clone https://github.com/hawk1949-rs/IgniteQuant.git
 cd IgniteQuant
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host=pypi.tuna.tsinghua.edu.cn
+copy .env.example .env
+# 编辑 .env，填入快期账户与密码，然后：
+python verify_install.py
 ```
 
 ## License
