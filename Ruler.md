@@ -42,6 +42,7 @@
 - 浏览器访问域名/地址固定为：**http://127.0.0.1:9876**
 - 不要用 `web_gui=True`（会随机端口，地址不稳定）
 - 若 9876 被占用：先结束旧回测进程，再启动新回测
+- web_gui 常停在「最后一笔成交」：后台可能已继续推进或已 `BacktestFinished`；无新信号时图表不再跳动，属正常
 
 ### 现有策略
 
@@ -49,3 +50,9 @@
   - 合约默认 `SHFE.au2606`，区间 `2026-01-01` ~ `2026-05-31`
   - Web UI：http://127.0.0.1:9876
   - 凭证读 `.env`；运行：`python strategies/vwap_au_backtest.py`
+- Falcon（格兰维尔均线）：`strategies/falcon_au_backtest.py`
+  - 均线：`MA7 / MA14 / MA52`（1 小时 K）；主均线 MA52，短中期 MA7/MA14 确认
+  - 合约与区间同 VWAP：`SHFE.au2606`，`2026-01-01` ~ `2026-05-31`
+  - 结束日前最后一个交易日起强制 `set_target_volume(0)` 清仓
+  - Web UI：http://127.0.0.1:9876
+  - 运行：`python strategies/falcon_au_backtest.py`
