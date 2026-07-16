@@ -1,23 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Falcon：格兰维尔均线战法回测（MA7 / MA14 / MA52）。
+"""Falcon v2 回测入口。
 
-标的与区间与 VWAP 回测一致：
-- 合约：SHFE.au2606
-- 区间：2026-01-01 ~ 2026-05-31
+行情状态(ADX) + 格兰维尔/量能/KDJ 评分(-3~3) + 动态手数 + ATR 止盈止损。
+- 信号：KQ.m@SHFE.au（沪金主力连续，覆盖 2025-01 ~ 2026-06）
+- 交易：跟随 quote.underlying_symbol 的具体交割月（TqSim 不支持连续合约下单）
 - Web UI：http://127.0.0.1:9876
-
-K 线周期：1 小时（便于回测时钟完整走完区间，并在 web_gui 上观察均线）
-
-规则说明（以 MA52 为主均线，MA7/MA14 作短中期确认）：
-买点
-1. MA52 由平/降转升，且收盘价上穿 MA52，同时 MA7 > MA14
-2. 收盘价在 MA52 上方，回踩接近 MA52（未有效跌破）后再次抬头，且 MA7 > MA14
-3. 均线多头排列 MA7 > MA14 > MA52，收盘价重新站上 MA7
-卖点（对称）
-1. MA52 由平/升转降，且收盘价下穿 MA52，同时 MA7 < MA14
-2. 收盘价在 MA52 下方，反抽接近 MA52（未有效突破）后再次回落，且 MA7 < MA14
-3. 均线空头排列 MA7 < MA14 < MA52，收盘价重新跌破 MA7
+- 可选：结束后用 common.backtest_archive 导出桌面对账单 Excel
 """
 
 from __future__ import annotations
@@ -28,8 +17,24 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 from tqsdk import BacktestFinished, TargetPosTask, TqApi, TqAuth, TqBacktest, TqSim
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(ROOT / "strategies") not in sys.path:
+    sys.path.insert(0, str(ROOT / "strategies"))
+
+from common.backtest_archive import BacktestArchive
+from falcon import (
+    RiskAction,
+    RiskManager,
+    compute_indicators,
+    detect_regime,
+    lots_from_signal,
+    score_signal,
+)
+from falcon.sizing import LOT_BY_SIGNAL
 
 
 def load_dotenv(path: Path) -> None:
@@ -43,153 +48,252 @@ def load_dotenv(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-SYMBOL = "SHFE.au2606"
-START_DT = datetime.date(2026, 1, 1)
-END_DT = datetime.date(2026, 5, 31)
-POSITION_SIZE = 5
-MA_FAST = 7
-MA_MID = 14
-MA_SLOW = 52
-KLINE_SECONDS = 60 * 60  # 1 小时
-NEAR_MA_PCT = 0.002
-# 项目约定：回测 Web UI 固定本机 9876 端口（见 Ruler.md）
+SIGNAL_SYMBOL = "KQ.m@SHFE.au"
+START_DT = datetime.date(2025, 1, 1)
+END_DT = datetime.date(2025, 6, 30)
+KLINE_SECONDS = 60 * 60
 WEB_GUI = ":9876"
+# 设为 False 可关闭本次回测的 Excel 存档（模块本身仍可被其它策略接入）
+ENABLE_ARCHIVE = True
 
 
 def last_business_day_on_or_before(d: datetime.date) -> datetime.date:
-    """结束日落在周末时，回退到最后一个交易日再清仓（否则 BacktestFinished 前可能来不及平仓）。"""
     while d.weekday() >= 5:
         d -= datetime.timedelta(days=1)
     return d
 
 
-# 回测结束前强制清仓的起始交易日
 FLAT_DATE = last_business_day_on_or_before(END_DT)
 
 
-def near(a: float, b: float, pct: float = NEAR_MA_PCT) -> bool:
-    if b == 0 or np.isnan(a) or np.isnan(b):
-        return False
-    return abs(a - b) / abs(b) <= pct
-
-
-def decide_target(close, ma7, ma14, ma52) -> int | None:
-    """返回目标净持仓；None 表示本根 K 不改仓。"""
-    if np.isnan(ma52[-1]) or np.isnan(ma52[-2]) or np.isnan(ma52[-3]):
-        return None
-    if any(np.isnan(x[-1]) or np.isnan(x[-2]) for x in (close, ma7, ma14)):
-        return None
-
-    c0, c1 = close[-1], close[-2]
-    f0, f1 = ma7[-1], ma7[-2]
-    m0 = ma14[-1]
-    s0, s1, s2 = ma52[-1], ma52[-2], ma52[-3]
-
-    ma52_turn_up = s1 <= s2 and s0 > s1
-    ma52_turn_down = s1 >= s2 and s0 < s1
-    cross_up_ma52 = c1 <= s1 and c0 > s0
-    cross_down_ma52 = c1 >= s1 and c0 < s0
-    pullback_hold = c0 > s0 and near(min(c0, c1), s0) and c0 > c1
-    bounce_fail = c0 < s0 and near(max(c0, c1), s0) and c0 < c1
-    bull_align = f0 > m0 > s0
-    bear_align = f0 < m0 < s0
-    reclaim_ma7 = c1 <= f1 and c0 > f0
-    lose_ma7 = c1 >= f1 and c0 < f0
-
-    if ma52_turn_up and cross_up_ma52 and f0 > m0:
-        return POSITION_SIZE
-    if pullback_hold and f0 > m0:
-        return POSITION_SIZE
-    if bull_align and reclaim_ma7:
-        return POSITION_SIZE
-
-    if ma52_turn_down and cross_down_ma52 and f0 < m0:
-        return -POSITION_SIZE
-    if bounce_fail and f0 < m0:
-        return -POSITION_SIZE
-    if bear_align and lose_ma7:
-        return -POSITION_SIZE
-
-    return None
-
-
 def main() -> None:
-    root = Path(__file__).resolve().parents[1]
-    load_dotenv(root / ".env")
+    load_dotenv(ROOT / ".env")
     user = os.environ.get("TQ_USER", "").strip()
     password = os.environ.get("TQ_PASS", "").strip()
     if not user or not password:
         raise SystemExit("缺少 TQ_USER / TQ_PASS，请先配置项目根目录 .env")
 
-    print(f"启动 Falcon（格兰维尔 MA{MA_FAST}/{MA_MID}/{MA_SLOW}）回测: {SYMBOL}", flush=True)
+    print(f"启动 Falcon v2 回测: 信号={SIGNAL_SYMBOL}", flush=True)
     print(f"区间: {START_DT} ~ {END_DT}（{FLAT_DATE} 起强制清仓）", flush=True)
-    print(f"Web UI: http://127.0.0.1{WEB_GUI}", flush=True)
+    print(
+        f"仓位映射: {LOT_BY_SIGNAL} | 交易跟主力 underlying | Web UI: http://127.0.0.1{WEB_GUI}",
+        flush=True,
+    )
+
+    init_balance = 20_000_000
+    sim = TqSim(init_balance=init_balance)
+
+    archive: BacktestArchive | None = None
+    if ENABLE_ARCHIVE:
+        archive = BacktestArchive(
+            strategy_name="Falcon v2",
+            symbol=SIGNAL_SYMBOL,
+            backtest_start=START_DT,
+            backtest_end=END_DT,
+            init_balance=init_balance,
+            sim_account=sim,
+        )
+        print(f"回测存档已启用，结束后写入: {archive.default_path()}", flush=True)
 
     api = TqApi(
-        TqSim(init_balance=20_000_000),
+        sim,
         backtest=TqBacktest(start_dt=START_DT, end_dt=END_DT),
         web_gui=WEB_GUI,
         auth=TqAuth(user, password),
     )
 
+    # 手数放大后略收紧止损、加长冷却，避免单笔回撤与连续亏损叠加
+    risk = RiskManager(sl_atr_mult=1.3, tp_atr_mult=2.3, cooldown_bars=4)
+
+    trade_symbol = ""
+    target_pos: TargetPosTask | None = None
+    position = None
+    current_target = 0
+
     try:
-        api.get_quote(SYMBOL)
-        klines = api.get_kline_serial(SYMBOL, KLINE_SECONDS, data_length=200)
-        target_pos = TargetPosTask(api, SYMBOL)
-        current_target = 0
+        main_quote = api.get_quote(SIGNAL_SYMBOL)
+        klines = api.get_kline_serial(SIGNAL_SYMBOL, KLINE_SECONDS, data_length=400)
         last_progress_day = None
+        end_flat_announced = False
 
         while True:
             api.wait_update()
+            if archive is not None:
+                archive.poll(api)
+
             if not api.is_changing(klines.iloc[-1], "datetime"):
                 continue
 
-            close = klines.close.to_numpy(dtype=float)
-            ma7 = klines.close.rolling(MA_FAST).mean().to_numpy(dtype=float)
-            ma14 = klines.close.rolling(MA_MID).mean().to_numpy(dtype=float)
-            ma52 = klines.close.rolling(MA_SLOW).mean().to_numpy(dtype=float)
+            underlying = str(getattr(main_quote, "underlying_symbol", "") or "")
+            if not underlying:
+                continue
 
-            klines["ma7"] = ma7
-            klines["ma14"] = ma14
-            klines["ma52"] = ma52
+            # 主力换月：先平旧合约，再切换 TargetPosTask
+            if underlying != trade_symbol:
+                if target_pos is not None and (current_target != 0 or (position is not None and int(position.pos) != 0)):
+                    print(
+                        f"主力换月 {trade_symbol} -> {underlying}，先平旧仓",
+                        flush=True,
+                    )
+                    if archive is not None:
+                        archive.tag_next(
+                            risk.state.entry_signal or 0,
+                            note=f"主力换月平仓 {trade_symbol}->{underlying}",
+                        )
+                    current_target = 0
+                    target_pos.set_target_volume(0)
+                    risk.on_flat()
+                trade_symbol = underlying
+                target_pos = TargetPosTask(api, trade_symbol)
+                position = api.get_position(trade_symbol)
+                print(f"交易合约切换为 {trade_symbol}", flush=True)
+
+            assert target_pos is not None and position is not None
+
+            ind = compute_indicators(klines)
+            klines["ma7"] = ind.ma7
+            klines["ma14"] = ind.ma14
+            klines["ma52"] = ind.ma52
+            klines["adx"] = ind.adx
+            klines["atr"] = ind.atr
+            klines["kdj_k"] = ind.k
+            klines["kdj_d"] = ind.d
 
             dt = datetime.datetime.fromtimestamp(int(klines.iloc[-1]["datetime"]) // 1_000_000_000)
-            # 无新开平仓时也按日打印进度，避免 web_gui 停在最后一笔成交时误以为卡死
+            regime = detect_regime(ind)
+            detail = score_signal(ind)
+            atr = float(ind.atr[-1]) if ind.atr[-1] == ind.atr[-1] else 0.0
+            net_pos = int(position.pos)
+
+            risk.tick_cooldown()
+
             if last_progress_day != dt.date():
                 last_progress_day = dt.date()
                 print(
-                    f"{dt.date()} 推进中 | 持仓目标={current_target} close={close[-1]:.2f}",
+                    f"{dt.date()} 推进 | {trade_symbol} regime={regime.value} "
+                    f"signal={detail.signal} ({detail.parts}) target={current_target} "
+                    f"net={net_pos} close={ind.close[-1]:.2f}",
                     flush=True,
                 )
 
-            # 回测结束前清仓，并不再接受新信号
+            # 回测周期最后交易日起：按真实持仓强制平仓，直到净仓为 0
             if dt.date() >= FLAT_DATE:
-                if current_target != 0:
-                    print(f"{dt} 回测结束前清仓 -> 0", flush=True)
+                if net_pos != 0 or current_target != 0:
+                    print(
+                        f"{dt} 期末强制平仓 | {trade_symbol} net={net_pos} "
+                        f"target={current_target} -> 0",
+                        flush=True,
+                    )
+                    if archive is not None:
+                        archive.tag_next(
+                            risk.state.entry_signal or detail.signal,
+                            regime=regime.value,
+                            parts=detail.parts,
+                            note="期末强制平仓",
+                        )
                     current_target = 0
                     target_pos.set_target_volume(0)
+                    risk.on_flat()
+                elif not end_flat_announced:
+                    print(
+                        f"{dt.date()} 已到回测期末且净仓为 0（强制平仓完成）",
+                        flush=True,
+                    )
+                    end_flat_announced = True
                 continue
 
-            new_target = decide_target(close, ma7, ma14, ma52)
-            if new_target is None or new_target == current_target:
+            # 持仓风控优先
+            if current_target != 0:
+                action = risk.check(
+                    current_target,
+                    float(ind.high[-1]),
+                    float(ind.low[-1]),
+                    float(ind.close[-1]),
+                )
+                if action != RiskAction.NONE:
+                    print(
+                        f"{dt} 风控{action.value} 清仓 | "
+                        f"sl={risk.state.stop_price} tp={risk.state.take_price} atr={atr:.2f}",
+                        flush=True,
+                    )
+                    if archive is not None:
+                        archive.tag_next(
+                            risk.state.entry_signal,
+                            regime=regime.value,
+                            parts=detail.parts,
+                            note=f"风控{action.value}",
+                        )
+                    risk.trigger(action)
+                    current_target = 0
+                    target_pos.set_target_volume(0)
+                    continue
+
+            if risk.in_cooldown:
                 continue
 
-            current_target = new_target
+            desired = lots_from_signal(detail.signal, regime)
+            if desired is None or desired == current_target:
+                continue
+
+            prev = current_target
+            current_target = desired
+            if archive is not None:
+                archive.tag_next(
+                    detail.signal,
+                    regime=regime.value,
+                    parts=detail.parts,
+                    note=f"调仓 {prev}->{current_target}",
+                )
+            target_pos.set_target_volume(current_target)
             print(
-                f"{dt} 信号目标持仓={current_target} "
-                f"close={close[-1]:.2f} ma7={ma7[-1]:.2f} ma14={ma14[-1]:.2f} ma52={ma52[-1]:.2f}",
+                f"{dt} 调仓 {prev}->{current_target} | {trade_symbol} "
+                f"regime={regime.value} signal={detail.signal} ({detail.parts}) atr={atr:.2f}",
                 flush=True,
             )
-            target_pos.set_target_volume(current_target)
+
+            if current_target == 0:
+                risk.on_flat()
+            else:
+                risk.on_entry(current_target, float(ind.close[-1]), atr, detail.signal)
+                print(
+                    f"  入场风险 sl={risk.state.stop_price:.2f} tp={risk.state.take_price:.2f}",
+                    flush=True,
+                )
 
     except BacktestFinished:
+        try:
+            final_net = int(api.get_position(trade_symbol).pos) if trade_symbol else 0
+        except Exception:
+            final_net = current_target
         print(
-            "回测结束（结束前已按约定清仓）。可刷新 http://127.0.0.1:9876 查看报表。",
+            f"回测结束 | 交易合约={trade_symbol or '-'} 最终净仓={final_net}"
+            f"（期末强制平仓日={FLAT_DATE}）。",
+            flush=True,
+        )
+        if archive is not None:
+            try:
+                xlsx = archive.save(api)
+                print(
+                    f"回测存档已生成（{archive.trade_count} 笔成交）: {xlsx}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(f"回测存档写入失败: {exc}", flush=True)
+        # web_gui 跑在同一事件循环上：结束后必须继续 wait_update 保活，
+        # 不能 time.sleep，否则页面会僵死（Listen 但 HTTP 超时僵死）。
+        print(
+            "UI 保活中，请刷新 http://127.0.0.1:9876 查看报表；按 Ctrl+C 退出。",
             flush=True,
         )
         try:
             while True:
-                time.sleep(3600)
+                try:
+                    api.wait_update()
+                except BacktestFinished:
+                    try:
+                        api._loop.run_until_complete(__import__("asyncio").sleep(0.25))
+                    except Exception:
+                        time.sleep(0.25)
         except KeyboardInterrupt:
             print("退出回测进程。", flush=True)
     finally:

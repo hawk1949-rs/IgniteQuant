@@ -49,13 +49,29 @@ api = TqApi(
 
 ## 策略回测
 
+### 回测存档（可插拔）
+
+- 模块：`common/backtest_archive.py`（`BacktestArchive`）
+- 用途：回测结束后在**桌面**生成 Excel（对账单风格成交明细 + 信号强度）
+- **非强制**：策略按需 `import`；未接入则不影响回测
+- 概要页：策略名称、品种/合约、回测启动时间、区间、成交笔数、初始/期末资金、累计平仓盈亏与手续费等
+- 说明：`get_account()` 的平仓盈亏/手续费是**当日截面**；累计值从 `TqSim.trade_log` / `tqsdk_stat` 汇总（接入时传 `sim_account=` + `init_balance=`）
+- 明细「平仓盈亏」：天勤 `Trade` 无该字段，存档模块按开平 **FIFO + 合约乘数** 回算
+- 概要保证金：同时写 **期末 / 峰值 / 占用日均**（期末空仓时峰值为准）
+- 明细页：成交时间/合约/买卖/开平/手数/成交价/手续费/平仓盈亏/**信号强度**/行情状态/备注
+- 接入要点：下单前 `tag_next(signal_strength=...)`；每轮 `poll(api)`；结束 `save(api)`
+- Falcon 示例开关：`strategies/falcon_au_backtest.py` 中 `ENABLE_ARCHIVE = True`
+- 依赖：`openpyxl`（已写入 `requirements.txt`）
+- 默认文件名：`回测_{策略}_{品种}_{启动时间}.xlsx`；可用 `save_dir=` / `save(path=...)` 改路径
+
 ### 回测 Web UI 固定地址（全局约定）
 
 - 所有带界面的回测统一固定：`web_gui=":9876"`
 - 浏览器访问域名/地址固定为：**http://127.0.0.1:9876**
 - 不要用 `web_gui=True`（会随机端口，地址不稳定）
 - 若 9876 被占用：先结束旧回测进程，再启动新回测
-- web_gui 常停在「最后一笔成交」：后台可能已继续推进或已 `BacktestFinished`；无新信号时图表不再跳动，属正常
+- web_gui 常停在「最后一笔成交」：无新信号时图表不再跳动，属正常
+- 回测结束后必须继续 `api.wait_update()` 保活 UI，**禁止**只用 `time.sleep`（会阻塞事件循环，导致页面 Listen 但 HTTP 超时僵死）
 
 ### 现有策略
 
@@ -63,9 +79,16 @@ api = TqApi(
   - 合约默认 `SHFE.au2606`，区间 `2026-01-01` ~ `2026-05-31`
   - Web UI：http://127.0.0.1:9876
   - 凭证读 `.env`；运行：`python strategies/vwap_au_backtest.py`
-- Falcon（格兰维尔均线）：`strategies/falcon_au_backtest.py`
-  - 均线：`MA7 / MA14 / MA52`（1 小时 K）；主均线 MA52，短中期 MA7/MA14 确认
-  - 合约与区间同 VWAP：`SHFE.au2606`，`2026-01-01` ~ `2026-05-31`
-  - 结束日前最后一个交易日起强制 `set_target_volume(0)` 清仓
+- Falcon v2：`strategies/falcon_au_backtest.py` + 包 `strategies/falcon/`
+  - 模块：`indicators` / `regime` / `score` / `sizing` / `risk`
+  - 行情状态：ADX(14)≥25 为趋势，结合 MA52 得 `TREND_UP`/`TREND_DOWN`，否则 `RANGE`（震荡不开新仓）
+  - 信号：`[-3,3]`，分项=格兰维尔 + 放量 + KDJ（冲突降权）
+  - 手数映射：`{1:5, 2:12, 3:20}`（可用 `LOT_SCALE` 再缩放；约 2000 万账户峰值风险度 ~4%；仅趋势同向开仓）
+  - 风控：ATR(14)×1.3 止损、×2.3 止盈，触发后冷却 4 根 K（手数放大后用于平衡风险）
+  - 信号合约：`KQ.m@SHFE.au`（主力连续）；区间：`2025-01-01` ~ `2025-06-30`（按需改 `START_DT`/`END_DT`）
+  - 交易合约：跟随 `quote.underlying_symbol`（TqSim **不能**对 `KQ.m@` 下单；换月时先平旧仓再切 TargetPosTask）
   - Web UI：http://127.0.0.1:9876
+  - 期末强制平仓：自 `FLAT_DATE`（结束日前最后一个交易日）起，按 `position.pos` 持续 `set_target_volume(0)` 直至净仓为 0
+  - 回测结束后继续 `wait_update()` 保活 UI
   - 运行：`python strategies/falcon_au_backtest.py`
+  - 约 18 个月 1H K 线，跑完可能需数分钟到十几分钟；日志出现「推进」即在正常推进
