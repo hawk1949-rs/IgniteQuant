@@ -1,0 +1,19 @@
+{
+  "name": "llmquant",
+  "owner": {
+    "name": "LLMQuant",
+    "url": "https://llmquant.com"
+  },
+  "description": "Finance research, trading, risk, and portfolio Agent Skills grounded in LLMQuant Data.",
+  "version": "0.1.0",
+  "plugins": [
+    {
+      "name": "llmquant-skills",
+      "source": ".",
+      "description": "All LLMQuant category skills bundled as one plugin: equities, ETFs, options, equity-derivatives, commodities, crypto, prediction-markets, macro, credit, rates/FX, events, portfolio, portfolio-lab, risk, strategies, market-intelligence, investor-lenses, and data.",
+      "version": "0.1.0",
+      "homepage": "https://github.com/LLMQuant/skills",
+      "license": "MIT"
+    }
+  ]
+}

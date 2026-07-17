@@ -2,6 +2,9 @@
 .env
 *.local.py
 
+# 回测跑批结果（保留目录）
+data/backtest_runs/*.json
+
 # Python
 __pycache__/
 *.py[cod]
@@ -9,6 +12,12 @@ __pycache__/
 .venv/
 venv/
 .env.venv/
+
+# Node / 前端
+web/node_modules/
+web/dist/
+node_modules/
+dist/
 
 # IDE / OS
 .idea/

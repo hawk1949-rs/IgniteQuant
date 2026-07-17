@@ -50,9 +50,11 @@ def load_dotenv(path: Path) -> None:
 
 SIGNAL_SYMBOL = "KQ.m@SHFE.au"
 START_DT = datetime.date(2025, 1, 1)
-END_DT = datetime.date(2025, 6, 30)
+END_DT = datetime.date(2025, 2, 28)
 KLINE_SECONDS = 60 * 60
 WEB_GUI = ":9876"
+# 回测模拟账户初始资金（与 falcon.sizing 手数刻度配套）
+INIT_BALANCE = 1_000_000
 # 设为 False 可关闭本次回测的 Excel 存档（模块本身仍可被其它策略接入）
 ENABLE_ARCHIVE = True
 
@@ -76,12 +78,12 @@ def main() -> None:
     print(f"启动 Falcon v2 回测: 信号={SIGNAL_SYMBOL}", flush=True)
     print(f"区间: {START_DT} ~ {END_DT}（{FLAT_DATE} 起强制清仓）", flush=True)
     print(
-        f"仓位映射: {LOT_BY_SIGNAL} | 交易跟主力 underlying | Web UI: http://127.0.0.1{WEB_GUI}",
+        f"账户初始资金: {INIT_BALANCE:,.0f} | 仓位映射: {LOT_BY_SIGNAL} | "
+        f"交易跟主力 underlying | Web UI: http://127.0.0.1{WEB_GUI}",
         flush=True,
     )
 
-    init_balance = 20_000_000
-    sim = TqSim(init_balance=init_balance)
+    sim = TqSim(init_balance=INIT_BALANCE)
 
     archive: BacktestArchive | None = None
     if ENABLE_ARCHIVE:
@@ -90,7 +92,7 @@ def main() -> None:
             symbol=SIGNAL_SYMBOL,
             backtest_start=START_DT,
             backtest_end=END_DT,
-            init_balance=init_balance,
+            init_balance=INIT_BALANCE,
             sim_account=sim,
         )
         print(f"回测存档已启用，结束后写入: {archive.default_path()}", flush=True)
