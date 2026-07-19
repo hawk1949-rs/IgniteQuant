@@ -5,6 +5,18 @@
 # 回测跑批结果（保留目录）
 data/backtest_runs/*.json
 
+# Phase 4 运行时 SQLite（保留目录，忽略库文件）
+data/runtime/*.sqlite
+data/runtime/*.sqlite-*
+
+# Phase 6 研究报告输出
+data/research/*.json
+
+# 本地行情缓存（CSV 体积大，用 tools/download_market_cache.py 拉）
+data/market_cache/**/*.csv
+data/market_cache/**/*.meta.json
+data/market_cache/download_log.txt
+
 # Python
 __pycache__/
 *.py[cod]

@@ -1,0 +1,40 @@
+{
+  "profile_id": "falcon_5m_half_v1",
+  "decision_mode": "calibrated_5m",
+  "config_version": "falcon_5m_half_v1",
+  "description": "候选：周期按 6×（完整 12× 的一半）缩放并封顶 ma_slow=200。比 sqrt 更偏墙钟时间，需更长预热。",
+  "status": "candidate",
+  "scale_method": "half_wallclock",
+  "scale_factor": 6,
+  "rollback_to": "falcon_legacy_v1",
+  "factor": {
+    "warmup_bars": 200,
+    "subscription_bars": 800,
+    "ma_fast": 42,
+    "ma_mid": 84,
+    "ma_slow": 200,
+    "atr_period": 84,
+    "adx_period": 84,
+    "adx_threshold": 22.0,
+    "vol_ma_period": 120,
+    "kdj_n": 54,
+    "kline_seconds": 300
+  },
+  "signal": {
+    "model_version": "falcon_score_legacy_v1",
+    "confirmation_bars": 3,
+    "signal_ttl_bars": 3
+  },
+  "sizing": {
+    "mode": "legacy_fixed_lot",
+    "lot_scale": 1,
+    "lot_by_signal": {"1": 1, "2": 1, "3": 1}
+  },
+  "risk": {
+    "sl_atr_mult": 1.4,
+    "tp_atr_mult": 2.5,
+    "cooldown_bars": 24,
+    "max_bar_delay_seconds": 30.0,
+    "max_symbol_lots": 3
+  }
+}

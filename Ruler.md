@@ -1,5 +1,22 @@
 # IgniteQuant 开发指引
 
+## 架构说明书（给 AI / 人工审阅）
+
+- 核心逻辑与边界：`docs/ARCHITECTURE.md`
+- **项目能力与数据清单（给人看）**：`docs/PROJECT_CAPABILITIES.md`
+- 工业级重构大框架：`docs/falcon2大框架.md`
+- 决策链 SOP 补充（因子/信号/仓位/风控）：`docs/falocn2小框架.md`
+- Phase 0 行为冻结基线：`docs/falcon_phase0_baseline.md`
+- Phase 1 包/领域/配置交付：`docs/falcon_phase1_delivery.md`
+- Phase 2 统一决策循环：`docs/falcon_phase2_delivery.md`
+- Phase 3 风控/执行/状态机：`docs/falcon_phase3_delivery.md`
+- Phase 4 持久化/恢复/对账：`docs/falcon_phase4_delivery.md`
+- Phase 5 回测真实性/归因/异步看板：`docs/falcon_phase5_delivery.md`
+- Phase 6 5m 参数研究：`docs/falcon_phase6_delivery.md` / `docs/falcon_phase6_research.md`
+- 用途：让 AI 审视架构、参数风险与重构优先级；不是逐步操作手册（操作约定仍以本文为准）
+- 重构阶段顺序：Phase 0 Golden Master → 1 领域/配置 → 2 统一循环 → 3 风控执行 → 4 持久化对账 → 5 回测/看板 → 6 才重标定 5m 参数
+- 当前进度：**Phase 6 研究闭环已完成**（候选档案 + 离线标定 + 上线门禁文档化；**生产默认仍为 `falcon_legacy_v1`**；Golden Master 保持）
+
 ## 外部资料
 
 - Apple Design Skill（同步于 2026-07-17）：`apple-design-skill/` ← https://github.com/dickwu/apple-design-skill
@@ -60,7 +77,9 @@
 - Falcon 回测：`strategies/falcon_au_backtest.py`（`TqSim` + `TqBacktest`）
 - Falcon 快期模拟盘：`strategies/falcon_au_sim.py`（`TqKq`，实时；`python strategies/falcon_au_sim.py`）
   - Web UI：http://127.0.0.1:9876；Ctrl+C 退出（默认退出前目标仓位归零）
-  - 1H K 线收盘才调仓；盘中每 60s 打心跳
+  - 5 分钟 K 线收盘才调仓；盘中每 60s 打心跳
+  - Phase 4：`ENABLE_PERSISTENCE=True` → `data/runtime/falcon_au_sim.sqlite`（启动对账 + 决策/意图/成交追加写；重启恢复冷却与幂等键）
+  - Phase 6：默认 `falcon_legacy_v1`；候选档案见 `configs/falcon/`；显式 `$env:FALCON_PROFILE='falcon_5m_sqrt_v1'` 才启用（研究报告 `docs/falcon_phase6_research.md`）
   - 策略说明文档（桌面）：`Falcon_v2_沪金策略说明.md`（信号/下单/持仓/风控）
 - 推荐路径：先用 **`TqKq` 快期模拟盘**；银河实盘等账号写入 `.env` + 销售开通白名单后再切 `TqAccount`
 
@@ -89,14 +108,28 @@ api = TqApi(
 
 ## 策略看板（家庭量化作坊）
 
+### 本地行情缓存 + 离线回放（2026-07-18）
+
+- **默认引擎**：看板 / API `engine=local`（可选 `tq` 走天勤在线时光机对照）
+- **品种（4）**：螺纹 `rb` / 沪金 `au` / 沪银 `ag` / 玻璃 `fg`
+  - 信号：`KQ.m@SHFE.rb` / `KQ.m@SHFE.au` / `KQ.m@SHFE.ag` / `KQ.m@CZCE.FG`
+- **缓存目录**：`data/market_cache/<signal>/300.csv`（含 `underlying_symbol` 供换月）
+- **下载**：`python tools/download_market_cache.py --all --start 2023-01-01 --end 2026-07-01`
+  - 或 `--status` 查看覆盖；看板 local 缺缓存时可 `auto_download=true` 自动补拉
+  - **2026-07-18 已缓存**：au/ag/rb/fg 的 5m（约 2023-01-03 → 2026-07-01）；按 6 个月分段拉取并增量 merge，避免 tqsdk 滚动窗口截断到 1 万根
+- **回放**：`src/ignitequant/engine/local_replay.py` —— `FalconDecisionPipeline` + `RollStateMachine` + `LocalSimAccount`（收盘价±滑点即时成交，品种 CostModel）
+- **代码**：`src/ignitequant/market/`（symbols/cache/download）；入口 `dashboard/runners.run_falcon_local`
+- **注意**：LocalSim 贴近但不等同 TqSim 撮合；上线前用 `engine=tq` 做一次对照
+
 ### 新前端（Magic UI + React，2026-07-17）
 
 - 目录：`web/`（Vite + React + TS + Tailwind v4 + Magic UI 组件）
 - 启动后端 API：`uvicorn dashboard.api:app --reload --port 8787` → http://127.0.0.1:8787
 - 启动前端：`cd web && npm run dev` → http://127.0.0.1:5173（`/api` 代理到 8787）
-- 主色：`#0071e3`（浅色；避免 Magic 默认紫粉）；字体 Fraunces + DM Sans
-- 组件：`blur-fade` / `number-ticker` / `magic-card` / `border-beam`（源码在 `web/src/components/ui/`）
-- API：`dashboard/api.py`（`/api/catalog` `/api/runs` `/api/backtest` 笔记/删除）
+- 主色：青色科技风深色界面（`#3dd6ff` / 深底 `#070b12`）；字体统一微软雅黑；无文字动画
+- 回测进度：异步 job 轮询时显示进度条（`progress` / `progress_msg`）
+- 组件：已去掉 BlurFade / NumberTicker / BorderBeam 等动效依赖（源码仍可在 `web/src/components/ui/`）
+- API：`dashboard/api.py` v0.6（`/api/catalog` 含 engines/market_cache；`/api/backtest` 支持 `engine=local|tq`）
 - 依赖：`fastapi` / `uvicorn` 已写入 `requirements.txt`
 
 ### Streamlit 备用入口
@@ -105,8 +138,9 @@ api = TqApi(
 - UI：浅色 HIG 取向（`.streamlit/config.toml` + `dashboard/app.py`）；主色 `#0071e3`；隐藏 Deploy 壳
 - 能力：选策略（Falcon v2）/ 多选标的（沪金·银·铜）→ 无 GUI 批量回测 → 自动打分与复盘建议 → 本地 JSON 对比
 - 结果目录：`data/backtest_runs/*.json`
-- 引擎：`dashboard/runners.py`（`web_gui=False`）
+- 引擎：`dashboard/runners.py`（`web_gui=False`；Phase 5 附带 attribution / stress / reproducibility）
 - 打分：`dashboard/scoring.py`（收益/回撤/夏普/边缘/样本量 → 0–100）
+- Phase 5 异步：`POST /api/backtest` 默认入队（`dashboard/jobs.py` → `data/runtime/backtest_jobs.sqlite`）；前端轮询 `/api/jobs/{id}`；短冒烟可 `sync=true`
 
 ## 策略回测
 
@@ -144,6 +178,7 @@ api = TqApi(
   - 模块：`indicators` / `regime` / `score` / `sizing` / `risk`
   - 行情状态：ADX(14)≥25 为趋势，结合 MA52 得 `TREND_UP`/`TREND_DOWN`，否则 `RANGE`（震荡不开新仓）
   - 信号：`[-3,3]`，分项=格兰维尔 + 放量 + KDJ（冲突降权）
+  - K 线周期：`KLINE_SECONDS = 60 * 5`（5 分钟；回测 / 模拟盘 / 看板 runner 一致）
   - 回测账户：`INIT_BALANCE = 1_000_000`（100 万；见 `falcon_au_backtest.py`）
   - 手数映射：`{1:1, 2:1, 3:1}`（可用 `LOT_SCALE` 再缩放；约 100 万账户峰值风险度 ~4%；仅趋势同向开仓）
   - 风控：ATR(14)×1.3 止损、×2.3 止盈，触发后冷却 4 根 K
@@ -153,4 +188,13 @@ api = TqApi(
   - 期末强制平仓：自 `FLAT_DATE`（结束日前最后一个交易日）起，按 `position.pos` 持续 `set_target_volume(0)` 直至净仓为 0
   - 回测结束后继续 `wait_update()` 保活 UI
   - 运行：`python strategies/falcon_au_backtest.py`
-  - 约 18 个月 1H K 线，跑完可能需数分钟到十几分钟；日志出现「推进」即在正常推进
+  - 5 分钟 K 线回测比 1H 更密，同区间耗时更长；日志出现「推进」即在正常推进
+
+## MetaTrader 5 手工下单看板（2026-07-18）
+
+- 源码：`tools/mt5/实盘下单工具看板.mq5`
+- 已编译：`tools/mt5/实盘下单工具看板.ex5`（同步到本机 MT5 Experts）
+- 安装路径：`%APPDATA%\MetaQuotes\Terminal\E6E3D0917DD641581E4779524EB3B1AA\MQL5\Experts\`
+- 功能：一键平仓/减仓50%·80%/平多空/平盈亏/一键保本(+偏移点)/删挂单/挂多挂空(+止损止盈点数)/点差与浮盈刷新
+- 使用：图表拖入 EA → 开启算法交易 → 允许自动交易；先在模拟盘验证
+- 重编译：`MetaEditor64.exe /compile:"...Experts\实盘下单工具看板.mq5" /include:"...MQL5" /log`

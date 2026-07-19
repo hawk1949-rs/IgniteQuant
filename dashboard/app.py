@@ -18,14 +18,17 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
 
-from dashboard.catalog import STRATEGIES, SYMBOLS
-from dashboard.runners import run_falcon_v2, run_vwap_stub
+from dashboard.catalog import ENGINES, STRATEGIES, SYMBOLS
+from dashboard.runners import run_falcon_local, run_falcon_v2, run_vwap_stub
 from dashboard.scoring import score_metrics
 from dashboard.store import delete_run, list_runs, save_run, update_run
 
 RUNNERS = {
     "run_falcon_v2": run_falcon_v2,
+    "run_falcon_local": run_falcon_local,
     "run_vwap_stub": run_vwap_stub,
 }
 
@@ -242,7 +245,7 @@ def page_run() -> None:
                 " · ".join(f"{SYMBOLS[s].name} `{SYMBOLS[s].signal_symbol}`" for s in symbol_ids)
             )
 
-    d1, d2, d3 = st.columns(3)
+    d1, d2, d3, d4 = st.columns(4)
     with d1:
         start = st.date_input("开始", value=dt.date(2025, 1, 1))
     with d2:
@@ -256,9 +259,16 @@ def page_run() -> None:
             format="%d",
         )
         st.caption(f"约 {_money(float(init_balance))} 元")
+    with d4:
+        engine = st.selectbox(
+            "引擎",
+            options=list(ENGINES.keys()),
+            format_func=lambda k: ENGINES[k],
+            index=0,
+        )
 
     st.markdown(
-        '<p class="iq-hint">建议：短区间试参 → 再跑长区间；一次多选品种做稳健性对比。</p>',
+        '<p class="iq-hint">默认本地缓存回放（快）；天勤在线用于最终对照。缺缓存时 local 会尝试自动下载。</p>',
         unsafe_allow_html=True,
     )
     st.markdown("</div>", unsafe_allow_html=True)
@@ -271,26 +281,32 @@ def page_run() -> None:
         return
 
     strat = STRATEGIES[strategy_id]
-    runner = RUNNERS[strat.runner]
+    if engine == "local" and strat.runner == "run_falcon_v2":
+        runner = RUNNERS["run_falcon_local"]
+    else:
+        runner = RUNNERS[strat.runner]
     progress = st.progress(0.0, text="准备中…")
     status = st.empty()
     results = []
     n = len(symbol_ids)
     for i, sid in enumerate(symbol_ids):
         sym = SYMBOLS[sid]
-        status.info(f"正在计算 {strat.name} × {sym.name}（{i + 1}/{n}）")
+        status.info(f"正在计算 {strat.name} × {sym.name}（{i + 1}/{n} · {engine}）")
 
         def cb(p, msg, _i=i, _n=n, _name=sym.name):
             progress.progress(min((_i + p) / _n, 1.0), text=f"{_name} · {msg}")
 
         try:
-            out = runner(
-                signal_symbol=sym.signal_symbol,
-                start=start,
-                end=end,
-                init_balance=float(init_balance),
-                progress_cb=cb,
-            )
+            kwargs = {
+                "signal_symbol": sym.signal_symbol,
+                "start": start,
+                "end": end,
+                "init_balance": float(init_balance),
+                "progress_cb": cb,
+            }
+            if engine == "local" and strat.runner == "run_falcon_v2":
+                kwargs["auto_download"] = True
+            out = runner(**kwargs)
         except NotImplementedError as e:
             st.warning(str(e))
             continue
@@ -447,7 +463,7 @@ def page_lab() -> None:
         """
 **能做什么**
 1. 选策略（Falcon v2；VWAP 占位）
-2. 选标的：沪金 / 沪银 / 沪铜
+2. 选标的：沪金 / 沪银 / 螺纹 / 玻璃；引擎默认「本地缓存」
 3. 跑回测 → 自动打分（收益 / 回撤 / 夏普 / 胜率盈亏比 / 样本量）
 4. 对比 + 笔记，结果在 `data/backtest_runs/`
 

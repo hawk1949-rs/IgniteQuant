@@ -1,16 +1,17 @@
 @import 'tailwindcss';
 
 @theme {
-  --font-sans: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
-  --font-display: 'Fraunces', Georgia, serif;
-  --color-ink: #1d1d1f;
-  --color-muted: #6e6e73;
-  --color-line: #d2d2d7;
-  --color-blue: #0071e3;
-  --color-blue-soft: #e8f1fc;
-  --color-surface: #f5f5f7;
-  --color-good: #1d7a46;
-  --color-bad: #c41e3a;
+  --font-sans: 'Microsoft YaHei', '微软雅黑', 'PingFang SC', 'Noto Sans SC', sans-serif;
+  --font-display: 'Microsoft YaHei', '微软雅黑', 'PingFang SC', 'Noto Sans SC', sans-serif;
+  --color-ink: #e8edf5;
+  --color-muted: #8b9bb4;
+  --color-line: #243044;
+  --color-blue: #3dd6ff;
+  --color-blue-soft: rgba(61, 214, 255, 0.12);
+  --color-surface: #121a27;
+  --color-panel: #0d1420;
+  --color-good: #3dd68c;
+  --color-bad: #ff5c7a;
 }
 
 * {
@@ -25,12 +26,21 @@ body,
 
 body {
   margin: 0;
-  font-family: var(--font-sans);
+  font-family: 'Microsoft YaHei', '微软雅黑', 'PingFang SC', 'Noto Sans SC', sans-serif;
   color: var(--color-ink);
-  background:
-    radial-gradient(ellipse 80% 50% at 10% -10%, rgba(0, 113, 227, 0.12), transparent 55%),
-    radial-gradient(ellipse 60% 40% at 90% 0%, rgba(100, 210, 255, 0.1), transparent 50%),
-    linear-gradient(180deg, #fbfbfd 0%, #f0f1f4 48%, #e8eaef 100%);
+  background-color: #070b12;
+  background-image:
+    linear-gradient(rgba(61, 214, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(61, 214, 255, 0.04) 1px, transparent 1px),
+    radial-gradient(ellipse 70% 45% at 15% -5%, rgba(61, 214, 255, 0.14), transparent 55%),
+    radial-gradient(ellipse 50% 35% at 90% 10%, rgba(64, 120, 255, 0.1), transparent 50%),
+    linear-gradient(180deg, #070b12 0%, #0a101a 50%, #070b12 100%);
+  background-size:
+    48px 48px,
+    48px 48px,
+    auto,
+    auto,
+    auto;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -39,8 +49,22 @@ input,
 select,
 textarea {
   font: inherit;
+  color: inherit;
+}
+
+input[type='date'],
+input[type='number'],
+select,
+textarea {
+  color-scheme: dark;
 }
 
 ::selection {
-  background: rgba(0, 113, 227, 0.18);
+  background: rgba(61, 214, 255, 0.28);
+}
+
+/* Native controls on dark panels */
+option {
+  background: #121a27;
+  color: #e8edf5;
 }

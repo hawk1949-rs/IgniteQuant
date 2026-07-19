@@ -1,0 +1,3 @@
+# Runtime SQLite (Phase 4) — keep directory, ignore DB files
+*
+!.gitkeep

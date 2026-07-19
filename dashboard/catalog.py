@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ignitequant.market.symbols import INSTRUMENTS
+
 
 @dataclass(frozen=True)
 class StrategyInfo:
@@ -26,7 +28,7 @@ STRATEGIES: dict[str, StrategyInfo] = {
     "falcon_v2": StrategyInfo(
         id="falcon_v2",
         name="Falcon v2",
-        description="ADX 行情状态 + 格兰维尔/量能/KDJ 评分 + ATR 止盈止损（1H）",
+        description="ADX 行情状态 + 格兰维尔/量能/KDJ 评分 + ATR 止盈止损（5 分钟）",
         runner="run_falcon_v2",
     ),
     "vwap_au": StrategyInfo(
@@ -37,8 +39,18 @@ STRATEGIES: dict[str, StrategyInfo] = {
     ),
 }
 
+# Local-cache first instruments: 螺纹 / 沪金 / 沪银 / 玻璃
 SYMBOLS: dict[str, SymbolInfo] = {
-    "au": SymbolInfo("au", "沪金", "KQ.m@SHFE.au", "SHFE"),
-    "ag": SymbolInfo("ag", "沪银", "KQ.m@SHFE.ag", "SHFE"),
-    "cu": SymbolInfo("cu", "沪铜", "KQ.m@SHFE.cu", "SHFE"),
+    sid: SymbolInfo(
+        id=spec.id,
+        name=spec.name,
+        signal_symbol=spec.signal_symbol,
+        exchange=spec.exchange,
+    )
+    for sid, spec in INSTRUMENTS.items()
+}
+
+ENGINES = {
+    "local": "本地缓存回放（默认，含换月 + LocalSim）",
+    "tq": "天勤 TqBacktest 在线时光机",
 }

@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Falcon v2 无界面回测引擎（供看板批量调用）。"""
+"""Falcon v2 无界面回测引擎（供看板批量调用）。
+
+决策核：FalconDecisionPipeline
+执行层：TargetPositionExecutor + RiskEngine（小框架 SOP5 / Phase 3）
+"""
 
 from __future__ import annotations
 
 import datetime as dt
+import math
 import os
 import sys
 import time
@@ -15,15 +20,28 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 if str(ROOT / "strategies") not in sys.path:
     sys.path.insert(0, str(ROOT / "strategies"))
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
 
-from falcon import (  # noqa: E402
-    RiskAction,
-    RiskManager,
-    compute_indicators,
-    detect_regime,
-    lots_from_signal,
-    score_signal,
+from ignitequant.analytics import (
+    attribute_fills,
+    default_cost_model,
+    fills_from_tq_trade_log,
+    run_cost_stress,
+    stress_summary,
 )
+from ignitequant.config import DecisionConfig, default_decision_config
+from ignitequant.domain.enums import RiskAction
+from ignitequant.engine import (
+    FalconDecisionPipeline,
+    apply_pretrade,
+    atr_of,
+    close_of,
+    healthy_runtime,
+    make_risk_engine,
+)
+from ignitequant.execution import RollStateMachine, TargetPositionExecutor
+import ignitequant as _iq
 
 
 def load_dotenv(path: Path) -> None:
@@ -43,7 +61,91 @@ def _last_business_day_on_or_before(d: dt.date) -> dt.date:
     return d
 
 
-def _extract_metrics(sim: Any, trade_count: int, init_balance: float) -> dict[str, Any]:
+def _finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _sharpe_from_daily_balances(
+    balances: list[float],
+    *,
+    init_balance: float,
+    risk_free_annual: float = 0.025,
+    trading_days_of_year: int = 250,
+) -> float | None:
+    """Annualized Sharpe from end-of-day equity (aligned with tqsdk get_sharp)."""
+    if len(balances) < 2:
+        return None
+    prev = float(init_balance) if init_balance > 0 else balances[0]
+    if prev <= 0:
+        return None
+    yields: list[float] = []
+    for bal in balances:
+        if prev <= 0:
+            return None
+        yields.append(bal / prev - 1.0)
+        prev = bal
+    if len(yields) < 2:
+        return None
+    mean = sum(yields) / len(yields)
+    var = sum((y - mean) ** 2 for y in yields) / len(yields)
+    std = math.sqrt(var)
+    if std <= 1e-12:
+        return None
+    rf_daily = (1.0 + risk_free_annual) ** (1.0 / trading_days_of_year) - 1.0
+    sharpe = math.sqrt(trading_days_of_year) * (mean - rf_daily) / std
+    return _finite_float(sharpe)
+
+
+def _balances_from_trade_log(trade_log: Any) -> list[float]:
+    if not isinstance(trade_log, dict) or not trade_log:
+        return []
+    out: list[float] = []
+    for day in sorted(trade_log.keys()):
+        account = (trade_log.get(day) or {}).get("account") or {}
+        bal = _finite_float(account.get("balance"))
+        if bal is not None:
+            out.append(bal)
+    return out
+
+
+def _sharpe_fallback_from_summary(
+    *,
+    ror: float | None,
+    annual_yield: float | None,
+    max_drawdown: float | None,
+    start: dt.date | None = None,
+    end: dt.date | None = None,
+) -> float | None:
+    """When daily equity is unavailable, approximate vol from max drawdown."""
+    ay = annual_yield
+    if ay is None and ror is not None and start and end and end > start:
+        years = max((end - start).days / 365.25, 1 / 365.25)
+        ay = (1.0 + float(ror)) ** (1.0 / years) - 1.0
+    dd = abs(float(max_drawdown)) if max_drawdown is not None else None
+    if ay is None or dd is None or dd < 1e-8:
+        return None
+    # Conservative proxy: treat max drawdown as annualized vol scale.
+    vol_ann = max(dd, 1e-4)
+    approx = _finite_float((float(ay) - 0.025) / vol_ann)
+    if approx is None:
+        return None
+    # Clamp absurd proxies from tiny-DD short samples.
+    return max(-5.0, min(5.0, approx))
+
+
+def _extract_metrics(
+    sim: Any,
+    trade_count: int,
+    init_balance: float,
+    *,
+    start: dt.date | None = None,
+    end: dt.date | None = None,
+    trade_log: Any = None,
+) -> dict[str, Any]:
     metrics: dict[str, Any] = {
         "init_balance": init_balance,
         "trade_count": trade_count,
@@ -55,39 +157,48 @@ def _extract_metrics(sim: Any, trade_count: int, init_balance: float) -> dict[st
         "profit_loss_ratio": None,
         "final_balance": None,
     }
-    stat = getattr(sim, "tqsdk_stat", None)
-    if isinstance(stat, dict):
-        for k in (
-            "ror",
-            "annual_yield",
-            "max_drawdown",
-            "sharpe",
-            "winning_rate",
-            "profit_loss_ratio",
-        ):
-            if k in stat:
-                try:
-                    metrics[k] = float(stat[k])
-                except Exception:
-                    pass
-        if "balance" in stat:
-            try:
-                metrics["final_balance"] = float(stat["balance"])
-            except Exception:
-                pass
-    if metrics["final_balance"] is None:
-        try:
-            # 兜底：从 trade_log 末日权益
-            trade_log = getattr(sim, "trade_log", None)
-            if isinstance(trade_log, dict) and trade_log:
-                last_day = sorted(trade_log.keys())[-1]
-                acc = (trade_log[last_day] or {}).get("account") or {}
-                if "balance" in acc:
-                    metrics["final_balance"] = float(acc["balance"])
-        except Exception:
-            pass
-    if metrics["ror"] is None and metrics["final_balance"] is not None and init_balance:
+    try:
+        acc = sim.get_account()
+        metrics["final_balance"] = float(getattr(acc, "balance", init_balance))
+    except Exception:
+        metrics["final_balance"] = init_balance
+
+    stat = getattr(sim, "tqsdk_stat", None) or {}
+    # tqsdk field is sharpe_ratio; may be NaN → treat as missing.
+    alias = {"sharpe": ("sharpe", "sharpe_ratio")}
+    for key in (
+        "ror",
+        "annual_yield",
+        "max_drawdown",
+        "sharpe",
+        "winning_rate",
+        "profit_loss_ratio",
+    ):
+        candidates = alias.get(key, (key,))
+        for src in candidates:
+            if src in stat and stat[src] is not None:
+                parsed = _finite_float(stat[src])
+                if parsed is not None:
+                    metrics[key] = parsed
+                    break
+
+    if metrics["ror"] is None and metrics["final_balance"] is not None:
         metrics["ror"] = (metrics["final_balance"] - init_balance) / init_balance
+
+    log = trade_log if trade_log is not None else getattr(sim, "trade_log", None)
+    if metrics["sharpe"] is None:
+        metrics["sharpe"] = _sharpe_from_daily_balances(
+            _balances_from_trade_log(log),
+            init_balance=init_balance,
+        )
+    if metrics["sharpe"] is None:
+        metrics["sharpe"] = _sharpe_fallback_from_summary(
+            ror=metrics.get("ror"),
+            annual_yield=metrics.get("annual_yield"),
+            max_drawdown=metrics.get("max_drawdown"),
+            start=start,
+            end=end,
+        )
     return metrics
 
 
@@ -97,12 +208,12 @@ def run_falcon_v2(
     start: dt.date,
     end: dt.date,
     init_balance: float = 1_000_000,
-    kline_seconds: int = 3600,
+    kline_seconds: int = 300,
     data_length: int = 400,
     progress_cb=None,
 ) -> dict[str, Any]:
     """跑完一次 Falcon 回测并返回指标（无 web_gui，结束后立即关闭）。"""
-    from tqsdk import BacktestFinished, TargetPosTask, TqApi, TqAuth, TqBacktest, TqSim
+    from tqsdk import BacktestFinished, TqApi, TqAuth, TqBacktest, TqSim
 
     load_dotenv(ROOT / ".env")
     user = os.environ.get("TQ_USER", "").strip()
@@ -111,6 +222,20 @@ def run_falcon_v2(
         raise RuntimeError("缺少 TQ_USER / TQ_PASS，请配置项目根目录 .env")
 
     flat_date = _last_business_day_on_or_before(end)
+    cfg = DecisionConfig(entry_mode="fill_confirmed")
+    # Keep legacy risk/sizing numbers; only entry_mode changes for Phase 3 runners.
+    base = default_decision_config()
+    cfg = DecisionConfig(
+        decision_mode=base.decision_mode,
+        entry_mode="fill_confirmed",
+        config_version=base.config_version,
+        symbol=signal_symbol,
+        factor=base.factor,
+        signal=base.signal,
+        sizing=base.sizing,
+        risk=base.risk,
+    )
+
     sim = TqSim(init_balance=init_balance)
     api = TqApi(
         sim,
@@ -119,13 +244,15 @@ def run_falcon_v2(
         auth=TqAuth(user, password),
     )
 
-    risk = RiskManager(sl_atr_mult=1.3, tp_atr_mult=2.3, cooldown_bars=4)
+    pipeline = FalconDecisionPipeline(cfg)
+    risk_engine = make_risk_engine(cfg)
+    roll = RollStateMachine()
+    executor: TargetPositionExecutor | None = None
     trade_symbol = ""
-    target_pos: TargetPosTask | None = None
     position = None
-    current_target = 0
     trade_events = 0
     t0 = time.time()
+    trade_log = None
 
     try:
         main_quote = api.get_quote(signal_symbol)
@@ -142,85 +269,121 @@ def run_falcon_v2(
                 continue
 
             if underlying != trade_symbol:
-                if target_pos is not None and (
-                    current_target != 0
-                    or (position is not None and int(position.pos) != 0)
-                ):
-                    current_target = 0
-                    target_pos.set_target_volume(0)
-                    risk.on_flat()
-                    trade_events += 1
+                if trade_symbol and not roll.in_progress:
+                    roll.detect(trade_symbol, underlying)
+                    roll.mark_flattening()
+
+                if executor is not None and trade_symbol:
+                    net_old = int(position.pos) if position is not None else 0
+                    if pipeline.current_target != 0 or net_old != 0:
+                        executor.set_target(
+                            0,
+                            decision_id=f"roll-flat:{trade_symbol}",
+                            current_net=net_old,
+                            urgency="HIGH",
+                            reason_codes=("ROLL_IN_PROGRESS",),
+                        )
+                        pipeline.force_flat()
+                        trade_events += 1
+                        net_old = int(position.pos)
+                    roll.on_old_position(net_old)
+                    if net_old != 0:
+                        continue
+                    try:
+                        roll.complete_switch()
+                    except RuntimeError:
+                        roll.abort_to_idle()
+                    executor.destroy()
+
                 trade_symbol = underlying
-                target_pos = TargetPosTask(api, trade_symbol)
+                executor = TargetPositionExecutor(api, trade_symbol)
                 position = api.get_position(trade_symbol)
+                if roll.in_progress:
+                    roll.abort_to_idle()
 
-            assert target_pos is not None and position is not None
+            assert executor is not None and position is not None
 
-            ind = compute_indicators(klines)
-            bar_dt = dt.datetime.fromtimestamp(int(klines.iloc[-1]["datetime"]) // 1_000_000_000)
-            regime = detect_regime(ind)
-            detail = score_signal(ind)
-            atr = float(ind.atr[-1]) if ind.atr[-1] == ind.atr[-1] else 0.0
+            bar_dt = dt.datetime.fromtimestamp(
+                int(klines.iloc[-1]["datetime"]) // 1_000_000_000
+            )
             net_pos = int(position.pos)
-            risk.tick_cooldown()
+            allow_trade = bar_dt.date() < flat_date
+            result = pipeline.on_bar_close(klines, trade=allow_trade)
 
             if last_progress_day != bar_dt.date():
                 last_progress_day = bar_dt.date()
                 if progress_cb is not None:
-                    # 粗略进度：按日历跨度
                     span = max((end - start).days, 1)
                     done = max((bar_dt.date() - start).days, 0)
                     progress_cb(min(done / span, 0.99), f"{bar_dt.date()} {trade_symbol}")
 
-            if bar_dt.date() >= flat_date:
-                if net_pos != 0 or current_target != 0:
-                    current_target = 0
-                    target_pos.set_target_volume(0)
-                    risk.on_flat()
+            if not allow_trade:
+                if net_pos != 0 or pipeline.current_target != 0:
+                    pipeline.force_flat()
+                    executor.set_target(
+                        0,
+                        decision_id=f"flat-date:{result.bar_id}",
+                        current_net=net_pos,
+                        urgency="HIGH",
+                        reason_codes=("END_FLAT",),
+                    )
                     trade_events += 1
                 continue
 
-            if current_target != 0:
-                action = risk.check(
-                    current_target,
-                    float(ind.high[-1]),
-                    float(ind.low[-1]),
-                    float(ind.close[-1]),
-                )
-                if action != RiskAction.NONE:
-                    risk.trigger(action)
-                    current_target = 0
-                    target_pos.set_target_volume(0)
-                    trade_events += 1
-                    continue
-
-            if risk.in_cooldown:
+            if result.applied_action not in {"STOP_LOSS", "TAKE_PROFIT", "TARGET"}:
                 continue
 
-            desired = lots_from_signal(detail.signal, regime)
-            if desired is None or desired == current_target:
+            pretrade = apply_pretrade(
+                result,
+                net_position=net_pos,
+                last_price=close_of(result),
+                risk_engine=risk_engine,
+                runtime=healthy_runtime(roll_in_progress=roll.in_progress),
+                symbol=trade_symbol,
+            )
+            if pretrade.action in {RiskAction.REJECT, RiskAction.HALT}:
                 continue
 
-            current_target = desired
-            target_pos.set_target_volume(current_target)
+            desired = 0 if result.applied_action in {"STOP_LOSS", "TAKE_PROFIT"} else int(
+                pretrade.approved_position
+            )
+            intent = executor.set_target(
+                desired,
+                decision_id=result.bar_id,
+                current_net=net_pos,
+                urgency="HIGH" if result.applied_action != "TARGET" else "NORMAL",
+                reason_codes=pretrade.rule_hits,
+                idempotency_key=f"{result.bar_id}:{desired}:{result.applied_action}",
+            )
+            if intent is None:
+                continue
             trade_events += 1
-            if current_target == 0:
-                risk.on_flat()
-            else:
-                risk.on_entry(current_target, float(ind.close[-1]), atr, detail.signal)
+            # After TargetPosTask, re-read net; confirm fill when matched.
+            net_after = int(position.pos)
+            executor.poll_position(
+                net_after,
+                last_price=close_of(result),
+                atr=atr_of(result),
+                signal=result.signal.legacy_signal,
+            )
 
     except BacktestFinished:
         pass
     finally:
         elapsed = time.time() - t0
-        metrics = _extract_metrics(sim, trade_events, init_balance)
-        # 成交笔数优先用 tqsdk 统计若可得
+        trade_log = getattr(sim, "trade_log", None)
+        metrics = _extract_metrics(
+            sim,
+            trade_events,
+            init_balance,
+            start=start,
+            end=end,
+            trade_log=trade_log,
+        )
         try:
-            # 粗算：trade_log 里成交条数
             n = 0
-            trade_log = getattr(sim, "trade_log", None)
             if isinstance(trade_log, dict):
-                for day, payload in trade_log.items():
+                for _day, payload in trade_log.items():
                     trades = (payload or {}).get("trades") or {}
                     n += len(trades)
             if n:
@@ -232,6 +395,15 @@ def run_falcon_v2(
     if progress_cb is not None:
         progress_cb(1.0, "完成")
 
+    cost = default_cost_model()
+    fills = fills_from_tq_trade_log(trade_log, default_symbol=trade_symbol)
+    attribution = attribute_fills(fills, cost=cost)
+    stress_rows = run_cost_stress(fills, base=cost) if fills else []
+    metrics["gross_pnl_attr"] = attribution.gross_pnl
+    metrics["fees_attr"] = attribution.fees
+    metrics["net_pnl_attr"] = attribution.net_pnl
+    metrics["slippage_attr"] = attribution.slippage_pnl
+
     return {
         "strategy_id": "falcon_v2",
         "signal_symbol": signal_symbol,
@@ -241,7 +413,50 @@ def run_falcon_v2(
         "init_balance": init_balance,
         "elapsed_sec": round(elapsed, 2),
         "metrics": metrics,
+        "config_version": cfg.config_version,
+        "config_hash": cfg.config_hash(),
+        "entry_mode": cfg.entry_mode,
+        "code_version": getattr(_iq, "__version__", "0.1.0"),
+        "cost_model": cost.to_dict(),
+        "attribution": attribution.to_dict(),
+        "stress": {
+            "rows": stress_rows,
+            "summary": stress_summary(stress_rows),
+        },
+        "reproducibility": {
+            "config_hash": cfg.config_hash(),
+            "cost_model_hash": cost.config_hash(),
+            "kline_seconds": kline_seconds,
+            "data_length": data_length,
+            "entry_mode": cfg.entry_mode,
+        },
     }
+
+
+def run_falcon_local(
+    *,
+    signal_symbol: str,
+    start: dt.date,
+    end: dt.date,
+    init_balance: float = 1_000_000,
+    kline_seconds: int = 300,
+    data_length: int = 400,
+    progress_cb=None,
+    auto_download: bool = True,
+) -> dict[str, Any]:
+    """本地行情缓存 + 离线回放（含换月 / LocalSim 撮合）。"""
+    from ignitequant.engine.local_replay import run_local_falcon_backtest
+
+    return run_local_falcon_backtest(
+        signal_symbol=signal_symbol,
+        start=start,
+        end=end,
+        init_balance=init_balance,
+        kline_seconds=kline_seconds,
+        data_length=data_length,
+        progress_cb=progress_cb,
+        auto_download=auto_download,
+    )
 
 
 def run_vwap_stub(**kwargs) -> dict[str, Any]:

@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """Falcon v2 快期模拟盘入口（TqKq）。
 
-与回测共用同一套信号/风控/手数逻辑，差异：
-- 账户：TqKq（快期模拟盘，实时行情 + 模拟撮合）
-- 无 TqBacktest / 无期末强制平仓
-- 信号：KQ.m@SHFE.au；交易：跟随 quote.underlying_symbol
+决策核：ignitequant.engine.FalconDecisionPipeline（与回测 / 看板共用）。
+执行层：TargetPositionExecutor + RiskEngine（Phase 3）。
+持久化：SQLite WAL + 启动对账（Phase 4，见 ENABLE_PERSISTENCE）。
+- 账户：TqKq；无期末强制平仓
 - Web UI：http://127.0.0.1:9876
 - Ctrl+C 退出（可选先平仓，见 FLAT_ON_EXIT）
 """
@@ -18,23 +18,34 @@ import sys
 import time
 from pathlib import Path
 
-from tqsdk import TargetPosTask, TqApi, TqAuth, TqKq
+from tqsdk import TqApi, TqAuth, TqKq
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 if str(ROOT / "strategies") not in sys.path:
     sys.path.insert(0, str(ROOT / "strategies"))
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
 
-from falcon import (
-    RiskAction,
-    RiskManager,
-    compute_indicators,
-    detect_regime,
-    lots_from_signal,
-    score_signal,
-)
 from falcon.sizing import LOT_BY_SIGNAL
+from ignitequant.config import load_active_decision_config
+from ignitequant.domain.enums import RiskAction
+from ignitequant.domain.models import AccountSnapshot, PositionSnapshot
+from ignitequant.engine import (
+    BrokerFacts,
+    FalconDecisionPipeline,
+    LocalProjection,
+    annotate_klines,
+    apply_pretrade,
+    atr_of,
+    close_of,
+    healthy_runtime,
+    make_risk_engine,
+    score_parts,
+)
+from ignitequant.execution import TargetPositionExecutor
+from ignitequant.persistence import PersistenceSession
 
 
 def load_dotenv(path: Path) -> None:
@@ -49,12 +60,33 @@ def load_dotenv(path: Path) -> None:
 
 
 SIGNAL_SYMBOL = "KQ.m@SHFE.au"
-KLINE_SECONDS = 60 * 60
+KLINE_SECONDS = 60 * 5
 WEB_GUI = ":9876"
-# 退出时是否把目标仓位打到 0（模拟盘建议 True，避免残留挂单目标）
 FLAT_ON_EXIT = True
-# 无新 K 线时，每隔多久打印一次心跳（秒）
 HEARTBEAT_SECONDS = 60
+ENABLE_PERSISTENCE = True
+INSTANCE_ID = "falcon_au_sim"
+PERSIST_DB = ROOT / "data" / "runtime" / "falcon_au_sim.sqlite"
+RECON_EVERY_BARS = 12  # ~1 hour on 5m bars
+
+
+def _persist_state(session: PersistenceSession | None, pipeline: FalconDecisionPipeline, *, symbol: str, net: int, pending: int | None, last_bar_id: str, config_hash: str) -> None:
+    if session is None:
+        return
+    rs = pipeline.risk.state
+    session.save_state(
+        symbol=symbol,
+        current_target=pipeline.current_target,
+        confirmed_net=net,
+        cooldown_left=int(rs.cooldown_left),
+        entry_price=rs.entry_price,
+        stop_price=rs.stop_price,
+        take_price=rs.take_price,
+        entry_signal=rs.entry_signal,
+        pending_desired=pending,
+        last_bar_id=last_bar_id,
+        config_hash=config_hash,
+    )
 
 
 def main() -> None:
@@ -64,10 +96,22 @@ def main() -> None:
     if not user or not password:
         raise SystemExit("缺少 TQ_USER / TQ_PASS，请先配置项目根目录 .env")
 
+    cfg = load_active_decision_config()
+    risk_engine = make_risk_engine(cfg)
+    persist: PersistenceSession | None = None
+    if ENABLE_PERSISTENCE:
+        persist = PersistenceSession.open(
+            PERSIST_DB,
+            instance_id=INSTANCE_ID,
+            strategy_id="falcon_v2",
+        )
+
     print(f"启动 Falcon v2 快期模拟盘: 信号={SIGNAL_SYMBOL}", flush=True)
     print(
-        f"账户=TqKq | 仓位映射={LOT_BY_SIGNAL} | "
-        f"交易跟主力 underlying | Web UI: http://127.0.0.1{WEB_GUI}",
+        f"账户=TqKq | K线={KLINE_SECONDS // 60}分钟 | 仓位映射={LOT_BY_SIGNAL} | "
+        f"config={cfg.config_version} | RiskEngine+Executor | "
+        f"persist={'ON ' + str(PERSIST_DB) if persist else 'OFF'} | "
+        f"Web UI: http://127.0.0.1{WEB_GUI}",
         flush=True,
     )
 
@@ -77,13 +121,12 @@ def main() -> None:
         auth=TqAuth(user, password),
     )
 
-    risk = RiskManager(sl_atr_mult=1.3, tp_atr_mult=2.3, cooldown_bars=4)
-
+    pipeline = FalconDecisionPipeline(cfg)
     trade_symbol = ""
-    target_pos: TargetPosTask | None = None
+    executor: TargetPositionExecutor | None = None
     position = None
-    current_target = 0
     account = api.get_account()
+    bars_since_recon = 0
 
     try:
         main_quote = api.get_quote(SIGNAL_SYMBOL)
@@ -91,7 +134,6 @@ def main() -> None:
         last_progress_day = None
         last_heartbeat = 0.0
 
-        # 等首包行情 / 账户
         api.wait_update(deadline=time.time() + 30)
         print(
             f"登录成功 | 权益={account.balance:.2f} 可用={account.available:.2f} "
@@ -105,31 +147,101 @@ def main() -> None:
         )
         if underlying0:
             trade_symbol = underlying0
-            target_pos = TargetPosTask(api, trade_symbol)
+            executor = TargetPositionExecutor(api, trade_symbol)
             position = api.get_position(trade_symbol)
             print(f"交易合约切换为 {trade_symbol}", flush=True)
 
-            # 启动时对最新已收盘 K 线评估一次，避免干等到下一根 1H 收盘
-            ind0 = compute_indicators(klines)
-            regime0 = detect_regime(ind0)
-            detail0 = score_signal(ind0)
-            atr0 = float(ind0.atr[-1]) if ind0.atr[-1] == ind0.atr[-1] else 0.0
-            desired0 = lots_from_signal(detail0.signal, regime0)
-            print(
-                f"启动评估 | regime={regime0.value} signal={detail0.signal} "
-                f"({detail0.parts}) desired={desired0} atr={atr0:.2f} "
-                f"close={float(ind0.close[-1]):.2f}",
-                flush=True,
-            )
-            if desired0 is not None and desired0 != 0:
-                current_target = desired0
-                target_pos.set_target_volume(current_target)
-                risk.on_entry(current_target, float(ind0.close[-1]), atr0, detail0.signal)
+            if persist is not None:
+                recovery = persist.recover(
+                    BrokerFacts(
+                        symbol=trade_symbol,
+                        net_position=int(position.pos),
+                        equity=float(account.balance),
+                        available=float(account.available),
+                        margin=float(account.margin),
+                    )
+                )
+                payload = recovery.restore_payload
+                pipeline.restore_runtime(
+                    current_target=int(payload.get("current_target", int(position.pos))),
+                    cooldown_left=int(payload.get("cooldown_left", 0)),
+                    entry_price=payload.get("entry_price"),
+                    stop_price=payload.get("stop_price"),
+                    take_price=payload.get("take_price"),
+                    entry_signal=payload.get("entry_signal"),
+                )
+                executor.restore_idempotency_keys(recovery.idempotency_keys)
                 print(
-                    f"启动调仓 0->{current_target} | {trade_symbol} "
-                    f"sl={risk.state.stop_price:.2f} tp={risk.state.take_price:.2f}",
+                    f"启动对账 | state={recovery.runtime_state} matched={recovery.report.matched} "
+                    f"| {recovery.message}",
                     flush=True,
                 )
+                persist.snapshot_position(
+                    PositionSnapshot(symbol=trade_symbol, net_position=int(position.pos)),
+                    source="broker_startup",
+                )
+                persist.snapshot_account(
+                    AccountSnapshot(
+                        account_id="tq_kq",
+                        equity=float(account.balance),
+                        available=float(account.available),
+                        margin=float(account.margin),
+                        margin_ratio=float(getattr(account, "risk_ratio", 0) or 0),
+                    )
+                )
+
+            result0 = pipeline.on_bar_close(klines, trade=True)
+            annotate_klines(klines, result0)
+            if persist is not None:
+                persist.record_decision(result0)
+            print(
+                f"启动评估 | regime={result0.factors.regime.value} "
+                f"signal={result0.signal.legacy_signal} ({score_parts(result0)}) "
+                f"desired={result0.sizing_target} atr={atr_of(result0):.2f} "
+                f"close={close_of(result0):.2f}",
+                flush=True,
+            )
+            runtime0 = persist.runtime if persist is not None else healthy_runtime()
+            if result0.applied_action == "TARGET" and result0.target_after != 0:
+                net0 = int(position.pos)
+                pre0 = apply_pretrade(
+                    result0,
+                    net_position=net0,
+                    last_price=close_of(result0),
+                    risk_engine=risk_engine,
+                    runtime=runtime0,
+                    symbol=trade_symbol,
+                )
+                if persist is not None:
+                    persist.record_risk(result0.bar_id, pre0)
+                if pre0.action not in {RiskAction.REJECT, RiskAction.HALT}:
+                    desired0 = int(pre0.approved_position)
+                    key0 = f"{result0.bar_id}:{desired0}:boot"
+                    intent0 = executor.set_target(
+                        desired0,
+                        decision_id=result0.bar_id,
+                        current_net=net0,
+                        urgency="NORMAL",
+                        reason_codes=pre0.rule_hits,
+                        idempotency_key=key0,
+                    )
+                    if intent0 and persist is not None:
+                        persist.record_intent(intent0)
+                    print(
+                        f"启动调仓 0->{desired0} | {trade_symbol} "
+                        f"sl={pipeline.risk.state.stop_price:.2f} "
+                        f"tp={pipeline.risk.state.take_price:.2f}",
+                        flush=True,
+                    )
+                    _persist_state(
+                        persist,
+                        pipeline,
+                        symbol=trade_symbol,
+                        net=net0,
+                        pending=desired0,
+                        last_bar_id=result0.bar_id,
+                        config_hash=cfg.config_hash(),
+                    )
 
         while True:
             api.wait_update()
@@ -141,8 +253,9 @@ def main() -> None:
                     net = int(position.pos) if position is not None else 0
                     print(
                         f"[心跳] {datetime.datetime.now():%H:%M:%S} "
-                        f"{trade_symbol or '-'} target={current_target} net={net} "
-                        f"balance={account.balance:.2f} last={main_quote.last_price}",
+                        f"{trade_symbol or '-'} target={pipeline.current_target} net={net} "
+                        f"balance={account.balance:.2f} last={main_quote.last_price} "
+                        f"rt={(persist.runtime.runtime_state if persist else 'N/A')}",
                         flush=True,
                     )
                 continue
@@ -152,120 +265,231 @@ def main() -> None:
             if not underlying:
                 continue
 
-            # 主力换月：先平旧合约，再切换 TargetPosTask
             if underlying != trade_symbol:
-                if target_pos is not None and (
-                    current_target != 0
+                if executor is not None and (
+                    pipeline.current_target != 0
                     or (position is not None and int(position.pos) != 0)
                 ):
                     print(
                         f"主力换月 {trade_symbol} -> {underlying}，先平旧仓",
                         flush=True,
                     )
-                    current_target = 0
-                    target_pos.set_target_volume(0)
-                    risk.on_flat()
+                    net_old = int(position.pos) if position is not None else 0
+                    pipeline.force_flat()
+                    intent = executor.set_target(
+                        0,
+                        decision_id=f"roll:{trade_symbol}",
+                        current_net=net_old,
+                        urgency="HIGH",
+                        reason_codes=("ROLL_IN_PROGRESS",),
+                    )
+                    if intent and persist is not None:
+                        persist.record_intent(intent)
+                    if int(position.pos) != 0:
+                        continue
+                    executor.destroy()
                 trade_symbol = underlying
-                target_pos = TargetPosTask(api, trade_symbol)
+                executor = TargetPositionExecutor(api, trade_symbol)
                 position = api.get_position(trade_symbol)
                 print(f"交易合约切换为 {trade_symbol}", flush=True)
 
-            assert target_pos is not None and position is not None
+            assert executor is not None and position is not None
 
-            ind = compute_indicators(klines)
-            klines["ma7"] = ind.ma7
-            klines["ma14"] = ind.ma14
-            klines["ma52"] = ind.ma52
-            klines["adx"] = ind.adx
-            klines["atr"] = ind.atr
-            klines["kdj_k"] = ind.k
-            klines["kdj_d"] = ind.d
-
+            result = pipeline.on_bar_close(klines, trade=True)
+            annotate_klines(klines, result)
+            if persist is not None:
+                persist.record_decision(result)
             dt = datetime.datetime.fromtimestamp(
                 int(klines.iloc[-1]["datetime"]) // 1_000_000_000
             )
-            regime = detect_regime(ind)
-            detail = score_signal(ind)
-            atr = float(ind.atr[-1]) if ind.atr[-1] == ind.atr[-1] else 0.0
             net_pos = int(position.pos)
-
-            risk.tick_cooldown()
+            parts = score_parts(result)
+            atr = atr_of(result)
+            bars_since_recon += 1
 
             if last_progress_day != dt.date():
                 last_progress_day = dt.date()
                 print(
-                    f"{dt.date()} 新交易日 | {trade_symbol} regime={regime.value} "
-                    f"signal={detail.signal} ({detail.parts}) target={current_target} "
-                    f"net={net_pos} close={ind.close[-1]:.2f}",
+                    f"{dt.date()} 新交易日 | {trade_symbol} "
+                    f"regime={result.factors.regime.value} "
+                    f"signal={result.signal.legacy_signal} ({parts}) "
+                    f"target={pipeline.current_target} net={net_pos} "
+                    f"close={close_of(result):.2f}",
                     flush=True,
                 )
             else:
                 print(
-                    f"{dt} K线收盘 | {trade_symbol} regime={regime.value} "
-                    f"signal={detail.signal} ({detail.parts}) target={current_target} "
-                    f"net={net_pos} close={ind.close[-1]:.2f}",
+                    f"{dt} K线收盘 | {trade_symbol} "
+                    f"regime={result.factors.regime.value} "
+                    f"signal={result.signal.legacy_signal} ({parts}) "
+                    f"target={pipeline.current_target} net={net_pos} "
+                    f"close={close_of(result):.2f}",
                     flush=True,
                 )
 
-            # 持仓风控优先
-            if current_target != 0:
-                action = risk.check(
-                    current_target,
-                    float(ind.high[-1]),
-                    float(ind.low[-1]),
-                    float(ind.close[-1]),
+            if persist is not None and bars_since_recon >= RECON_EVERY_BARS:
+                bars_since_recon = 0
+                rt = persist.reconcile_now(
+                    LocalProjection(
+                        symbol=trade_symbol,
+                        expected_net=net_pos,
+                        current_target=pipeline.current_target,
+                        pending_desired=(
+                            executor.active_intent.desired_position
+                            if executor.active_intent
+                            else None
+                        ),
+                        cooldown_left=int(pipeline.risk.state.cooldown_left),
+                        entry_price=pipeline.risk.state.entry_price,
+                        runtime_state=persist.runtime.runtime_state,
+                    ),
+                    BrokerFacts(
+                        symbol=trade_symbol,
+                        net_position=net_pos,
+                        equity=float(account.balance),
+                        available=float(account.available),
+                        margin=float(account.margin),
+                    ),
                 )
-                if action != RiskAction.NONE:
+                if not rt.reconciliation_matched:
+                    print(f"{dt} 周期对账不一致 → DEGRADED", flush=True)
+
+            runtime = persist.runtime if persist is not None else healthy_runtime()
+
+            if result.applied_action not in {"STOP_LOSS", "TAKE_PROFIT", "TARGET"}:
+                _persist_state(
+                    persist,
+                    pipeline,
+                    symbol=trade_symbol,
+                    net=net_pos,
+                    pending=None,
+                    last_bar_id=result.bar_id,
+                    config_hash=cfg.config_hash(),
+                )
+                continue
+
+            pretrade = apply_pretrade(
+                result,
+                net_position=net_pos,
+                last_price=close_of(result),
+                risk_engine=risk_engine,
+                runtime=runtime,
+                symbol=trade_symbol,
+            )
+            if persist is not None:
+                persist.record_risk(result.bar_id, pretrade)
+            if pretrade.action in {RiskAction.REJECT, RiskAction.HALT}:
+                print(
+                    f"{dt} 事前风控{pretrade.action.value} | hits={pretrade.rule_hits}",
+                    flush=True,
+                )
+                continue
+
+            desired = (
+                0
+                if result.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}
+                else int(pretrade.approved_position)
+            )
+            if result.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}:
+                print(
+                    f"{dt} 风控{result.applied_action} 清仓 | "
+                    f"sl={pipeline.risk.state.stop_price} "
+                    f"tp={pipeline.risk.state.take_price} atr={atr:.2f}",
+                    flush=True,
+                )
+            elif result.applied_action == "TARGET":
+                prev = result.target_before
+                print(
+                    f"{dt} 调仓 {prev}->{desired} | {trade_symbol} "
+                    f"regime={result.factors.regime.value} "
+                    f"signal={result.signal.legacy_signal} ({parts}) atr={atr:.2f}",
+                    flush=True,
+                )
+
+            key = f"{result.bar_id}:{desired}:{result.applied_action}"
+            intent = executor.set_target(
+                desired,
+                decision_id=result.bar_id,
+                current_net=net_pos,
+                urgency="HIGH" if result.applied_action != "TARGET" else "NORMAL",
+                reason_codes=pretrade.rule_hits,
+                idempotency_key=key,
+            )
+            if intent is None:
+                print(f"{dt} 意图被抑制（换月/重复） key={key}", flush=True)
+                continue
+            if persist is not None and not persist.record_intent(intent):
+                print(f"{dt} 持久化幂等命中，跳过重复意图 key={key}", flush=True)
+
+            fill = executor.poll_position(
+                int(position.pos),
+                last_price=close_of(result),
+                atr=atr,
+                signal=result.signal.legacy_signal,
+            )
+            confirmed = int(position.pos)
+            pending = None if fill or confirmed == desired else desired
+            if fill:
+                if persist is not None:
+                    persist.record_fill(fill)
+                if desired != 0 and executor.state.entry is not None:
                     print(
-                        f"{dt} 风控{action.value} 清仓 | "
-                        f"sl={risk.state.stop_price} tp={risk.state.take_price} atr={atr:.2f}",
+                        f"  成交确认 entry={fill.price:.2f} "
+                        f"sl={pipeline.risk.state.stop_price:.2f} "
+                        f"tp={pipeline.risk.state.take_price:.2f}",
                         flush=True,
                     )
-                    risk.trigger(action)
-                    current_target = 0
-                    target_pos.set_target_volume(0)
-                    continue
-
-            if risk.in_cooldown:
-                continue
-
-            desired = lots_from_signal(detail.signal, regime)
-            if desired is None or desired == current_target:
-                continue
-
-            prev = current_target
-            current_target = desired
-            target_pos.set_target_volume(current_target)
-            print(
-                f"{dt} 调仓 {prev}->{current_target} | {trade_symbol} "
-                f"regime={regime.value} signal={detail.signal} ({detail.parts}) atr={atr:.2f}",
-                flush=True,
+            _persist_state(
+                persist,
+                pipeline,
+                symbol=trade_symbol,
+                net=confirmed,
+                pending=pending,
+                last_bar_id=result.bar_id,
+                config_hash=cfg.config_hash(),
             )
-
-            if current_target == 0:
-                risk.on_flat()
-            else:
-                risk.on_entry(current_target, float(ind.close[-1]), atr, detail.signal)
-                print(
-                    f"  入场风险 sl={risk.state.stop_price:.2f} tp={risk.state.take_price:.2f}",
-                    flush=True,
-                )
 
     except KeyboardInterrupt:
         print("收到退出信号。", flush=True)
-        if FLAT_ON_EXIT and target_pos is not None and current_target != 0:
-            print(f"退出前平仓: {trade_symbol} target {current_target} -> 0", flush=True)
-            target_pos.set_target_volume(0)
+        if FLAT_ON_EXIT and executor is not None and pipeline.current_target != 0:
+            print(
+                f"退出前平仓: {trade_symbol} target {pipeline.current_target} -> 0",
+                flush=True,
+            )
+            net = int(position.pos) if position is not None else 0
+            pipeline.force_flat()
+            intent = executor.set_target(
+                0,
+                decision_id="exit-flat",
+                current_net=net,
+                urgency="HIGH",
+                reason_codes=("EXIT_FLAT",),
+            )
+            if intent and persist is not None:
+                persist.record_intent(intent)
             try:
                 api.wait_update(deadline=time.time() + 10)
             except Exception:
                 pass
+        if persist is not None and trade_symbol:
+            net = int(position.pos) if position is not None else 0
+            _persist_state(
+                persist,
+                pipeline,
+                symbol=trade_symbol,
+                net=net,
+                pending=None,
+                last_bar_id="shutdown",
+                config_hash=cfg.config_hash(),
+            )
         print(
             f"退出模拟盘 | 合约={trade_symbol or '-'} "
             f"权益={account.balance:.2f} 可用={account.available:.2f}",
             flush=True,
         )
     finally:
+        if persist is not None:
+            persist.close()
         api.close()
 
 

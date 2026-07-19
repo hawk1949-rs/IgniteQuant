@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """Falcon v2 回测入口。
 
-行情状态(ADX) + 格兰维尔/量能/KDJ 评分(-3~3) + 动态手数 + ATR 止盈止损。
-- 信号：KQ.m@SHFE.au（沪金主力连续，覆盖 2025-01 ~ 2026-06）
-- 交易：跟随 quote.underlying_symbol 的具体交割月（TqSim 不支持连续合约下单）
+决策核：ignitequant.engine.FalconDecisionPipeline（与模拟盘 / 看板共用）。
+执行层：TargetPositionExecutor + RiskEngine（小框架 SOP5 / Phase 3）。
+- 信号：KQ.m@SHFE.au
+- 交易：跟随 quote.underlying_symbol
 - Web UI：http://127.0.0.1:9876
 - 可选：结束后用 common.backtest_archive 导出桌面对账单 Excel
 """
@@ -17,24 +18,31 @@ import sys
 import time
 from pathlib import Path
 
-from tqsdk import BacktestFinished, TargetPosTask, TqApi, TqAuth, TqBacktest, TqSim
+from tqsdk import BacktestFinished, TqApi, TqAuth, TqBacktest, TqSim
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 if str(ROOT / "strategies") not in sys.path:
     sys.path.insert(0, str(ROOT / "strategies"))
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
 
 from common.backtest_archive import BacktestArchive
-from falcon import (
-    RiskAction,
-    RiskManager,
-    compute_indicators,
-    detect_regime,
-    lots_from_signal,
-    score_signal,
-)
 from falcon.sizing import LOT_BY_SIGNAL
+from ignitequant.config import load_active_decision_config
+from ignitequant.engine import (
+    FalconDecisionPipeline,
+    annotate_klines,
+    apply_pretrade,
+    atr_of,
+    close_of,
+    healthy_runtime,
+    make_risk_engine,
+    score_parts,
+)
+from ignitequant.execution import TargetPositionExecutor
+from ignitequant.domain.enums import RiskAction
 
 
 def load_dotenv(path: Path) -> None:
@@ -51,11 +59,9 @@ def load_dotenv(path: Path) -> None:
 SIGNAL_SYMBOL = "KQ.m@SHFE.au"
 START_DT = datetime.date(2025, 1, 1)
 END_DT = datetime.date(2025, 2, 28)
-KLINE_SECONDS = 60 * 60
+KLINE_SECONDS = 60 * 5  # 5 分钟 K 线
 WEB_GUI = ":9876"
-# 回测模拟账户初始资金（与 falcon.sizing 手数刻度配套）
 INIT_BALANCE = 1_000_000
-# 设为 False 可关闭本次回测的 Excel 存档（模块本身仍可被其它策略接入）
 ENABLE_ARCHIVE = True
 
 
@@ -75,16 +81,18 @@ def main() -> None:
     if not user or not password:
         raise SystemExit("缺少 TQ_USER / TQ_PASS，请先配置项目根目录 .env")
 
+    cfg = load_active_decision_config()
+    risk_engine = make_risk_engine(cfg)
     print(f"启动 Falcon v2 回测: 信号={SIGNAL_SYMBOL}", flush=True)
     print(f"区间: {START_DT} ~ {END_DT}（{FLAT_DATE} 起强制清仓）", flush=True)
     print(
         f"账户初始资金: {INIT_BALANCE:,.0f} | 仓位映射: {LOT_BY_SIGNAL} | "
-        f"交易跟主力 underlying | Web UI: http://127.0.0.1{WEB_GUI}",
+        f"config={cfg.config_version} hash={cfg.config_hash()[:12]} | "
+        f"RiskEngine+Executor | Web UI: http://127.0.0.1{WEB_GUI}",
         flush=True,
     )
 
     sim = TqSim(init_balance=INIT_BALANCE)
-
     archive: BacktestArchive | None = None
     if ENABLE_ARCHIVE:
         archive = BacktestArchive(
@@ -104,13 +112,10 @@ def main() -> None:
         auth=TqAuth(user, password),
     )
 
-    # 手数放大后略收紧止损、加长冷却，避免单笔回撤与连续亏损叠加
-    risk = RiskManager(sl_atr_mult=1.3, tp_atr_mult=2.3, cooldown_bars=4)
-
+    pipeline = FalconDecisionPipeline(cfg)
     trade_symbol = ""
-    target_pos: TargetPosTask | None = None
+    executor: TargetPositionExecutor | None = None
     position = None
-    current_target = 0
 
     try:
         main_quote = api.get_quote(SIGNAL_SYMBOL)
@@ -130,72 +135,81 @@ def main() -> None:
             if not underlying:
                 continue
 
-            # 主力换月：先平旧合约，再切换 TargetPosTask
             if underlying != trade_symbol:
-                if target_pos is not None and (current_target != 0 or (position is not None and int(position.pos) != 0)):
+                if executor is not None and (
+                    pipeline.current_target != 0
+                    or (position is not None and int(position.pos) != 0)
+                ):
                     print(
                         f"主力换月 {trade_symbol} -> {underlying}，先平旧仓",
                         flush=True,
                     )
                     if archive is not None:
                         archive.tag_next(
-                            risk.state.entry_signal or 0,
+                            pipeline.risk.state.entry_signal or 0,
                             note=f"主力换月平仓 {trade_symbol}->{underlying}",
                         )
-                    current_target = 0
-                    target_pos.set_target_volume(0)
-                    risk.on_flat()
+                    net_old = int(position.pos) if position is not None else 0
+                    pipeline.force_flat()
+                    executor.set_target(
+                        0,
+                        decision_id=f"roll:{trade_symbol}",
+                        current_net=net_old,
+                        urgency="HIGH",
+                        reason_codes=("ROLL_IN_PROGRESS",),
+                    )
+                    if int(position.pos) != 0:
+                        continue
+                    executor.destroy()
                 trade_symbol = underlying
-                target_pos = TargetPosTask(api, trade_symbol)
+                executor = TargetPositionExecutor(api, trade_symbol)
                 position = api.get_position(trade_symbol)
                 print(f"交易合约切换为 {trade_symbol}", flush=True)
 
-            assert target_pos is not None and position is not None
+            assert executor is not None and position is not None
 
-            ind = compute_indicators(klines)
-            klines["ma7"] = ind.ma7
-            klines["ma14"] = ind.ma14
-            klines["ma52"] = ind.ma52
-            klines["adx"] = ind.adx
-            klines["atr"] = ind.atr
-            klines["kdj_k"] = ind.k
-            klines["kdj_d"] = ind.d
-
-            dt = datetime.datetime.fromtimestamp(int(klines.iloc[-1]["datetime"]) // 1_000_000_000)
-            regime = detect_regime(ind)
-            detail = score_signal(ind)
-            atr = float(ind.atr[-1]) if ind.atr[-1] == ind.atr[-1] else 0.0
+            dt = datetime.datetime.fromtimestamp(
+                int(klines.iloc[-1]["datetime"]) // 1_000_000_000
+            )
             net_pos = int(position.pos)
-
-            risk.tick_cooldown()
+            allow_trade = dt.date() < FLAT_DATE
+            result = pipeline.on_bar_close(klines, trade=allow_trade)
+            annotate_klines(klines, result)
+            atr = atr_of(result)
+            parts = score_parts(result)
 
             if last_progress_day != dt.date():
                 last_progress_day = dt.date()
                 print(
-                    f"{dt.date()} 推进 | {trade_symbol} regime={regime.value} "
-                    f"signal={detail.signal} ({detail.parts}) target={current_target} "
-                    f"net={net_pos} close={ind.close[-1]:.2f}",
+                    f"{dt.date()} 推进 | {trade_symbol} regime={result.factors.regime.value} "
+                    f"signal={result.signal.legacy_signal} ({parts}) "
+                    f"target={pipeline.current_target} net={net_pos} "
+                    f"close={close_of(result):.2f}",
                     flush=True,
                 )
 
-            # 回测周期最后交易日起：按真实持仓强制平仓，直到净仓为 0
-            if dt.date() >= FLAT_DATE:
-                if net_pos != 0 or current_target != 0:
+            if not allow_trade:
+                if net_pos != 0 or pipeline.current_target != 0:
                     print(
                         f"{dt} 期末强制平仓 | {trade_symbol} net={net_pos} "
-                        f"target={current_target} -> 0",
+                        f"target={pipeline.current_target} -> 0",
                         flush=True,
                     )
                     if archive is not None:
                         archive.tag_next(
-                            risk.state.entry_signal or detail.signal,
-                            regime=regime.value,
-                            parts=detail.parts,
+                            pipeline.risk.state.entry_signal or result.signal.legacy_signal,
+                            regime=result.factors.regime.value,
+                            parts=parts,
                             note="期末强制平仓",
                         )
-                    current_target = 0
-                    target_pos.set_target_volume(0)
-                    risk.on_flat()
+                    pipeline.force_flat()
+                    executor.set_target(
+                        0,
+                        decision_id=f"endflat:{result.bar_id}",
+                        current_net=net_pos,
+                        urgency="HIGH",
+                        reason_codes=("END_FLAT",),
+                    )
                 elif not end_flat_announced:
                     print(
                         f"{dt.date()} 已到回测期末且净仓为 0（强制平仓完成）",
@@ -204,61 +218,78 @@ def main() -> None:
                     end_flat_announced = True
                 continue
 
-            # 持仓风控优先
-            if current_target != 0:
-                action = risk.check(
-                    current_target,
-                    float(ind.high[-1]),
-                    float(ind.low[-1]),
-                    float(ind.close[-1]),
-                )
-                if action != RiskAction.NONE:
-                    print(
-                        f"{dt} 风控{action.value} 清仓 | "
-                        f"sl={risk.state.stop_price} tp={risk.state.take_price} atr={atr:.2f}",
-                        flush=True,
-                    )
-                    if archive is not None:
-                        archive.tag_next(
-                            risk.state.entry_signal,
-                            regime=regime.value,
-                            parts=detail.parts,
-                            note=f"风控{action.value}",
-                        )
-                    risk.trigger(action)
-                    current_target = 0
-                    target_pos.set_target_volume(0)
-                    continue
-
-            if risk.in_cooldown:
+            if result.applied_action not in {"STOP_LOSS", "TAKE_PROFIT", "TARGET"}:
                 continue
 
-            desired = lots_from_signal(detail.signal, regime)
-            if desired is None or desired == current_target:
-                continue
-
-            prev = current_target
-            current_target = desired
-            if archive is not None:
-                archive.tag_next(
-                    detail.signal,
-                    regime=regime.value,
-                    parts=detail.parts,
-                    note=f"调仓 {prev}->{current_target}",
-                )
-            target_pos.set_target_volume(current_target)
-            print(
-                f"{dt} 调仓 {prev}->{current_target} | {trade_symbol} "
-                f"regime={regime.value} signal={detail.signal} ({detail.parts}) atr={atr:.2f}",
-                flush=True,
+            pretrade = apply_pretrade(
+                result,
+                net_position=net_pos,
+                last_price=close_of(result),
+                risk_engine=risk_engine,
+                runtime=healthy_runtime(),
+                symbol=trade_symbol,
             )
-
-            if current_target == 0:
-                risk.on_flat()
-            else:
-                risk.on_entry(current_target, float(ind.close[-1]), atr, detail.signal)
+            if pretrade.action in {RiskAction.REJECT, RiskAction.HALT}:
                 print(
-                    f"  入场风险 sl={risk.state.stop_price:.2f} tp={risk.state.take_price:.2f}",
+                    f"{dt} 事前风控{pretrade.action.value} | hits={pretrade.rule_hits}",
+                    flush=True,
+                )
+                continue
+
+            desired = (
+                0
+                if result.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}
+                else int(pretrade.approved_position)
+            )
+            if result.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}:
+                print(
+                    f"{dt} 风控{result.applied_action} 清仓 | "
+                    f"sl={pipeline.risk.state.stop_price} "
+                    f"tp={pipeline.risk.state.take_price} atr={atr:.2f}",
+                    flush=True,
+                )
+                if archive is not None:
+                    archive.tag_next(
+                        pipeline.risk.state.entry_signal or result.signal.legacy_signal,
+                        regime=result.factors.regime.value,
+                        parts=parts,
+                        note=f"风控{result.applied_action}",
+                    )
+            elif result.applied_action == "TARGET":
+                prev = result.target_before
+                if archive is not None:
+                    archive.tag_next(
+                        result.signal.legacy_signal,
+                        regime=result.factors.regime.value,
+                        parts=parts,
+                        note=f"调仓 {prev}->{desired}",
+                    )
+                print(
+                    f"{dt} 调仓 {prev}->{desired} | {trade_symbol} "
+                    f"regime={result.factors.regime.value} "
+                    f"signal={result.signal.legacy_signal} ({parts}) atr={atr:.2f}",
+                    flush=True,
+                )
+
+            executor.set_target(
+                desired,
+                decision_id=result.bar_id,
+                current_net=net_pos,
+                urgency="HIGH" if result.applied_action != "TARGET" else "NORMAL",
+                reason_codes=pretrade.rule_hits,
+                idempotency_key=f"{result.bar_id}:{desired}:{result.applied_action}",
+            )
+            fill = executor.poll_position(
+                int(position.pos),
+                last_price=close_of(result),
+                atr=atr,
+                signal=result.signal.legacy_signal,
+            )
+            if fill and desired != 0 and executor.state.entry is not None:
+                print(
+                    f"  成交确认 entry={fill.price:.2f} "
+                    f"sl={pipeline.risk.state.stop_price:.2f} "
+                    f"tp={pipeline.risk.state.take_price:.2f}",
                     flush=True,
                 )
 
@@ -266,7 +297,7 @@ def main() -> None:
         try:
             final_net = int(api.get_position(trade_symbol).pos) if trade_symbol else 0
         except Exception:
-            final_net = current_target
+            final_net = pipeline.current_target
         print(
             f"回测结束 | 交易合约={trade_symbol or '-'} 最终净仓={final_net}"
             f"（期末强制平仓日={FLAT_DATE}）。",
@@ -280,24 +311,17 @@ def main() -> None:
                     flush=True,
                 )
             except Exception as exc:
-                print(f"回测存档写入失败: {exc}", flush=True)
-        # web_gui 跑在同一事件循环上：结束后必须继续 wait_update 保活，
-        # 不能 time.sleep，否则页面会僵死（Listen 但 HTTP 超时僵死）。
+                print(f"回测存档失败: {exc}", flush=True)
         print(
-            "UI 保活中，请刷新 http://127.0.0.1:9876 查看报表；按 Ctrl+C 退出。",
+            "Web GUI 保活中（Ctrl+C 退出）。页面: "
+            f"http://127.0.0.1{WEB_GUI}",
             flush=True,
         )
         try:
             while True:
-                try:
-                    api.wait_update()
-                except BacktestFinished:
-                    try:
-                        api._loop.run_until_complete(__import__("asyncio").sleep(0.25))
-                    except Exception:
-                        time.sleep(0.25)
+                api.wait_update()
         except KeyboardInterrupt:
-            print("退出回测进程。", flush=True)
+            print("已退出保活。", flush=True)
     finally:
         api.close()
 

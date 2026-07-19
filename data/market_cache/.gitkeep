@@ -1,0 +1,3 @@
+data/market_cache/**/*.csv
+data/market_cache/**/*.meta.json
+!data/market_cache/.gitkeep

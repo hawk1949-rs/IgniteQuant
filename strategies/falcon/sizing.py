@@ -19,7 +19,12 @@ _BASE_LOTS = {1: 1, 2: 1, 3: 1}
 LOT_BY_SIGNAL = {k: int(v * LOT_SCALE) for k, v in _BASE_LOTS.items()}
 
 
-def lots_from_signal(signal: int, regime: Regime) -> int | None:
+def lots_from_signal(
+    signal: int,
+    regime: Regime,
+    *,
+    lot_by_signal: dict[int, int] | None = None,
+) -> int | None:
     """返回目标净持仓；None = 本根不因信号改仓。
 
     - signal==0：None
@@ -30,7 +35,8 @@ def lots_from_signal(signal: int, regime: Regime) -> int | None:
         return None
 
     strength = abs(int(signal))
-    lots = LOT_BY_SIGNAL.get(strength)
+    mapping = lot_by_signal if lot_by_signal is not None else LOT_BY_SIGNAL
+    lots = mapping.get(strength)
     if lots is None:
         return None
 
