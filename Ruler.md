@@ -106,6 +106,14 @@ api = TqApi(
 - 中继写法：`TqAccount("A安粮期货", ...)`；AppID：`SHINNY_TQ_1.0`
 - 安粮在天勤「专业版可用」列表
 
+### Supabase PostgreSQL（可选云库，2026-07-20）
+
+- 凭证只写本地 `.env` 的 `DATABASE_URL`（已在 `.gitignore`），**禁止提交 Git / 聊天明文密码**
+- 连通性自检：`python tools/verify_supabase.py`（依赖 `psycopg2-binary`）
+- **2026-07-20 本机实测**：直连 `db.<ref>.supabase.co:5432` 失败 —— 公司 DNS 搜索域污染主机名，且主机仅有 IPv6、本机 IPv6 不可达
+- 推荐改用 Dashboard → Database → **Session pooler** 连接串（`*.pooler.supabase.com:6543`，通常有 IPv4），覆盖 `DATABASE_URL` 后再测
+- 当前交易事实源仍是本地 SQLite（`data/runtime/*.sqlite`）；Supabase 仅作可选云端库，尚未替换决策持久化层
+
 ## 策略看板（家庭量化作坊）
 
 ### 本地行情缓存 + 离线回放（2026-07-18）
@@ -126,7 +134,13 @@ api = TqApi(
 - 目录：`web/`（Vite + React + TS + Tailwind v4 + Magic UI 组件）
 - 启动后端 API：`uvicorn dashboard.api:app --reload --port 8787` → http://127.0.0.1:8787
 - 启动前端：`cd web && npm run dev` → http://127.0.0.1:5173（`/api` 代理到 8787）
-- 主色：青色科技风深色界面（`#3dd6ff` / 深底 `#070b12`）；字体统一微软雅黑；无文字动画
+- **欢迎首页**（2026-07-20）：深色科技简约门户（Apple Dark Mode 语义色）
+  - `#/` → `WelcomePage`；`#/lab` → 策略实验室（侧栏可扩展；当前仅「回测看板」）
+  - 主题：`web/src/theme/AppleAntdProvider.tsx`（高对比：正文 `#F5F5F7`、次要 `#C8D0DC`、实色卡片 `#1A2740`）
+  - 扩展方式：在 `StrategyLabPage.tsx` 的 `LabSection` / `LAB_NAV` 追加项，并在 `main` 里挂对应面板
+  - `#/lab-legacy` → 旧版策略实验室
+  - 工作台注意：`persistDb=否` 不写入历史列表；选历史回测会退出当前策略选中防误更新
+  - 测试账号：`回测机制`（缓存 / 天勤）+ 开始测试时显示分阶段进度条（当前为演示进度，后续可接 `/api/jobs`）
 - 回测进度：异步 job 轮询时显示进度条（`progress` / `progress_msg`）
 - 组件：已去掉 BlurFade / NumberTicker / BorderBeam 等动效依赖（源码仍可在 `web/src/components/ui/`）
 - API：`dashboard/api.py` v0.6（`/api/catalog` 含 engines/market_cache；`/api/backtest` 支持 `engine=local|tq`）
