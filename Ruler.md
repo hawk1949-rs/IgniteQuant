@@ -135,9 +135,9 @@ api = TqApi(
 - 启动后端 API：`uvicorn dashboard.api:app --reload --port 8787` → http://127.0.0.1:8787
 - 启动前端：`cd web && npm run dev` → http://127.0.0.1:5173（`/api` 代理到 8787）
 - **欢迎首页**（2026-07-20）：深色科技简约门户（Apple Dark Mode 语义色）
-  - `#/` → `WelcomePage`；`#/lab` → 策略实验室（侧栏可扩展；当前仅「回测看板」）
+  - `#/` → `WelcomePage`；`#/lab` → 策略实验室侧栏：回测看板 / 因子挖掘 / 信号生成 / 开仓策略 / 仓位控制 / 管理后台
   - 主题：`web/src/theme/AppleAntdProvider.tsx`（高对比：正文 `#F5F5F7`、次要 `#C8D0DC`、实色卡片 `#1A2740`）
-  - 扩展方式：在 `StrategyLabPage.tsx` 的 `LabSection` / `LAB_NAV` 追加项，并在 `main` 里挂对应面板
+  - 扩展方式：在 `StrategyLabPage.tsx` 的 `LabSection` / `LAB_NAV` 追加项；未实现页用 `ComingSoonPanel`
   - `#/lab-legacy` → 旧版策略实验室
   - 工作台注意：`persistDb=否` 不写入历史列表；选历史回测会退出当前策略选中防误更新
   - 测试账号：`回测机制`（缓存 / 天勤）+ 开始测试时显示分阶段进度条（当前为演示进度，后续可接 `/api/jobs`）

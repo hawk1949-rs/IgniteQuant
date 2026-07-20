@@ -1,17 +1,83 @@
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import { WorkbenchPanel } from './strategy-lab/WorkbenchPanel'
+import { ComingSoonPanel } from './strategy-lab/ComingSoonPanel'
 
 type Props = {
   onBackHome?: () => void
 }
 
-/** 侧栏导航：当前仅回测看板，后续在此追加 section 即可 */
-export type LabSection = 'workbench'
+export type LabSection =
+  | 'workbench'
+  | 'factor'
+  | 'signal'
+  | 'entry'
+  | 'sizing'
+  | 'admin'
 
-const LAB_NAV: { id: LabSection; title: string; subtitle: string }[] = [
-  { id: 'workbench', title: 'Workbench', subtitle: '回测看板' },
+const LAB_NAV: {
+  id: LabSection
+  title: string
+  subtitle: string
+  summary: string
+}[] = [
+  {
+    id: 'workbench',
+    title: 'Workbench',
+    subtitle: '回测看板',
+    summary: '策略档案、流水线装配、测试账号与绩效曲线。',
+  },
+  {
+    id: 'factor',
+    title: 'Factor',
+    subtitle: '因子挖掘',
+    summary: '因子公式、标准化与质量门禁（预热、缺失、极值）。',
+  },
+  {
+    id: 'signal',
+    title: 'Signal',
+    subtitle: '信号生成',
+    summary: 'Alpha / Score 映射、确认根数、TTL 与原因码。',
+  },
+  {
+    id: 'entry',
+    title: 'Entry',
+    subtitle: '开仓策略',
+    summary: '进场时机、限价/下一根开盘与开仓约束。',
+  },
+  {
+    id: 'sizing',
+    title: 'Sizing',
+    subtitle: '仓位控制',
+    summary: '固定手数、信号缩放、ATR 风险定仓与加仓规则。',
+  },
+  {
+    id: 'admin',
+    title: 'Admin',
+    subtitle: '管理后台',
+    summary: '配置、归档、账号与系统运维入口。',
+  },
 ]
+
+function SectionBody({ id }: { id: LabSection }) {
+  const meta = LAB_NAV.find((n) => n.id === id)!
+  switch (id) {
+    case 'workbench':
+      return <WorkbenchPanel />
+    case 'factor':
+    case 'signal':
+    case 'entry':
+    case 'sizing':
+    case 'admin':
+      return (
+        <ComingSoonPanel
+          title={meta.subtitle}
+          english={meta.title}
+          summary={meta.summary}
+        />
+      )
+  }
+}
 
 export default function StrategyLabPage({ onBackHome }: Props) {
   const [section, setSection] = useState<LabSection>('workbench')
@@ -33,7 +99,7 @@ export default function StrategyLabPage({ onBackHome }: Props) {
         </p>
         <h1 className="mt-2 text-3xl font-semibold tracking-tight text-ink">策略实验室</h1>
         <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted">
-          左侧选择功能模块；当前为回测看板，后续可继续扩展诊断与实验能力。
+          左侧切换回测看板、因子/信号/开仓/仓位模块与管理后台。
         </p>
       </header>
 
@@ -70,7 +136,7 @@ export default function StrategyLabPage({ onBackHome }: Props) {
         </aside>
 
         <main className="min-w-0">
-          {section === 'workbench' && <WorkbenchPanel />}
+          <SectionBody id={section} />
         </main>
       </div>
     </div>
