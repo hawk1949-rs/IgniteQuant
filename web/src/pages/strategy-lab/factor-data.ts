@@ -463,7 +463,7 @@ export function validateModules(
 }
 
 /** 静态检查（非真机 Python 解释器）；真跑通需后续接 runner */
-export function lintFactorSource(source: string, outputKeys: string[]): string[] {
+export function lintFactorSource(source: string, _outputKeys: string[] = []): string[] {
   const errs: string[] = []
   const text = source || ''
   if (!text.trim()) {
@@ -475,13 +475,6 @@ export function lintFactorSource(source: string, outputKeys: string[]): string[]
   }
   if (!/\breturn\b/.test(text)) {
     errs.push('compute 中未见 return')
-  }
-  for (const k of outputKeys) {
-    const key = k.trim()
-    if (!key) continue
-    if (!text.includes(`"${key}"`) && !text.includes(`'${key}'`)) {
-      errs.push(`源码中未出现输出键 "${key}"（建议在 return 字典里写出）`)
-    }
   }
   const opens = (text.match(/"""/g) || []).length
   if (opens % 2 !== 0) errs.push('三引号字符串可能未闭合')

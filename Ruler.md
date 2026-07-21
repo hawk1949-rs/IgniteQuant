@@ -143,7 +143,7 @@ api = TqApi(
     - UI：`FactorPanel.tsx` + `factor-data.ts`
     - 草稿：`localStorage` `ignitequant.lab.factor_mining_v2`（仅编辑缓存）
     - **命名因子组合库**：`ignitequant.lab.factor_combos_v1`（另存为 / 覆盖更新 / 删除 / 载入）
-    - **在线 Python 编辑器**（2026-07-21）：`@monaco-editor/react` + 本地 `monaco-editor`（`loader.config({ monaco })`，避免 CDN 卡住）；8s 超时降级纯文本框；一个组合 = 多个可命名 `.py` 代码块
+    - **在线 Python 编辑器**（2026-07-21）：轻量 `<textarea>`（已移除 Monaco——本地 monaco-editor 导入会导致因子页卡住）；一个组合 = 多个可命名 `.py` 代码块；模块 UI 仅保留启用 / 命名 / 触发周期 / 编辑器
     - 回测看板节点 1「因子与特征」下拉**只读该库**；无组合时提示先去因子页入库
     - Python 壳仍在 `src/ignitequant/factors/`（与编辑器模板对齐）
   - `#/lab-legacy` → 旧版策略实验室

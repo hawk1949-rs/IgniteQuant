@@ -18,10 +18,8 @@ import {
 import {
   PlusOutlined,
   SaveOutlined,
-  DeleteOutlined,
   CopyOutlined,
   CloudUploadOutlined,
-  CheckCircleOutlined,
 } from '@ant-design/icons'
 import { FactorCodeEditor } from './FactorCodeEditor'
 import {
@@ -34,7 +32,6 @@ import {
   createDefaultMiningConfig,
   createEmptyModule,
   deleteFactorCombo,
-  lintFactorSource,
   loadFactorMiningConfig,
   loadSavedFactorCombos,
   modulePathFromFileName,
@@ -46,7 +43,6 @@ import {
   validateModules,
   type FactorMiningConfig,
   type FactorModule,
-  type FactorModuleStatus,
   type SavedFactorCombo,
   type TimeframeId,
 } from './factor-data'
@@ -56,120 +52,55 @@ const { Text, Paragraph, Title } = Typography
 function ModuleEditor({
   mod,
   onChange,
-  onRemove,
-  onLint,
 }: {
   mod: FactorModule
   onChange: (partial: Partial<FactorModule>) => void
-  onRemove: () => void
-  onLint: () => void
 }) {
-  const renameFile = (raw: string) => {
-    const fileName = sanitizePyFileName(raw)
-    onChange({
-      fileName,
-      modulePath: modulePathFromFileName(fileName),
-    })
+  const renameFactor = (name: string) => {
+    // 中文显示名不强制改写 .py 文件名；仅 ASCII 命名时同步 fileName
+    const stem = name.trim()
+    if (/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(stem)) {
+      const fileName = sanitizePyFileName(stem)
+      onChange({
+        name,
+        fileName,
+        modulePath: modulePathFromFileName(fileName),
+      })
+      return
+    }
+    onChange({ name })
   }
 
   return (
     <Flex vertical gap={12}>
-      <Flex justify="space-between" align="flex-start" wrap="wrap" gap={8}>
-        <Space wrap>
+      <Row gutter={[12, 12]} align="middle">
+        <Col flex="none">
           <Switch
             checked={mod.enabled}
             onChange={(v) => onChange({ enabled: v })}
             checkedChildren="启用"
             unCheckedChildren="关"
           />
-          <Tag color={mod.status === 'ready' ? 'success' : 'default'}>{mod.status}</Tag>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {mod.modulePath}
-          </Text>
-        </Space>
-        <Space>
-          <Button size="small" icon={<CheckCircleOutlined />} onClick={onLint}>
-            静态校验
-          </Button>
-          <Button size="small" danger icon={<DeleteOutlined />} onClick={onRemove}>
-            删除此 .py
-          </Button>
-        </Space>
-      </Flex>
-
-      <Row gutter={[12, 12]}>
-        <Col xs={24} md={8}>
-          <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-            显示名
-          </Text>
-          <Input value={mod.name} onChange={(e) => onChange({ name: e.target.value })} />
         </Col>
-        <Col xs={24} md={8}>
+        <Col xs={24} sm={10} md={8}>
           <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-            .py 文件名（可改）
+            因子命名
           </Text>
           <Input
-            value={mod.fileName}
-            onChange={(e) => renameFile(e.target.value)}
-            onBlur={(e) => renameFile(e.target.value)}
-            placeholder="my_factor.py"
-            style={{ fontFamily: 'ui-monospace, Menlo, Consolas, monospace' }}
+            value={mod.name}
+            placeholder="例如：波动率过滤"
+            onChange={(e) => renameFactor(e.target.value)}
           />
         </Col>
-        <Col xs={24} md={8}>
+        <Col xs={24} sm={12} md={10}>
           <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-            状态
-          </Text>
-          <Select
-            style={{ width: '100%' }}
-            value={mod.status}
-            options={[
-              { value: 'draft', label: 'draft' },
-              { value: 'ready', label: 'ready' },
-            ]}
-            onChange={(v: FactorModuleStatus) => onChange({ status: v })}
-          />
-        </Col>
-        <Col span={24}>
-          <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-            假设 / 要验证什么
-          </Text>
-          <Input.TextArea
-            rows={2}
-            value={mod.hypothesis}
-            onChange={(e) => onChange({ hypothesis: e.target.value })}
-          />
-        </Col>
-        <Col xs={24} md={14}>
-          <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-            Feature Dict 输出键（逗号分隔）
-          </Text>
-          <Input
-            value={mod.outputKeys.join(', ')}
-            status={
-              mod.outputKeys.some((k) => k && !/^[a-z][a-z0-9_]*$/.test(k.trim()))
-                ? 'error'
-                : undefined
-            }
-            onChange={(e) =>
-              onChange({
-                outputKeys: e.target.value
-                  .split(',')
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-              })
-            }
-            placeholder="vol_ratio, vol_regime"
-          />
-        </Col>
-        <Col xs={24} md={10}>
-          <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-            需要的已闭合周期
+            触发 K 线周期
           </Text>
           <Select
             mode="multiple"
             style={{ width: '100%' }}
             value={mod.requiredTimeframes}
+            placeholder="选择已闭合周期"
             options={TIMEFRAME_OPTIONS.map((t) => ({ value: t.id, label: t.label }))}
             onChange={(v: TimeframeId[]) => onChange({ requiredTimeframes: v })}
           />
@@ -344,16 +275,6 @@ export function FactorPanel() {
     const next = createEmptyModule()
     setCfg((prev) => ({ ...prev, modules: [...prev.modules, next] }))
     setActiveModuleId(next.id)
-  }
-
-  const onLintActive = () => {
-    if (!activeModule) return
-    const issues = lintFactorSource(activeModule.source, activeModule.outputKeys)
-    if (issues.length === 0) {
-      message.success(`「${activeModule.fileName}」静态校验通过`)
-      return
-    }
-    message.warning(issues.join('；'))
   }
 
   const onCopyContract = async () => {
@@ -557,11 +478,11 @@ export function FactorPanel() {
       </Card>
 
       <Card
-        title="我的因子模块（多 .py 代码块）"
+        title="我的因子模块"
         extra={
           <Space wrap>
             <Button type="primary" icon={<PlusOutlined />} onClick={onAddModule}>
-              新建 .py 模块
+              新建模块
             </Button>
             <Button icon={<SaveOutlined />} onClick={onSaveDraft}>
               保存草稿
@@ -570,9 +491,7 @@ export function FactorPanel() {
         }
       >
         <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
-          一个因子组合 = 多个可命名的 Python 文件。每个文件实现{' '}
-          <Text code>compute(bars_by_tf) → Feature Dict</Text>
-          。在线编辑器写代码；入库后随组合一起被回测看板引用。静态校验不等于真机执行。
+          每个模块：启用开关、因子命名、触发 K 线周期、Python 编辑器。一个组合可挂多个模块。
         </Paragraph>
         {errors.length > 0 && (
           <Paragraph type="danger" style={{ fontSize: 12 }}>
@@ -581,7 +500,7 @@ export function FactorPanel() {
           </Paragraph>
         )}
         {cfg.modules.length === 0 ? (
-          <Text type="secondary">还没有模块。点「新建 .py 模块」开始写代码。</Text>
+          <Text type="secondary">还没有模块。点「新建模块」开始写代码。</Text>
         ) : (
           <Tabs
             type="editable-card"
@@ -604,24 +523,18 @@ export function FactorPanel() {
             items={cfg.modules.map((m) => ({
               key: m.id,
               label: (
-                <span style={{ fontFamily: 'ui-monospace, Menlo, Consolas, monospace' }}>
+                <span>
                   {m.enabled ? '' : '⏸ '}
-                  {m.fileName}
+                  {m.name || m.fileName}
                 </span>
               ),
-              children: activeModule && activeModule.id === m.id ? (
-                <ModuleEditor
-                  mod={activeModule}
-                  onChange={(partial) => updateModule(m.id, partial)}
-                  onRemove={() =>
-                    setCfg((prev) => ({
-                      ...prev,
-                      modules: prev.modules.filter((x) => x.id !== m.id),
-                    }))
-                  }
-                  onLint={onLintActive}
-                />
-              ) : null,
+              children:
+                activeModule && activeModule.id === m.id ? (
+                  <ModuleEditor
+                    mod={activeModule}
+                    onChange={(partial) => updateModule(m.id, partial)}
+                  />
+                ) : null,
             }))}
           />
         )}
