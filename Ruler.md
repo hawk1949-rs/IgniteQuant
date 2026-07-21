@@ -50,7 +50,8 @@
 - 2026-07-17：已从远程同步到本地（直连 `git clone` 易超时/重置；可用镜像 `https://ghfast.top/https://github.com/hawk1949-rs/IgniteQuant.git`）
 - 2026-07-20：再次 `git pull --ff-only` 同步远程 `master`（落后 2 commits → 已对齐）
 - 2026-07-21：直连 GitHub 失败（Connection reset）；经镜像 `ghfast.top` fetch 后 `merge --ff-only origin/master` 对齐
-- 当前 HEAD：`84e7119`（Simplify factor module UI and drop Monaco to unfreeze the page.）
+- 2026-07-21：修复因子页缺 `DeleteOutlined` 白屏；已 `git push origin master` 成功（本次直连可用）
+- 当前 HEAD：`9ae1a9e`（Fix Factor panel crash from missing DeleteOutlined import.）
 
 ## Python / 依赖
 
