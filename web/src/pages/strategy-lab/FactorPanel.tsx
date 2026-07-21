@@ -20,6 +20,7 @@ import {
   SaveOutlined,
   CopyOutlined,
   CloudUploadOutlined,
+  DeleteOutlined,
 } from '@ant-design/icons'
 import { FactorCodeEditor } from './FactorCodeEditor'
 import {

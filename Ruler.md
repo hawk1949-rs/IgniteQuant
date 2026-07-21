@@ -48,7 +48,9 @@
 - 本地目录：`D:\Cursor\IGNITE\AIQuant`，远程 `origin` → `https://github.com/hawk1949-rs/IgniteQuant.git`
 - 默认分支：`master`
 - 2026-07-17：已从远程同步到本地（直连 `git clone` 易超时/重置；可用镜像 `https://ghfast.top/https://github.com/hawk1949-rs/IgniteQuant.git`）
-- 当前 HEAD：`792a995`（Upgrade Falcon to v2 with archive export and larger sizing.）
+- 2026-07-20：再次 `git pull --ff-only` 同步远程 `master`（落后 2 commits → 已对齐）
+- 2026-07-21：直连 GitHub 失败（Connection reset）；经镜像 `ghfast.top` fetch 后 `merge --ff-only origin/master` 对齐
+- 当前 HEAD：`84e7119`（Simplify factor module UI and drop Monaco to unfreeze the page.）
 
 ## Python / 依赖
 
