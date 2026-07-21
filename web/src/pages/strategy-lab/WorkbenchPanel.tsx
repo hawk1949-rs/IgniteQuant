@@ -60,6 +60,11 @@ import {
   type SeriesPoint,
   type WorkbenchTrade,
 } from './workbench-data'
+import {
+  loadSavedFactorCombos,
+  summarizeFactorCombo,
+  type SavedFactorCombo,
+} from './factor-data'
 
 const { Text } = Typography
 const PAGE_SIZE = 10
@@ -286,6 +291,25 @@ export function WorkbenchPanel() {
   const [page, setPage] = useState(1)
   const [chartMetric, setChartMetric] = useState<ChartMetric>('equity')
   const [chartPeriod, setChartPeriod] = useState<ChartPeriod>('day')
+  const [factorCombos] = useState<SavedFactorCombo[]>(() =>
+    typeof window === 'undefined' ? [] : loadSavedFactorCombos(),
+  )
+
+  const factorNodeOptions = useMemo(() => {
+    const opts = factorCombos.map((c) => ({
+      value: c.id,
+      label: c.name,
+      desc: summarizeFactorCombo(c),
+    }))
+    if (nodes.factor && !opts.some((o) => o.value === nodes.factor)) {
+      opts.unshift({
+        value: nodes.factor,
+        label: `（缺失）${nodes.factor.slice(0, 18)}`,
+        desc: '该因子组合已从库中删除，请重新选择',
+      })
+    }
+    return opts
+  }, [factorCombos, nodes.factor])
 
   const symbol =
     WORKBENCH_SYMBOLS.find((s) => s.id === account.symbolId) ?? WORKBENCH_SYMBOLS[0]
@@ -656,40 +680,59 @@ export function WorkbenchPanel() {
         }
       >
         <Text type="secondary" style={{ display: 'block', marginBottom: 16, fontSize: 12 }}>
-          流水线：因子挖掘 → 信号生成 → 开仓策略 → 仓位控制。可单独保存装配，或随「保存策略」写入档案。
+          流水线：因子与特征 → 信号发生器 → 仓位控制。节点 1 的选项来自「因子与特征」页已命名保存的组合；无组合时请先去该页入库。
         </Text>
         <Row gutter={[12, 12]}>
-          {PIPELINE_STEPS.map((step, i) => (
-            <Col key={step.key} xs={24} sm={12} lg={6}>
-              <Card size="small" styles={{ body: { padding: 14 } }}>
-                <Flex justify="space-between" align="center">
-                  <Text type="secondary" style={{ fontSize: 11 }}>
-                    节点 {i + 1}
-                  </Text>
-                  {i < PIPELINE_STEPS.length - 1 && (
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      →
-                    </Text>
-                  )}
-                </Flex>
-                <Text strong style={{ display: 'block', marginTop: 4 }}>
-                  {step.title}
-                </Text>
-                <Select
-                  style={{ width: '100%', marginTop: 10 }}
-                  value={nodes[step.key]}
-                  onChange={(v) => setNodes((prev) => ({ ...prev, [step.key]: v }))}
-                  options={PIPELINE_OPTIONS[step.key].map((o) => ({
+          {PIPELINE_STEPS.map((step, i) => {
+            const options =
+              step.key === 'factor'
+                ? factorNodeOptions
+                : PIPELINE_OPTIONS[step.key].map((o) => ({
                     value: o.id,
                     label: o.label,
-                  }))}
-                />
-                <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 11 }}>
-                  {PIPELINE_OPTIONS[step.key].find((o) => o.id === nodes[step.key])?.desc}
-                </Text>
-              </Card>
-            </Col>
-          ))}
+                    desc: o.desc,
+                  }))
+            const selected = options.find((o) => o.value === nodes[step.key])
+            return (
+              <Col key={step.key} xs={24} sm={12} lg={8}>
+                <Card size="small" styles={{ body: { padding: 14 } }}>
+                  <Flex justify="space-between" align="center">
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      节点 {i + 1}
+                    </Text>
+                    {i < PIPELINE_STEPS.length - 1 && (
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        →
+                      </Text>
+                    )}
+                  </Flex>
+                  <Text strong style={{ display: 'block', marginTop: 4 }}>
+                    {step.title}
+                  </Text>
+                  <Select
+                    style={{ width: '100%', marginTop: 10 }}
+                    value={nodes[step.key] || undefined}
+                    placeholder={
+                      step.key === 'factor'
+                        ? factorCombos.length
+                          ? '选择已保存因子组合…'
+                          : '暂无组合，请先到「因子与特征」命名保存'
+                        : undefined
+                    }
+                    disabled={step.key === 'factor' && factorCombos.length === 0 && !nodes.factor}
+                    options={options.map((o) => ({ value: o.value, label: o.label }))}
+                    onChange={(v) => setNodes((prev) => ({ ...prev, [step.key]: v }))}
+                  />
+                  <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 11 }}>
+                    {selected?.desc ??
+                      (step.key === 'factor'
+                        ? '在「因子与特征」页：起名 → 另存为新组合 → 回到此处选择'
+                        : '')}
+                  </Text>
+                </Card>
+              </Col>
+            )
+          })}
         </Row>
       </Card>
 

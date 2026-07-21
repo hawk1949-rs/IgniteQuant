@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import { WorkbenchPanel } from './strategy-lab/WorkbenchPanel'
+import { FactorPanel } from './strategy-lab/FactorPanel'
 import { ComingSoonPanel } from './strategy-lab/ComingSoonPanel'
 
 type Props = {
@@ -11,7 +12,6 @@ export type LabSection =
   | 'workbench'
   | 'factor'
   | 'signal'
-  | 'entry'
   | 'sizing'
   | 'admin'
 
@@ -30,20 +30,14 @@ const LAB_NAV: {
   {
     id: 'factor',
     title: 'Factor',
-    subtitle: '因子挖掘',
-    summary: '因子公式、标准化与质量门禁（预热、缺失、极值）。',
+    subtitle: '因子与特征',
+    summary: '自主因子模块 + 纯 OHLCV 管道；非预装指标陈列。',
   },
   {
     id: 'signal',
     title: 'Signal',
-    subtitle: '信号生成',
+    subtitle: '信号发生器',
     summary: 'Alpha / Score 映射、确认根数、TTL 与原因码。',
-  },
-  {
-    id: 'entry',
-    title: 'Entry',
-    subtitle: '开仓策略',
-    summary: '进场时机、限价/下一根开盘与开仓约束。',
   },
   {
     id: 'sizing',
@@ -65,8 +59,8 @@ function SectionBody({ id }: { id: LabSection }) {
     case 'workbench':
       return <WorkbenchPanel />
     case 'factor':
+      return <FactorPanel />
     case 'signal':
-    case 'entry':
     case 'sizing':
     case 'admin':
       return (
@@ -99,7 +93,7 @@ export default function StrategyLabPage({ onBackHome }: Props) {
         </p>
         <h1 className="mt-2 text-3xl font-semibold tracking-tight text-ink">策略实验室</h1>
         <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted">
-          左侧切换回测看板、因子/信号/开仓/仓位模块与管理后台。
+          左侧切换回测看板、因子与特征 / 信号发生器 / 仓位控制与管理后台。
         </p>
       </header>
 

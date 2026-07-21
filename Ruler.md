@@ -135,9 +135,17 @@ api = TqApi(
 - 启动后端 API：`uvicorn dashboard.api:app --reload --port 8787` → http://127.0.0.1:8787
 - 启动前端：`cd web && npm run dev` → http://127.0.0.1:5173（`/api` 代理到 8787）
 - **欢迎首页**（2026-07-20）：深色科技简约门户（Apple Dark Mode 语义色）
-  - `#/` → `WelcomePage`；`#/lab` → 策略实验室侧栏：回测看板 / 因子挖掘 / 信号生成 / 开仓策略 / 仓位控制 / 管理后台
+  - `#/` → `WelcomePage`；`#/lab` → 策略实验室侧栏：回测看板 / 因子与特征 / 信号发生器 / 仓位控制 / 管理后台
   - 主题：`web/src/theme/AppleAntdProvider.tsx`（高对比：正文 `#F5F5F7`、次要 `#C8D0DC`、实色卡片 `#1A2740`）
   - 扩展方式：在 `StrategyLabPage.tsx` 的 `LabSection` / `LAB_NAV` 追加项；未实现页用 `ComingSoonPanel`
+  - **策略装配区**（2026-07-21）：三节点流水线 —— ①因子与特征 → ②信号发生器 → ③仓位控制；已移除独立「开仓策略」节点与侧栏项；旧 localStorage 四节点装配经 `normalizePipelineNodes` 兼容加载
+  - **因子与特征页**（2026-07-21 减法重构 + 命名入库）：真正的 Factor Mining，不是指标陈列室
+    - UI：`FactorPanel.tsx` + `factor-data.ts`
+    - 草稿：`localStorage` `ignitequant.lab.factor_mining_v2`（仅编辑缓存）
+    - **命名因子组合库**：`ignitequant.lab.factor_combos_v1`（另存为 / 覆盖更新 / 删除 / 载入）
+    - **在线 Python 编辑器**（2026-07-21）：`@monaco-editor/react` + 本地 `monaco-editor`（`loader.config({ monaco })`，避免 CDN 卡住）；8s 超时降级纯文本框；一个组合 = 多个可命名 `.py` 代码块
+    - 回测看板节点 1「因子与特征」下拉**只读该库**；无组合时提示先去因子页入库
+    - Python 壳仍在 `src/ignitequant/factors/`（与编辑器模板对齐）
   - `#/lab-legacy` → 旧版策略实验室
   - 工作台注意：`persistDb=否` 不写入历史列表；选历史回测会退出当前策略选中防误更新
   - 测试账号：`回测机制`（缓存 / 天勤）+ 开始测试时显示分阶段进度条（当前为演示进度，后续可接 `/api/jobs`）

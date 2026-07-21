@@ -1,6 +1,6 @@
 /** 回测工作台：策略档案、装配快照、回测结果与图表聚合。 */
 
-export type PipelineNodeKey = 'factor' | 'signal' | 'entry' | 'sizing'
+export type PipelineNodeKey = 'factor' | 'signal' | 'sizing'
 
 export type PipelineOption = { id: string; label: string; desc: string }
 
@@ -82,40 +82,43 @@ export type BacktestRun = {
 }
 
 export const PIPELINE_OPTIONS: Record<PipelineNodeKey, PipelineOption[]> = {
-  factor: [
-    { id: 'factor_legacy', label: '因子挖掘 · Legacy', desc: 'MA/ATR/ADX/KDJ/量能兼容公式' },
-    { id: 'factor_v2', label: '因子挖掘 2 · 标准化', desc: 'Trend/Slope/DMI/Momentum 标准化' },
-    { id: 'factor_vol_oi', label: '因子挖掘 · 量仓确认', desc: '在趋势因子上叠加量/OI 确认' },
-  ],
+  factor: [], // 由已保存的因子组合动态填充，见 listFactorNodeOptions()
   signal: [
-    { id: 'signal_score', label: '信号 · Score[-3,3]', desc: '格兰维尔+量能+KDJ' },
-    { id: 'signal_alpha_055', label: '信号 · Alpha 0.55/2根', desc: '加权 Alpha + 确认 2 根' },
-    { id: 'signal_alpha_065', label: '信号 · Alpha 0.65/1根', desc: '更高阈值、更短确认' },
-  ],
-  entry: [
-    { id: 'entry_next_open', label: '开仓 · 下一根开盘', desc: '信号后下一可成交价' },
-    { id: 'entry_confirm_2', label: '开仓 · 双K确认', desc: '连续两根同向再进场' },
-    { id: 'entry_limit', label: '开仓 · 被动限价', desc: '挂限价减少滑点（研究档）' },
+    { id: 'signal_score', label: '信号发生器 · Score[-3,3]', desc: '格兰维尔+量能+KDJ' },
+    { id: 'signal_alpha_055', label: '信号发生器 · Alpha 0.55/2根', desc: '加权 Alpha + 确认 2 根' },
+    { id: 'signal_alpha_065', label: '信号发生器 · Alpha 0.65/1根', desc: '更高阈值、更短确认' },
   ],
   sizing: [
-    { id: 'size_fixed_1', label: '仓位 · 固定 1 手', desc: '控制变量基线' },
-    { id: 'size_by_signal', label: '仓位 · 按信号强度', desc: 'LOT_BY_SIGNAL 映射' },
-    { id: 'size_atr_risk', label: '仓位 · ATR 风险定仓', desc: '按权益风险预算手数' },
+    { id: 'size_fixed_1', label: '仓位控制 · 固定 1 手', desc: '控制变量基线' },
+    { id: 'size_by_signal', label: '仓位控制 · 按信号强度', desc: 'LOT_BY_SIGNAL 映射' },
+    { id: 'size_atr_risk', label: '仓位控制 · ATR 风险定仓', desc: '按权益风险预算手数' },
   ],
 }
 
 export const PIPELINE_STEPS: { key: PipelineNodeKey; title: string }[] = [
-  { key: 'factor', title: '因子挖掘' },
-  { key: 'signal', title: '信号生成' },
-  { key: 'entry', title: '开仓策略' },
+  { key: 'factor', title: '因子与特征' },
+  { key: 'signal', title: '信号发生器' },
   { key: 'sizing', title: '仓位控制' },
 ]
 
 export const DEFAULT_PIPELINE: Record<PipelineNodeKey, string> = {
-  factor: 'factor_legacy',
+  factor: '',
   signal: 'signal_score',
-  entry: 'entry_next_open',
   sizing: 'size_fixed_1',
+}
+
+/** 兼容旧四节点装配（含 entry / 开仓策略），只保留三模块字段 */
+export function normalizePipelineNodes(
+  nodes: Partial<Record<PipelineNodeKey | 'entry', string>> | undefined,
+): Record<PipelineNodeKey, string> {
+  const factor = nodes?.factor || ''
+  // 旧写死 id 已废弃，清空以便用户改选「已保存因子组合」
+  const legacyFactorIds = new Set(['factor_legacy', 'factor_v2', 'factor_vol_oi'])
+  return {
+    factor: legacyFactorIds.has(factor) ? '' : factor,
+    signal: nodes?.signal || DEFAULT_PIPELINE.signal,
+    sizing: nodes?.sizing || DEFAULT_PIPELINE.sizing,
+  }
 }
 
 export const DEFAULT_ACCOUNT: AccountConfig = {
@@ -196,6 +199,7 @@ export function loadSavedStrategies(): SavedStrategy[] {
       s.account,
   ).map((s) => ({
     ...s,
+    nodes: normalizePipelineNodes(s.nodes),
     account: {
       ...DEFAULT_ACCOUNT,
       ...s.account,
@@ -211,7 +215,9 @@ export function persistSavedStrategies(list: SavedStrategy[]) {
 export function loadAssemblySnapshots(): AssemblySnapshot[] {
   const raw = loadJson<AssemblySnapshot[]>(LS_ASSEMBLIES, [])
   if (!Array.isArray(raw)) return []
-  return raw.filter((s) => s && typeof s.id === 'string' && s.nodes)
+  return raw
+    .filter((s) => s && typeof s.id === 'string' && s.nodes)
+    .map((s) => ({ ...s, nodes: normalizePipelineNodes(s.nodes) }))
 }
 
 export function persistAssemblySnapshots(list: AssemblySnapshot[]) {
@@ -230,6 +236,7 @@ export function loadBacktestRuns(): BacktestRun[] {
       r.kpis,
   ).map((r) => ({
     ...r,
+    nodes: normalizePipelineNodes(r.nodes),
     account: {
       ...DEFAULT_ACCOUNT,
       ...r.account,
