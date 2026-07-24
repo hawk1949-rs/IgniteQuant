@@ -1,4 +1,4 @@
-type ModuleKey = 'lab' | 'lab-legacy'
+type ModuleKey = 'lab' | 'lab-legacy' | 'sim'
 
 type Props = {
   onNavigate: (key: ModuleKey) => void
@@ -20,6 +20,12 @@ const MODULES: {
     key: 'lab-legacy',
     title: '旧版策略实验室',
     desc: '原 Falcon 回测控制台：本地/天勤回测、评分对照与跑次档案。',
+    arrow: '进入 →',
+  },
+  {
+    key: 'sim',
+    title: '模拟盘座舱',
+    desc: '天勤模拟一页总览：行情对照、账户指标、思考链路与委托成交，支持一键启动与复盘。',
     arrow: '进入 →',
   },
 ]
@@ -47,6 +53,13 @@ export default function WelcomePage({ onNavigate }: Props) {
           >
             旧版策略实验室
           </button>
+          <button
+            type="button"
+            className="site-header__link-btn"
+            onClick={() => onNavigate('sim')}
+          >
+            模拟盘座舱
+          </button>
         </nav>
       </header>
 
@@ -55,7 +68,7 @@ export default function WelcomePage({ onNavigate }: Props) {
           <p className="welcome-hero__eyebrow">Quantitative Platform</p>
           <h1>IgniteQuant</h1>
           <p className="welcome-hero__lead">
-            面向策略研究与回测实验的统一门户。从下方进入模块，保持简洁，专注决策。
+            面向策略研究、回测实验与模拟盘观察的统一门户。从下方进入模块，保持简洁，专注决策。
           </p>
         </header>
 

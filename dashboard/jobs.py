@@ -175,7 +175,7 @@ class BacktestJobQueue:
                 conn.execute(
                     """
                     UPDATE backtest_job
-                    SET status='SUCCEEDED', progress=1, progress_msg='done',
+                    SET status='SUCCEEDED', progress=1, progress_msg='完成',
                         result_run_ids_json=?, finished_at=?, error_summary=''
                     WHERE job_id=? AND status='RUNNING'
                     """,

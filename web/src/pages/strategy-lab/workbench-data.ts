@@ -4,13 +4,17 @@ export type PipelineNodeKey = 'factor' | 'signal' | 'sizing'
 
 export type PipelineOption = { id: string; label: string; desc: string }
 
-export type ChartMetric = 'equity' | 'pnl' | 'lots'
+export type ChartMetric = 'equity' | 'pnl' | 'ror' | 'drawdown' | 'lots'
 export type ChartPeriod = 'day' | 'month' | 'quarter' | 'year'
 
 export type SeriesPoint = {
   t: string
   equity: number
   pnl: number
+  /** 相对初始资金的累计收益率，如 0.025 = +2.5% */
+  ror: number
+  /** 相对历史峰值的回撤（≤0），如 -0.05 = -5% */
+  drawdown: number
   lots: number
 }
 
@@ -81,8 +85,7 @@ export type BacktestRun = {
   kpis: KpiSet
 }
 
-export const PIPELINE_OPTIONS: Record<PipelineNodeKey, PipelineOption[]> = {
-  factor: [], // 由已保存的因子组合动态填充，见 listFactorNodeOptions()
+export const PIPELINE_OPTIONS: Record<Exclude<PipelineNodeKey, 'factor'>, PipelineOption[]> = {
   signal: [
     { id: 'signal_score', label: '信号发生器 · Score[-3,3]', desc: '格兰维尔+量能+KDJ' },
     { id: 'signal_alpha_055', label: '信号发生器 · Alpha 0.55/2根', desc: '加权 Alpha + 确认 2 根' },
@@ -95,8 +98,8 @@ export const PIPELINE_OPTIONS: Record<PipelineNodeKey, PipelineOption[]> = {
   ],
 }
 
-export const PIPELINE_STEPS: { key: PipelineNodeKey; title: string }[] = [
-  { key: 'factor', title: '因子与特征' },
+/** 回测看板装配区只选信号与仓位；因子在「因子与特征」页独立挖掘 */
+export const PIPELINE_STEPS: { key: Exclude<PipelineNodeKey, 'factor'>; title: string }[] = [
   { key: 'signal', title: '信号发生器' },
   { key: 'sizing', title: '仓位控制' },
 ]
@@ -107,15 +110,12 @@ export const DEFAULT_PIPELINE: Record<PipelineNodeKey, string> = {
   sizing: 'size_fixed_1',
 }
 
-/** 兼容旧四节点装配（含 entry / 开仓策略），只保留三模块字段 */
+/** 兼容旧装配字段；factor 节点已从看板 UI 移除，统一置空 */
 export function normalizePipelineNodes(
   nodes: Partial<Record<PipelineNodeKey | 'entry', string>> | undefined,
 ): Record<PipelineNodeKey, string> {
-  const factor = nodes?.factor || ''
-  // 旧写死 id 已废弃，清空以便用户改选「已保存因子组合」
-  const legacyFactorIds = new Set(['factor_legacy', 'factor_v2', 'factor_vol_oi'])
   return {
-    factor: legacyFactorIds.has(factor) ? '' : factor,
+    factor: '',
     signal: nodes?.signal || DEFAULT_PIPELINE.signal,
     sizing: nodes?.sizing || DEFAULT_PIPELINE.sizing,
   }
@@ -139,7 +139,7 @@ export const BACKTEST_ENGINE_OPTIONS: {
   {
     id: 'cache',
     label: '缓存回测',
-    desc: '读本地 market_cache，速度快，适合日常迭代。',
+    desc: '读本地 market_cache；缺区间会先补拉（进度可能显示预热日，回测仍按所选起止日）。',
   },
   {
     id: 'tq',
@@ -156,8 +156,10 @@ export const WORKBENCH_SYMBOLS = [
 ] as const
 
 export const CHART_METRIC_OPTIONS: { id: ChartMetric; label: string }[] = [
-  { id: 'equity', label: '账号权益' },
-  { id: 'pnl', label: '账号收益' },
+  { id: 'equity', label: '总资产' },
+  { id: 'ror', label: '收益率' },
+  { id: 'drawdown', label: '回撤' },
+  { id: 'pnl', label: '累计盈亏' },
   { id: 'lots', label: '成交手数' },
 ]
 
@@ -227,22 +229,36 @@ export function persistAssemblySnapshots(list: AssemblySnapshot[]) {
 export function loadBacktestRuns(): BacktestRun[] {
   const raw = loadJson<BacktestRun[]>(LS_RUNS, [])
   if (!Array.isArray(raw)) return []
-  return raw.filter(
-    (r) =>
-      r &&
-      typeof r.id === 'string' &&
-      Array.isArray(r.series) &&
-      Array.isArray(r.trades) &&
-      r.kpis,
-  ).map((r) => ({
-    ...r,
-    nodes: normalizePipelineNodes(r.nodes),
-    account: {
-      ...DEFAULT_ACCOUNT,
-      ...r.account,
-      engine: r.account?.engine === 'tq' ? 'tq' : 'cache',
-    },
-  }))
+  return raw
+    .filter(
+      (r) =>
+        r &&
+        typeof r.id === 'string' &&
+        Array.isArray(r.series) &&
+        Array.isArray(r.trades) &&
+        r.kpis,
+    )
+    .map((r) => {
+      const account = {
+        ...DEFAULT_ACCOUNT,
+        ...r.account,
+        engine: r.account?.engine === 'tq' ? 'tq' : ('cache' as const),
+      }
+      const needsEnrich = r.series.some(
+        (p) => typeof p.ror !== 'number' || typeof p.drawdown !== 'number',
+      )
+      return {
+        ...r,
+        nodes: normalizePipelineNodes(r.nodes),
+        account,
+        series: needsEnrich
+          ? enrichEquitySeries(
+              r.series.map((p) => ({ t: p.t, equity: p.equity, lots: p.lots ?? 0 })),
+              account.initBalance,
+            )
+          : r.series,
+      }
+    })
 }
 
 export function persistBacktestRuns(list: BacktestRun[]) {
@@ -253,12 +269,34 @@ export function newId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 }
 
+/** 由权益序列补齐累计收益率与回撤（相对峰值）。 */
+export function enrichEquitySeries(
+  points: { t: string; equity: number; lots?: number }[],
+  initBalance: number,
+): SeriesPoint[] {
+  const init = initBalance > 0 ? initBalance : 1
+  let peak = init
+  return points.map((p) => {
+    const equity = Number(p.equity)
+    peak = Math.max(peak, equity)
+    const drawdown = peak > 0 ? (equity - peak) / peak : 0
+    return {
+      t: p.t,
+      equity,
+      pnl: equity - init,
+      ror: (equity - init) / init,
+      drawdown,
+      lots: p.lots ?? 0,
+    }
+  })
+}
+
 export function buildDemoSeries(
   initBalance: number,
   points = 90,
   enableCommission = true,
 ): SeriesPoint[] {
-  const out: SeriesPoint[] = []
+  const raw: { t: string; equity: number; lots: number }[] = []
   let eq = initBalance
   const feeDrag = enableCommission ? 0.00012 : 0
   const start = new Date('2025-01-02T09:00:00')
@@ -267,14 +305,13 @@ export function buildDemoSeries(
     const drift = Math.sin(i / 5) * 0.004 + (i % 7 === 0 ? -0.006 : 0.002) - feeDrag
     eq = Math.max(initBalance * 0.85, eq * (1 + drift))
     const lots = i % 3 === 0 ? 1 + (i % 3) : i % 5 === 0 ? 2 : 0
-    out.push({
+    raw.push({
       t: d.toISOString().slice(0, 10),
       equity: Math.round(eq),
-      pnl: Math.round(eq - initBalance),
       lots,
     })
   }
-  return out
+  return enrichEquitySeries(raw, initBalance)
 }
 
 export function buildDemoTrades(symbolName: string): WorkbenchTrade[] {
@@ -323,7 +360,7 @@ function periodKey(isoDate: string, period: ChartPeriod): string {
   return `${y}-Q${q}`
 }
 
-/** 按日/月/季/年聚合；权益取期末，收益取期末累计，手数求和 */
+/** 按日/月/季/年聚合；权益/收益/回撤取期末，手数求和 */
 export function aggregateSeries(
   series: SeriesPoint[],
   period: ChartPeriod,
@@ -342,6 +379,8 @@ export function aggregateSeries(
         t: key,
         equity: p.equity,
         pnl: p.pnl,
+        ror: p.ror,
+        drawdown: p.drawdown,
         lots: prev.lots + p.lots,
       })
     }
@@ -355,5 +394,15 @@ export function metricValue(p: SeriesPoint, metric: ChartMetric): number {
 
 export function formatMetricValue(v: number, metric: ChartMetric): string {
   if (metric === 'lots') return String(Math.round(v))
+  if (metric === 'ror' || metric === 'drawdown') {
+    return `${(v * 100).toFixed(2)}%`
+  }
   return Math.round(v).toLocaleString('zh-CN')
+}
+
+export function chartStrokeColor(metric: ChartMetric): string {
+  if (metric === 'drawdown') return '#FF453A'
+  if (metric === 'ror') return '#30D158'
+  if (metric === 'lots') return '#BF5AF2'
+  return '#0A84FF'
 }

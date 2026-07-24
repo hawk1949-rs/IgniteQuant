@@ -13,7 +13,7 @@ CONFIG_VERSION = "falcon_legacy_v1"
 
 @dataclass(frozen=True)
 class FactorConfig:
-    warmup_bars: int = 52
+    warmup_bars: int = 5
     subscription_bars: int = 400
     ma_fast: int = 7
     ma_mid: int = 14

@@ -31,7 +31,7 @@ if str(ROOT / "src") not in sys.path:
 from falcon.sizing import LOT_BY_SIGNAL
 from ignitequant.config import load_active_decision_config
 from ignitequant.domain.enums import RiskAction
-from ignitequant.domain.models import AccountSnapshot, PositionSnapshot
+from ignitequant.domain.models import AccountSnapshot, FillEvent, PositionSnapshot
 from ignitequant.engine import (
     BrokerFacts,
     FalconDecisionPipeline,
@@ -70,10 +70,24 @@ PERSIST_DB = ROOT / "data" / "runtime" / "falcon_au_sim.sqlite"
 RECON_EVERY_BARS = 12  # ~1 hour on 5m bars
 
 
-def _persist_state(session: PersistenceSession | None, pipeline: FalconDecisionPipeline, *, symbol: str, net: int, pending: int | None, last_bar_id: str, config_hash: str) -> None:
+def _persist_state(
+    session: PersistenceSession | None,
+    pipeline: FalconDecisionPipeline,
+    *,
+    symbol: str,
+    net: int,
+    pending: int | None,
+    last_bar_id: str,
+    config_hash: str,
+    last_price: float | None = None,
+) -> None:
     if session is None:
         return
     rs = pipeline.risk.state
+    extra: dict = {}
+    if last_price is not None and float(last_price) > 0:
+        extra["last_price"] = float(last_price)
+        extra["quote_as_of"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     session.save_state(
         symbol=symbol,
         current_target=pipeline.current_target,
@@ -86,7 +100,101 @@ def _persist_state(session: PersistenceSession | None, pipeline: FalconDecisionP
         pending_desired=pending,
         last_bar_id=last_bar_id,
         config_hash=config_hash,
+        extra=extra or None,
     )
+
+
+def _capture_live_klines(klines, *, trade_symbol: str) -> None:
+    """Dump Tq sim kline window for Sim Cockpit (not market_cache)."""
+    try:
+        from ignitequant.market.sim_klines import dump_tq_klines_snapshot
+
+        dump_tq_klines_snapshot(
+            INSTANCE_ID,
+            klines,
+            signal_symbol=SIGNAL_SYMBOL,
+            trade_symbol=trade_symbol,
+            duration_seconds=KLINE_SECONDS,
+            runtime_dir=PERSIST_DB.parent,
+        )
+    except Exception as exc:  # noqa: BLE001 — must not stop trading
+        print(f"[K线快照] 写入失败（忽略）: {exc}", flush=True)
+
+
+def _try_confirm_fill(
+    *,
+    executor: TargetPositionExecutor | None,
+    position,
+    persist: PersistenceSession | None,
+    last_price: float,
+    atr: float,
+    signal: int,
+) -> FillEvent | None:
+    """Confirm pending TargetPosTask fill once broker net matches intent."""
+    if executor is None or position is None:
+        return None
+    if executor.active_intent is None:
+        return None
+    try:
+        net = int(position.pos)
+    except Exception:
+        return None
+    fill = executor.poll_position(net, last_price=last_price, atr=atr, signal=signal)
+    if fill is None:
+        return None
+    if persist is not None:
+        persist.record_fill(fill)
+    print(
+        f"  成交确认 {fill.side} {fill.qty}@{fill.price:.2f} "
+        f"intent={fill.intent_id} net={net}",
+        flush=True,
+    )
+    return fill
+
+
+def _wait_fill_briefly(
+    api: TqApi,
+    *,
+    executor: TargetPositionExecutor,
+    position,
+    persist: PersistenceSession | None,
+    last_price: float,
+    atr: float,
+    signal: int,
+    rounds: int = 8,
+    timeout_s: float = 1.5,
+) -> FillEvent | None:
+    """Poll a few quote updates after submit — TqKq rarely fills synchronously."""
+    fill = _try_confirm_fill(
+        executor=executor,
+        position=position,
+        persist=persist,
+        last_price=last_price,
+        atr=atr,
+        signal=signal,
+    )
+    if fill is not None:
+        return fill
+    for _ in range(max(rounds, 0)):
+        try:
+            api.wait_update(deadline=time.time() + timeout_s)
+        except Exception:
+            break
+        try:
+            px = float(last_price)
+        except (TypeError, ValueError):
+            px = last_price
+        fill = _try_confirm_fill(
+            executor=executor,
+            position=position,
+            persist=persist,
+            last_price=px,
+            atr=atr,
+            signal=signal,
+        )
+        if fill is not None:
+            return fill
+    return None
 
 
 def main() -> None:
@@ -123,6 +231,9 @@ def main() -> None:
 
     pipeline = FalconDecisionPipeline(cfg)
     trade_symbol = ""
+    last_saved_bar_id = ""
+    last_fill_atr = 1.0
+    last_fill_signal = 0
     executor: TargetPositionExecutor | None = None
     position = None
     account = api.get_account()
@@ -150,6 +261,7 @@ def main() -> None:
             executor = TargetPositionExecutor(api, trade_symbol)
             position = api.get_position(trade_symbol)
             print(f"交易合约切换为 {trade_symbol}", flush=True)
+            _capture_live_klines(klines, trade_symbol=trade_symbol)
 
             if persist is not None:
                 recovery = persist.recover(
@@ -227,43 +339,91 @@ def main() -> None:
                     )
                     if intent0 and persist is not None:
                         persist.record_intent(intent0)
+                    last_fill_atr = atr_of(result0)
+                    last_fill_signal = int(result0.signal.legacy_signal)
+                    _wait_fill_briefly(
+                        api,
+                        executor=executor,
+                        position=position,
+                        persist=persist,
+                        last_price=close_of(result0),
+                        atr=last_fill_atr,
+                        signal=last_fill_signal,
+                    )
                     print(
                         f"启动调仓 0->{desired0} | {trade_symbol} "
                         f"sl={pipeline.risk.state.stop_price:.2f} "
                         f"tp={pipeline.risk.state.take_price:.2f}",
                         flush=True,
                     )
+                    confirmed0 = int(position.pos)
                     _persist_state(
                         persist,
                         pipeline,
                         symbol=trade_symbol,
-                        net=net0,
-                        pending=desired0,
+                        net=confirmed0,
+                        pending=None if confirmed0 == desired0 else desired0,
                         last_bar_id=result0.bar_id,
                         config_hash=cfg.config_hash(),
+                        last_price=close_of(result0),
                     )
+                    last_saved_bar_id = result0.bar_id
 
         while True:
             api.wait_update()
             now = time.time()
 
+            # Confirm async TargetPosTask fills between bars.
+            try:
+                q_px = float(main_quote.last_price)
+            except (TypeError, ValueError):
+                q_px = 0.0
+            if q_px > 0:
+                _try_confirm_fill(
+                    executor=executor,
+                    position=position,
+                    persist=persist,
+                    last_price=q_px,
+                    atr=last_fill_atr,
+                    signal=last_fill_signal,
+                )
+
             if not api.is_changing(klines.iloc[-1], "datetime"):
                 if now - last_heartbeat >= HEARTBEAT_SECONDS:
                     last_heartbeat = now
                     net = int(position.pos) if position is not None else 0
+                    pending = None
+                    if executor is not None and executor.active_intent is not None:
+                        pending = int(executor.active_intent.desired_position)
                     print(
                         f"[心跳] {datetime.datetime.now():%H:%M:%S} "
                         f"{trade_symbol or '-'} target={pipeline.current_target} net={net} "
                         f"balance={account.balance:.2f} last={main_quote.last_price} "
-                        f"rt={(persist.runtime.runtime_state if persist else 'N/A')}",
+                        f"rt={(persist.runtime.runtime_state if persist else 'N/A')}"
+                        f"{'' if pending is None else f' pending={pending}'}",
                         flush=True,
                     )
+                    if persist is not None and trade_symbol:
+                        _persist_state(
+                            persist,
+                            pipeline,
+                            symbol=trade_symbol,
+                            net=net,
+                            pending=pending,
+                            last_bar_id=last_saved_bar_id,
+                            config_hash=cfg.config_hash(),
+                            last_price=q_px if q_px > 0 else None,
+                        )
+                    if trade_symbol:
+                        _capture_live_klines(klines, trade_symbol=trade_symbol)
                 continue
 
             last_heartbeat = now
             underlying = str(getattr(main_quote, "underlying_symbol", "") or "")
             if not underlying:
                 continue
+
+            _capture_live_klines(klines, trade_symbol=underlying)
 
             if underlying != trade_symbol:
                 if executor is not None and (
@@ -365,7 +525,9 @@ def main() -> None:
                     pending=None,
                     last_bar_id=result.bar_id,
                     config_hash=cfg.config_hash(),
+                    last_price=close_of(result),
                 )
+                last_saved_bar_id = result.bar_id
                 continue
 
             pretrade = apply_pretrade(
@@ -421,24 +583,26 @@ def main() -> None:
             if persist is not None and not persist.record_intent(intent):
                 print(f"{dt} 持久化幂等命中，跳过重复意图 key={key}", flush=True)
 
-            fill = executor.poll_position(
-                int(position.pos),
+            last_fill_atr = atr
+            last_fill_signal = int(result.signal.legacy_signal)
+            fill = _wait_fill_briefly(
+                api,
+                executor=executor,
+                position=position,
+                persist=persist,
                 last_price=close_of(result),
                 atr=atr,
-                signal=result.signal.legacy_signal,
+                signal=last_fill_signal,
             )
             confirmed = int(position.pos)
             pending = None if fill or confirmed == desired else desired
-            if fill:
-                if persist is not None:
-                    persist.record_fill(fill)
-                if desired != 0 and executor.state.entry is not None:
-                    print(
-                        f"  成交确认 entry={fill.price:.2f} "
-                        f"sl={pipeline.risk.state.stop_price:.2f} "
-                        f"tp={pipeline.risk.state.take_price:.2f}",
-                        flush=True,
-                    )
+            if fill and desired != 0 and executor.state.entry is not None:
+                print(
+                    f"  风控锁定 entry={fill.price:.2f} "
+                    f"sl={pipeline.risk.state.stop_price:.2f} "
+                    f"tp={pipeline.risk.state.take_price:.2f}",
+                    flush=True,
+                )
             _persist_state(
                 persist,
                 pipeline,
@@ -447,7 +611,9 @@ def main() -> None:
                 pending=pending,
                 last_bar_id=result.bar_id,
                 config_hash=cfg.config_hash(),
+                last_price=close_of(result),
             )
+            last_saved_bar_id = result.bar_id
 
     except KeyboardInterrupt:
         print("收到退出信号。", flush=True)

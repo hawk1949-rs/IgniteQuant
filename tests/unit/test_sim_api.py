@@ -1,0 +1,422 @@
+# -*- coding: utf-8 -*-
+"""Sim Cockpit read-only API tests (temporary SQLite fixture)."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from ignitequant.persistence.schema import DDL
+
+
+@pytest.fixture()
+def runtime_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    db_path = runtime / "falcon_au_sim.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(DDL)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO strategy_state(
+            instance_id, strategy_id, account_id, symbol, runtime_state,
+            payload_json, state_version, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "falcon_au_sim",
+            "falcon_v2",
+            "local",
+            "SHFE.au2608",
+            "READY",
+            json.dumps(
+                {
+                    "current_target": 1,
+                    "confirmed_net": 1,
+                    "cooldown_left": 0,
+                    "config_hash": "abc",
+                }
+            ),
+            1,
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO account_snapshot_event(
+            instance_id, account_id, equity, available, margin, margin_ratio,
+            as_of, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("falcon_au_sim", "local", 1_001_200.0, 960_000.0, 40_000.0, 0.04, now, "{}", now),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_snapshot_event(
+            instance_id, symbol, net_position, source, as_of, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("falcon_au_sim", "SHFE.au2608", 1, "broker", now, "{}", now),
+    )
+    payload = {
+        "factors": {
+            "regime": "TREND_UP",
+            "quality": "READY",
+            "values": {"atr": 0.5, "adx": 28.0, "close": 880.0},
+            "reason_codes": [],
+        },
+        "signal": {"legacy_signal": 1, "reason_codes": ["SCORE"]},
+        "target": {"desired_position": 1},
+        "legacy_score_parts": [0, 0, 1, 0],
+    }
+    conn.execute(
+        """
+        INSERT INTO decision_event(
+            instance_id, decision_id, bar_id, symbol, applied_action,
+            target_before, target_after, legacy_signal, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "falcon_au_sim",
+            "bar-1",
+            "bar-1",
+            "SHFE.au2608",
+            "TARGET",
+            0,
+            1,
+            1,
+            json.dumps(payload),
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO risk_decision_event(
+            instance_id, risk_decision_id, decision_id, action,
+            requested_position, approved_position, rule_hits_json, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "falcon_au_sim",
+            "risk-1",
+            "bar-1",
+            "PASS",
+            1,
+            1,
+            "[]",
+            "{}",
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO order_intent_event(
+            instance_id, intent_id, decision_id, symbol, current_position,
+            desired_position, urgency, idempotency_key, status,
+            reason_codes_json, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "falcon_au_sim",
+            "intent-1",
+            "bar-1",
+            "SHFE.au2608",
+            0,
+            1,
+            "NORMAL",
+            "key-1",
+            "FILLED",
+            "[]",
+            "{}",
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO trade_fill_event(
+            instance_id, fill_id, intent_id, symbol, price, qty, fee, side,
+            trade_time, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "falcon_au_sim",
+            "fill-1",
+            "intent-1",
+            "SHFE.au2608",
+            880.0,
+            1,
+            10.0,
+            "BUY",
+            now,
+            "{}",
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    import dashboard.sim_api as sim_api
+
+    monkeypatch.setattr(sim_api, "RUNTIME_DIR", runtime)
+    return db_path
+
+
+@pytest.fixture()
+def client(runtime_db: Path) -> TestClient:
+    from dashboard.api import app
+
+    return TestClient(app)
+
+
+def test_sim_catalog(client: TestClient) -> None:
+    res = client.get("/api/sim/catalog")
+    assert res.status_code == 200
+    body = res.json()
+    assert any(f["id"] == "tq" and f["enabled"] for f in body["frameworks"])
+    assert any(f["id"] == "mt5" and not f["enabled"] for f in body["frameworks"])
+    assert any(s["id"] == "falcon_v2" for s in body["strategies"])
+    au = next(s for s in body["symbols"] if s["id"] == "au")
+    assert au["overseas_pair"]["display_symbol"] == "XAUUSD"
+    assert any(l["instance_id"] == "falcon_au_sim" for l in body["launchers"])
+
+
+def test_sim_sessions_and_summary(client: TestClient) -> None:
+    res = client.get("/api/sim/sessions")
+    assert res.status_code == 200
+    sessions = res.json()["sessions"]
+    assert any(s["instance_id"] == "falcon_au_sim" for s in sessions)
+
+    summary = client.get("/api/sim/sessions/falcon_au_sim/summary")
+    assert summary.status_code == 200
+    body = summary.json()
+    assert body["symbol"] == "SHFE.au2608"
+    assert body["account"]["equity"] == 1_001_200.0
+    assert body["position"]["net_position"] == 1
+    assert body["status"] in {"RUNNING", "STALE", "IDLE"}
+    assert body["status_label"] in {"运行中", "数据滞后", "未运行"}
+    assert body["framework_label"] == "天勤模拟盘"
+    assert body["last_price"] == pytest.approx(880.0)
+    assert body["last_price_source"] == "decision_close"
+
+
+def test_sim_metrics_and_decisions(client: TestClient) -> None:
+    metrics = client.get("/api/sim/sessions/falcon_au_sim/metrics").json()
+    assert metrics["equity"] == 1_001_200.0
+    assert metrics["pnl"] == pytest.approx(1_200.0)
+    assert metrics["fill_count"] == 1
+
+    decisions = client.get("/api/sim/sessions/falcon_au_sim/decisions?limit=10").json()
+    assert decisions["count"] == 1
+    d0 = decisions["decisions"][0]
+    assert d0["applied_action"] == "TARGET"
+    assert d0["regime"] == "TREND_UP"
+    assert d0["risk"]["action"] == "PASS"
+
+    intents = client.get("/api/sim/sessions/falcon_au_sim/intents").json()
+    assert intents["count"] == 1
+    fills = client.get("/api/sim/sessions/falcon_au_sim/fills").json()
+    assert fills["count"] == 1
+    assert fills["fills"][0]["side"] == "BUY"
+
+
+def test_sim_replay(client: TestClient) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    res = client.get("/api/sim/sessions/falcon_au_sim/replay", params={"at": now})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["mode"] == "replay"
+    assert body["decision"]["legacy_signal"] == 1
+    assert body["metrics_snapshot"]["fill_count"] == 1
+
+
+def test_sim_missing_session(client: TestClient) -> None:
+    res = client.get("/api/sim/sessions/does_not_exist/summary")
+    assert res.status_code == 404
+
+
+def test_sim_sessions_skips_job_db(
+    runtime_db: Path, client: TestClient, tmp_path: Path
+) -> None:
+    """backtest_jobs.sqlite must not 500 /api/sim/sessions."""
+    import dashboard.sim_api as sim_api
+
+    jobs = sim_api.RUNTIME_DIR / "backtest_jobs.sqlite"
+    conn = sqlite3.connect(str(jobs))
+    conn.execute("CREATE TABLE backtest_job (id TEXT PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+
+    res = client.get("/api/sim/sessions")
+    assert res.status_code == 200
+    ids = [s["instance_id"] for s in res.json()["sessions"]]
+    assert "falcon_au_sim" in ids
+    assert "backtest_jobs" not in ids
+
+
+def test_signal_symbol_for_trade_maps_contracts() -> None:
+    from dashboard.sim_api import _signal_symbol_for_trade
+
+    assert _signal_symbol_for_trade("SHFE.au2608") == "KQ.m@SHFE.au"
+    assert _signal_symbol_for_trade("KQ.m@SHFE.au") == "KQ.m@SHFE.au"
+    assert _signal_symbol_for_trade("au") == "KQ.m@SHFE.au"
+    assert _signal_symbol_for_trade("CZCE.FG509") == "KQ.m@CZCE.FG"
+
+
+def test_sim_market_and_overseas_endpoints(client: TestClient) -> None:
+    market = client.get("/api/sim/market/bars", params={"symbol_id": "au", "limit": 50})
+    assert market.status_code == 200
+    body = market.json()
+    assert body["symbol_id"] == "au"
+    assert body["signal_symbol"] == "KQ.m@SHFE.au"
+    assert "bars" in body
+    # Cockpit no longer serves market_cache; empty until sim writes live snapshot.
+    assert body.get("source") == "tqsdk_sim_live"
+
+    overseas = client.get("/api/sim/overseas/bars", params={"symbol_id": "rb"})
+    assert overseas.status_code == 200
+    assert overseas.json()["supported"] is False
+
+    au_pair = client.get("/api/sim/overseas/bars", params={"symbol_id": "au"})
+    assert au_pair.status_code == 200
+    assert au_pair.json()["supported"] is True
+    assert au_pair.json()["pair"]["display_symbol"] == "XAUUSD"
+
+
+def test_sim_live_klines_snapshot(client: TestClient, runtime_db: Path) -> None:
+    import dashboard.sim_api as sim_api
+    from ignitequant.market.sim_klines import dump_tq_klines_snapshot
+    import pandas as pd
+
+    # Fake Tq kline serial: 3 completed + 1 forming stub
+    ns0 = 1_784_875_500_000_000_000
+    rows = []
+    for i in range(4):
+        px = 880.0 + i * 0.1
+        rows.append(
+            {
+                "datetime": ns0 + i * 300_000_000_000,
+                "open": px,
+                "high": px + 0.2,
+                "low": px - 0.2,
+                "close": px + 0.05,
+                "volume": 100 + i,
+                "open_oi": 1,
+                "close_oi": 1,
+            }
+        )
+    klines = pd.DataFrame(rows)
+    dump_tq_klines_snapshot(
+        "falcon_au_sim",
+        klines,
+        signal_symbol="KQ.m@SHFE.au",
+        trade_symbol="SHFE.au2608",
+        runtime_dir=sim_api.RUNTIME_DIR,
+    )
+
+    market = client.get("/api/sim/market/bars", params={"symbol_id": "au"}).json()
+    assert len(market["bars"]) == 3  # forming stub excluded
+    assert market["last_price"] == pytest.approx(880.25)
+    assert market["source"] == "tqsdk_sim_live"
+    assert market["trade_symbol"] == "SHFE.au2608"
+
+    session = client.get("/api/sim/sessions/falcon_au_sim/bars").json()
+    assert len(session["bars"]) == 3
+    assert session["source"] == "tqsdk_sim_live"
+    # Prefer decision/sim live quote (fixture close=880) over snapshot tip.
+    assert session["last_price"] == pytest.approx(880.0)
+
+
+def test_sim_start_unknown_session(client: TestClient) -> None:
+    res = client.post("/api/sim/sessions/unknown_sim/start")
+    assert res.status_code == 400
+
+
+def test_sim_backfills_fills_from_submitted_intents(
+    client: TestClient, runtime_db: Path
+) -> None:
+    """Submitted intents that clearly reached target should show as fills."""
+    import dashboard.sim_api as sim_api
+
+    conn = sqlite3.connect(str(runtime_db))
+    now = datetime.now(timezone.utc).isoformat()
+    # Wipe fixture fill; leave a SUBMITTED open→flat chain.
+    conn.execute("DELETE FROM trade_fill_event")
+    conn.execute("DELETE FROM order_intent_event")
+    conn.execute(
+        """
+        INSERT INTO order_intent_event(
+            instance_id, intent_id, decision_id, symbol, current_position,
+            desired_position, urgency, idempotency_key, status,
+            reason_codes_json, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "falcon_au_sim",
+            "intent-a",
+            "bar-a",
+            "SHFE.au2608",
+            0,
+            -1,
+            "NORMAL",
+            "key-a",
+            "SUBMITTED",
+            "[]",
+            "{}",
+            now,
+        ),
+    )
+    later = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO order_intent_event(
+            instance_id, intent_id, decision_id, symbol, current_position,
+            desired_position, urgency, idempotency_key, status,
+            reason_codes_json, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "falcon_au_sim",
+            "intent-b",
+            "bar-b",
+            "SHFE.au2608",
+            -1,
+            0,
+            "HIGH",
+            "key-b",
+            "SUBMITTED",
+            "[]",
+            "{}",
+            later,
+        ),
+    )
+    conn.commit()
+    # Latest position is flat → last intent (-1→0) is also filled.
+    conn.execute("DELETE FROM position_snapshot_event")
+    conn.execute(
+        """
+        INSERT INTO position_snapshot_event(
+            instance_id, symbol, net_position, source, as_of, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("falcon_au_sim", "SHFE.au2608", 0, "broker", later, "{}", later),
+    )
+    conn.commit()
+    conn.close()
+
+    fills = client.get("/api/sim/sessions/falcon_au_sim/fills").json()
+    assert fills["count"] >= 2
+    intents = client.get("/api/sim/sessions/falcon_au_sim/intents").json()
+    statuses = {i["intent_id"]: i["status"] for i in intents["intents"]}
+    assert statuses["intent-a"] == "FILLED"
+    assert statuses["intent-b"] == "FILLED"
+    # Repair is idempotent
+    assert (
+        sim_api._repair_missing_fills(sim_api.RUNTIME_DIR / "falcon_au_sim.sqlite", "falcon_au_sim")
+        == 0
+    )

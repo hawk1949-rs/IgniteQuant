@@ -25,10 +25,13 @@ if str(ROOT / "src") not in sys.path:
 
 from ignitequant.analytics import (
     attribute_fills,
-    default_cost_model,
     fills_from_tq_trade_log,
     run_cost_stress,
     stress_summary,
+)
+from ignitequant.analytics.tq_metrics import (
+    annual_yield_from_ror,
+    sharpe_from_daily_balances,
 )
 from ignitequant.config import DecisionConfig, default_decision_config
 from ignitequant.domain.enums import RiskAction
@@ -40,7 +43,13 @@ from ignitequant.engine import (
     healthy_runtime,
     make_risk_engine,
 )
-from ignitequant.execution import RollStateMachine, TargetPositionExecutor
+from ignitequant.execution import (
+    RollStateMachine,
+    TargetPositionExecutor,
+    is_gfd_day_end_cancel,
+)
+from ignitequant.market.cache import resolve_instrument
+from ignitequant.market.symbols import cost_model_for
 import ignitequant as _iq
 
 
@@ -77,27 +86,12 @@ def _sharpe_from_daily_balances(
     trading_days_of_year: int = 250,
 ) -> float | None:
     """Annualized Sharpe from end-of-day equity (aligned with tqsdk get_sharp)."""
-    if len(balances) < 2:
-        return None
-    prev = float(init_balance) if init_balance > 0 else balances[0]
-    if prev <= 0:
-        return None
-    yields: list[float] = []
-    for bal in balances:
-        if prev <= 0:
-            return None
-        yields.append(bal / prev - 1.0)
-        prev = bal
-    if len(yields) < 2:
-        return None
-    mean = sum(yields) / len(yields)
-    var = sum((y - mean) ** 2 for y in yields) / len(yields)
-    std = math.sqrt(var)
-    if std <= 1e-12:
-        return None
-    rf_daily = (1.0 + risk_free_annual) ** (1.0 / trading_days_of_year) - 1.0
-    sharpe = math.sqrt(trading_days_of_year) * (mean - rf_daily) / std
-    return _finite_float(sharpe)
+    return sharpe_from_daily_balances(
+        balances,
+        init_balance=init_balance,
+        risk_free_annual=risk_free_annual,
+        trading_days_of_year=trading_days_of_year,
+    )
 
 
 def _balances_from_trade_log(trade_log: Any) -> list[float]:
@@ -119,12 +113,17 @@ def _sharpe_fallback_from_summary(
     max_drawdown: float | None,
     start: dt.date | None = None,
     end: dt.date | None = None,
+    trading_days: int | None = None,
 ) -> float | None:
     """When daily equity is unavailable, approximate vol from max drawdown."""
     ay = annual_yield
-    if ay is None and ror is not None and start and end and end > start:
-        years = max((end - start).days / 365.25, 1 / 365.25)
-        ay = (1.0 + float(ror)) ** (1.0 / years) - 1.0
+    if ay is None and ror is not None:
+        if trading_days and trading_days > 0:
+            ay = annual_yield_from_ror(float(ror), int(trading_days))
+        elif start and end and end > start:
+            # last-resort calendar estimate only when settle-day count unknown
+            years = max((end - start).days / 365.25, 1 / 365.25)
+            ay = (1.0 + float(ror)) ** (1.0 / years) - 1.0
     dd = abs(float(max_drawdown)) if max_drawdown is not None else None
     if ay is None or dd is None or dd < 1e-8:
         return None
@@ -186,9 +185,12 @@ def _extract_metrics(
         metrics["ror"] = (metrics["final_balance"] - init_balance) / init_balance
 
     log = trade_log if trade_log is not None else getattr(sim, "trade_log", None)
+    balances = _balances_from_trade_log(log)
+    if balances:
+        metrics["trading_days"] = len(balances)
     if metrics["sharpe"] is None:
         metrics["sharpe"] = _sharpe_from_daily_balances(
-            _balances_from_trade_log(log),
+            balances,
             init_balance=init_balance,
         )
     if metrics["sharpe"] is None:
@@ -198,6 +200,7 @@ def _extract_metrics(
             max_drawdown=metrics.get("max_drawdown"),
             start=start,
             end=end,
+            trading_days=metrics.get("trading_days"),
         )
     return metrics
 
@@ -236,6 +239,10 @@ def run_falcon_v2(
         risk=base.risk,
     )
 
+    spec = resolve_instrument(signal_symbol)
+    cost = cost_model_for(spec, tq_align=True)
+    commission_per_lot = cost.tq_commission_per_lot()
+
     sim = TqSim(init_balance=init_balance)
     api = TqApi(
         sim,
@@ -260,7 +267,28 @@ def run_falcon_v2(
         last_progress_day = None
 
         while True:
-            api.wait_update()
+            try:
+                api.wait_update()
+            except BacktestFinished:
+                raise
+            except Exception as exc:
+                # Hard-pinned limits that never cross the book get GFD-cancelled at
+                # settle; TargetPosTask raises 错单 and dies. Rebuild and retry.
+                if not is_gfd_day_end_cancel(exc):
+                    raise
+                if executor is not None and position is not None:
+                    try:
+                        decision_px = float(klines.iloc[-1]["open"])
+                    except Exception:
+                        decision_px = None
+                    executor.recover_after_gfd_cancel(
+                        current_net=int(position.pos),
+                        decision_price=decision_px,
+                        desired=int(pipeline.current_target),
+                    )
+                    trade_events += 1
+                continue
+
             if not api.is_changing(klines.iloc[-1], "datetime"):
                 continue
 
@@ -282,6 +310,7 @@ def run_falcon_v2(
                             current_net=net_old,
                             urgency="HIGH",
                             reason_codes=("ROLL_IN_PROGRESS",),
+                            decision_price=float(klines.iloc[-1]["open"]),
                         )
                         pipeline.force_flat()
                         trade_events += 1
@@ -296,7 +325,17 @@ def run_falcon_v2(
                     executor.destroy()
 
                 trade_symbol = underlying
-                executor = TargetPositionExecutor(api, trade_symbol)
+                # Force TqSim fees onto the same CostModel as LocalSim (align gate).
+                try:
+                    sim.set_commission(trade_symbol, commission_per_lot)
+                except Exception:
+                    pass
+                executor = TargetPositionExecutor(
+                    api,
+                    trade_symbol,
+                    align_tq_kline=True,
+                    price_tick=float(cost.tick_size),
+                )
                 position = api.get_position(trade_symbol)
                 if roll.in_progress:
                     roll.abort_to_idle()
@@ -306,6 +345,8 @@ def run_falcon_v2(
             bar_dt = dt.datetime.fromtimestamp(
                 int(klines.iloc[-1]["datetime"]) // 1_000_000_000
             )
+            # Decision / align fill reference: newly opened bar's open (stub close).
+            decision_px = float(klines.iloc[-1]["open"])
             net_pos = int(position.pos)
             allow_trade = bar_dt.date() < flat_date
             result = pipeline.on_bar_close(klines, trade=allow_trade)
@@ -315,7 +356,7 @@ def run_falcon_v2(
                 if progress_cb is not None:
                     span = max((end - start).days, 1)
                     done = max((bar_dt.date() - start).days, 0)
-                    progress_cb(min(done / span, 0.99), f"{bar_dt.date()} {trade_symbol}")
+                    progress_cb(min(done / span, 0.99), f"回测 {bar_dt.date()} {trade_symbol}")
 
             if not allow_trade:
                 if net_pos != 0 or pipeline.current_target != 0:
@@ -326,6 +367,7 @@ def run_falcon_v2(
                         current_net=net_pos,
                         urgency="HIGH",
                         reason_codes=("END_FLAT",),
+                        decision_price=decision_px,
                     )
                     trade_events += 1
                 continue
@@ -354,6 +396,7 @@ def run_falcon_v2(
                 urgency="HIGH" if result.applied_action != "TARGET" else "NORMAL",
                 reason_codes=pretrade.rule_hits,
                 idempotency_key=f"{result.bar_id}:{desired}:{result.applied_action}",
+                decision_price=decision_px,
             )
             if intent is None:
                 continue
@@ -395,7 +438,6 @@ def run_falcon_v2(
     if progress_cb is not None:
         progress_cb(1.0, "完成")
 
-    cost = default_cost_model()
     fills = fills_from_tq_trade_log(trade_log, default_symbol=trade_symbol)
     attribution = attribute_fills(fills, cost=cost)
     stress_rows = run_cost_stress(fills, base=cost) if fills else []
@@ -404,8 +446,17 @@ def run_falcon_v2(
     metrics["net_pnl_attr"] = attribution.net_pnl
     metrics["slippage_attr"] = attribution.slippage_pnl
 
+    equity_curve: list[dict[str, Any]] = []
+    if isinstance(trade_log, dict):
+        for day in sorted(trade_log.keys()):
+            account = (trade_log.get(day) or {}).get("account") or {}
+            bal = account.get("balance")
+            if isinstance(bal, (int, float)):
+                equity_curve.append({"t": str(day), "equity": float(bal)})
+
     return {
         "strategy_id": "falcon_v2",
+        "engine": "tq",
         "signal_symbol": signal_symbol,
         "trade_symbol": trade_symbol,
         "start": start.isoformat(),
@@ -413,6 +464,7 @@ def run_falcon_v2(
         "init_balance": init_balance,
         "elapsed_sec": round(elapsed, 2),
         "metrics": metrics,
+        "equity_curve": equity_curve,
         "config_version": cfg.config_version,
         "config_hash": cfg.config_hash(),
         "entry_mode": cfg.entry_mode,
@@ -429,6 +481,9 @@ def run_falcon_v2(
             "kline_seconds": kline_seconds,
             "data_length": data_length,
             "entry_mode": cfg.entry_mode,
+            "engine": "tq",
+            "align_mode": cost.align_mode,
+            "tq_commission_per_lot": commission_per_lot,
         },
     }
 

@@ -4,6 +4,7 @@
 
 - 核心逻辑与边界：`docs/ARCHITECTURE.md`
 - **项目能力与数据清单（给人看）**：`docs/PROJECT_CAPABILITIES.md`
+- **天勤→本地行情缓存规则（强制）**：`docs/market_cache_rules.md`
 - 工业级重构大框架：`docs/falcon2大框架.md`
 - 决策链 SOP 补充（因子/信号/仓位/风控）：`docs/falocn2小框架.md`
 - Phase 0 行为冻结基线：`docs/falcon_phase0_baseline.md`
@@ -119,18 +120,34 @@ api = TqApi(
 
 ## 策略看板（家庭量化作坊）
 
-### 本地行情缓存 + 离线回放（2026-07-18）
+### 本地行情缓存 + 离线回放（2026-07-18；意图纠偏 2026-07-22）
 
-- **默认引擎**：看板 / API `engine=local`（可选 `tq` 走天勤在线时光机对照）
+- **产品意图（用户确认）**：缓存是为了**加速贴近实盘的天勤回测**（`TqSim`+`TqBacktest`），不是另起一套结果可偏离的自研撮合当「正式回测」。
+- **现状（对齐中，2026-07-22）**：
+  - LocalSim / CostModel 默认 `align_mode=tq_kline`：成交价 = 决策价 ± 1 tick（镜像 TqSim 无 tick 时的合成盘口）；换月不再额外加 2 tick。
+  - `engine=tq` 对交易合约调用 `TqSim.set_commission`，手续费与 LocalSim 的 `CostModel` 对齐。
+  - **缓存修复**：旧下载器在 `is_changing(datetime)` 时只写入新 K 线开盘 stub（o=h=l=c, vol=0），历史 ATR 塌缩 → 决策与天勤分叉。现改为回写 `iloc[-2]` 完整 OHLC，并在本地回放时对**当前决策 bar** 做开盘 stub（与天勤 datetime-change 语义一致）。
+  - **必须重下缓存**：`python tools/download_market_cache.py --symbol KQ.m@SHFE.au --start ...`（其它品种同样）；旧 CSV 不可用。
+  - 对照脚本：`python tools/compare_local_tq.py --symbol KQ.m@SHFE.au --start YYYY-MM-DD --end YYYY-MM-DD`
+  - 门禁：`within_tolerances`（ror±2%、回撤±2%、期末权益相对差≤3%、成交笔数相对差≤15%）。
+  - **2026-07-22 短窗实测**（au `2025-01-02..01-10`，重下缓存后）：**门禁通过** — trades 20=20，期末权益差 100，ror/回撤过关。
+  - **仍可能有残差**：权益曲线日内盯市、平今单字段、保证金占用、更长区间 bar 边界；权威对照仍以 `engine=tq` 为准。
+- **硬约束**：天勤官方 `TqBacktest` **不支持**用本地 CSV 离线驱动回测（运行时从行情服务器取数）；缓存加速的是「本地对齐撮合预览」，不是「离线天勤时光机」。
+- **后续方向**：用对照脚本收敛残差；UI 标注 local 为「TqSim 语义对齐 / 非官方时光机」。
+- **默认引擎**：看板 / API 现仍默认 `engine=local`（可选 `tq`）。
 - **品种（4）**：螺纹 `rb` / 沪金 `au` / 沪银 `ag` / 玻璃 `fg`
   - 信号：`KQ.m@SHFE.rb` / `KQ.m@SHFE.au` / `KQ.m@SHFE.ag` / `KQ.m@CZCE.FG`
 - **缓存目录**：`data/market_cache/<signal>/300.csv`（含 `underlying_symbol` 供换月）
-- **下载**：`python tools/download_market_cache.py --all --start 2023-01-01 --end 2026-07-01`
+- **下载 / 写入 / 回放规则（强制）**：见 **`docs/market_cache_rules.md`**（回写上一根完整 OHLC + 当前 stub；回放时决策 bar 开盘 stub）
+- **下载 CLI**：`python tools/download_market_cache.py --all --start 2023-01-01 --end 2026-07-01`
   - 或 `--status` 查看覆盖；看板 local 缺缓存时可 `auto_download=true` 自动补拉
-  - **2026-07-18 已缓存**：au/ag/rb/fg 的 5m（约 2023-01-03 → 2026-07-01）；按 6 个月分段拉取并增量 merge，避免 tqsdk 滚动窗口截断到 1 万根
-- **回放**：`src/ignitequant/engine/local_replay.py` —— `FalconDecisionPipeline` + `RollStateMachine` + `LocalSimAccount`（收盘价±滑点即时成交，品种 CostModel）
-- **代码**：`src/ignitequant/market/`（symbols/cache/download）；入口 `dashboard/runners.run_falcon_local`
-- **注意**：LocalSim 贴近但不等同 TqSim 撮合；上线前用 `engine=tq` 做一次对照
+  - **2026-07-23**：按新规则重下。覆盖（`--status`）：
+    - `au`：5818 根（约 2024-10-31 → 2025-01-15，短窗验证区间）
+    - `ag`：92101 根；`rb`/`fg`：各 57661 根（约 2022-12-30 → 2026-07-01）
+    - flat-stub 占比 ≈ 0（旧全 stub CSV 已作废）
+  - **2026-07-23 UI**：工作台「开始测试」已接真实 `/api/backtest`；进度若出现早于所选 start 的日期，是**补拉预热**，回测窗口仍以所选区间为准。
+- **回放**：`src/ignitequant/engine/local_replay.py` —— `FalconDecisionPipeline` + `RollStateMachine` + `LocalSimAccount`
+- **代码**：`src/ignitequant/market/`；入口 `dashboard/runners.run_falcon_local`；撮合镜像 `src/ignitequant/analytics/tq_match.py`
 
 ### 新前端（Magic UI + React，2026-07-17）
 
@@ -142,13 +159,14 @@ api = TqApi(
   - 主题：`web/src/theme/AppleAntdProvider.tsx`（高对比：正文 `#F5F5F7`、次要 `#C8D0DC`、实色卡片 `#1A2740`）
   - 扩展方式：在 `StrategyLabPage.tsx` 的 `LabSection` / `LAB_NAV` 追加项；未实现页用 `ComingSoonPanel`
   - **策略装配区**（2026-07-21）：三节点流水线 —— ①因子与特征 → ②信号发生器 → ③仓位控制；已移除独立「开仓策略」节点与侧栏项；旧 localStorage 四节点装配经 `normalizePipelineNodes` 兼容加载
-  - **因子与特征页**（2026-07-21 减法重构 + 命名入库）：真正的 Factor Mining，不是指标陈列室
-    - UI：`FactorPanel.tsx` + `factor-data.ts`
-    - 草稿：`localStorage` `ignitequant.lab.factor_mining_v2`（仅编辑缓存）
-    - **命名因子组合库**：`ignitequant.lab.factor_combos_v1`（另存为 / 覆盖更新 / 删除 / 载入）
-    - **在线 Python 编辑器**（2026-07-21）：轻量 `<textarea>`（已移除 Monaco——本地 monaco-editor 导入会导致因子页卡住）；一个组合 = 多个可命名 `.py` 代码块；模块 UI 仅保留启用 / 命名 / 触发周期 / 编辑器
-    - 回测看板节点 1「因子与特征」下拉**只读该库**；无组合时提示先去因子页入库
-    - Python 壳仍在 `src/ignitequant/factors/`（与编辑器模板对齐）
+  - **因子与特征页**（2026-07-22）：专注因子编译与挖掘
+    - 已移除：因子组合库、纯净数据管道 UI、回测看板因子下拉
+    - 因子支持 **归类**（`category`）+ 顶部筛选标签；预设建议：未分类/趋势/波动/动量/量价/跨周期，也可自定义
+    - UI：边界说明 + 因子编译（启用/命名/归类/触发周期/编辑器）+ Feature Dict 预览
+  - **信号发生器页**（2026-07-22）：`SignalPanel.tsx` + `signal-data.ts`
+    - 从因子页已启用模块选题，组成 **做多 / 做空 / 平仓** 三套公式（条件 AND/OR；右侧可为数值或另一因子）
+    - 附加条件：confirmation_bars、TTL、多空互斥、平仓优先、备注
+    - 持久化：`localStorage` `ignitequant.lab.signal_generator_v1`；本轮仅 UI 契约，未接 Python SignalEngine
   - `#/lab-legacy` → 旧版策略实验室
   - 工作台注意：`persistDb=否` 不写入历史列表；选历史回测会退出当前策略选中防误更新
   - 测试账号：`回测机制`（缓存 / 天勤）+ 开始测试时显示分阶段进度条（当前为演示进度，后续可接 `/api/jobs`）
@@ -156,6 +174,15 @@ api = TqApi(
 - 组件：已去掉 BlurFade / NumberTicker / BorderBeam 等动效依赖（源码仍可在 `web/src/components/ui/`）
 - API：`dashboard/api.py` v0.6（`/api/catalog` 含 engines/market_cache；`/api/backtest` 支持 `engine=local|tq`）
 - 依赖：`fastapi` / `uvicorn` 已写入 `requirements.txt`
+- **本地↔天勤指标口径（2026-07-23）**：必须与 `tqsdk.report.TqReport` / `get_sharp` 一致
+  - 年化：`(1+ror)^(250/n_settle_days)-1`（禁止用日历日 365.25）
+  - 夏普：日收益序列 + 总体标准差 + rf=2.5% + √250（`ignitequant.analytics.tq_metrics`）
+  - 权益曲线按**交易日结算**取样（`trading_day_from_timestamp_ns`，夜盘≥18:00 滚次日、周末滚周一）；决策/强制平仓门控仍用**日历日**（与 `dashboard/runners` 天勤路径一致）
+  - 实现：`src/ignitequant/analytics/tq_metrics.py`、`src/ignitequant/market/trading_day.py`
+  - **缓存覆盖**（2026-07-23）：`coverage_ok` 允许春节等休市缺口——区间内有 bar 且缓存已有 `end` 之后的数据即视为覆盖完整（勿因 1/28–2/4 无 K 线而报 missing coverage）
+  - **缓存空洞误判**（2026-07-23）：au 缓存曾缺 2025-03～10，但 11 月仍有数据，旧 `coverage_ok` 把「end 之后任意有 bar」当成完整 → 本地回测静默停在 2/28，与天勤 3 月续跑分叉（例：`baf46e44943c` local vs `7e5a3929cb06` tq）。现要求：窗口内无超长空洞；节假日续跑须在 `end` 后约 20 天内恢复
+  - **成交对齐**（2026-07-23）：天勤 `TargetPosTask` 用决策 K 线 open±tick 钉住限价（禁止追 1 分钟隐式行情）；本地日终盯市用 bar close；`settle_day > end` 的夜盘不计入。短窗验证：期末权益/收益率/回撤/夏普/年化与天勤一致
+  - **GFD 日终错单**（2026-07-23）：硬钉限价若始终无法穿越盘口，TqSim 日终撤 GFD，`TargetPosTask` 抛「遇到错单…交易日结束…」。修复：`align_limit_price` 在 pin 不可成交时抬到 ask/bid；runner / `falcon_au_backtest` 捕获该类异常后 `recover_after_gfd_cancel` 重建任务
 
 ### Streamlit 备用入口
 

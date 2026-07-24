@@ -7,8 +7,13 @@ import json
 from dataclasses import asdict, dataclass, fields
 from typing import Any, Mapping
 
+from ignitequant.analytics.tq_match import market_fill_price, quote_from_bar_close, tq_align_slip_ticks
+
 
 COST_MODEL_VERSION = "falcon_cost_v1"
+# research: optional wider roll slip; tq_kline: mirror TqSim (1 tick both ways)
+ALIGN_MODE_RESEARCH = "research"
+ALIGN_MODE_TQ_KLINE = "tq_kline"
 
 
 @dataclass(frozen=True)
@@ -25,6 +30,7 @@ class CostModel:
     roll_slippage_ticks: float = 2.0
     latency_bars: int = 0  # reserved: decision→fill lag in bars
     partial_fill_ratio: float = 1.0  # 1.0 = full fill assumption
+    align_mode: str = ALIGN_MODE_TQ_KLINE
 
     def config_hash(self) -> str:
         blob = json.dumps(asdict(self), sort_keys=True)
@@ -36,6 +42,15 @@ class CostModel:
         return data
 
     def slip_price(self, side: str, price: float, *, roll: bool = False) -> float:
+        """Fill price relative to signal/last.
+
+        ``tq_kline`` mirrors TqSim market fills on kline-synthesized quotes
+        (buy ask = last+tick, sell bid = last-tick). Roll does **not** add
+        extra ticks — TqSim has no separate roll slippage.
+        """
+        if self.align_mode == ALIGN_MODE_TQ_KLINE:
+            quote = quote_from_bar_close(price, self.tick_size)
+            return market_fill_price(side, quote)
         ticks = self.roll_slippage_ticks if roll else self.slippage_ticks
         slip = ticks * self.tick_size
         if side.upper() in {"BUY", "LONG", "OPEN_LONG"}:
@@ -49,6 +64,10 @@ class CostModel:
         if close_today:
             return lots * self.close_today_fee_per_lot
         return lots * self.close_fee_per_lot
+
+    def tq_commission_per_lot(self) -> float:
+        """Single per-lot fee for ``TqSim.set_commission`` (open≈close in align mode)."""
+        return float(self.open_fee_per_lot)
 
     def notional(self, price: float, qty: int) -> float:
         return abs(float(price) * int(qty) * self.multiplier)
@@ -65,11 +84,34 @@ class CostModel:
             roll_slippage_ticks=self.roll_slippage_ticks * slip_mult,
             latency_bars=self.latency_bars,
             partial_fill_ratio=self.partial_fill_ratio,
+            align_mode=self.align_mode,
+        )
+
+    def as_research(self) -> CostModel:
+        return CostModel(
+            **{
+                **asdict(self),
+                "align_mode": ALIGN_MODE_RESEARCH,
+                "version": f"{self.version}_research",
+            }
+        )
+
+    def as_tq_kline(self) -> CostModel:
+        slip = tq_align_slip_ticks()
+        return CostModel(
+            **{
+                **asdict(self),
+                "align_mode": ALIGN_MODE_TQ_KLINE,
+                "slippage_ticks": slip,
+                "roll_slippage_ticks": slip,
+                "version": f"{COST_MODEL_VERSION}_tq_kline",
+            }
         )
 
 
 def default_cost_model() -> CostModel:
-    return CostModel()
+    """Default is TqSim kline-aligned (1-tick book, same fee open/close)."""
+    return CostModel().as_tq_kline()
 
 
 def cost_from_mapping(data: Mapping[str, Any] | None) -> CostModel:

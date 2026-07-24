@@ -41,8 +41,10 @@ from ignitequant.engine import (
     make_risk_engine,
     score_parts,
 )
-from ignitequant.execution import TargetPositionExecutor
+from ignitequant.execution import TargetPositionExecutor, is_gfd_day_end_cancel
 from ignitequant.domain.enums import RiskAction
+from ignitequant.market.cache import resolve_instrument
+from ignitequant.market.symbols import cost_model_for
 
 
 def load_dotenv(path: Path) -> None:
@@ -58,7 +60,7 @@ def load_dotenv(path: Path) -> None:
 
 SIGNAL_SYMBOL = "KQ.m@SHFE.au"
 START_DT = datetime.date(2025, 1, 1)
-END_DT = datetime.date(2025, 2, 28)
+END_DT = datetime.date(2026, 2, 28)
 KLINE_SECONDS = 60 * 5  # 5 分钟 K 线
 WEB_GUI = ":9876"
 INIT_BALANCE = 1_000_000
@@ -83,11 +85,14 @@ def main() -> None:
 
     cfg = load_active_decision_config()
     risk_engine = make_risk_engine(cfg)
+    cost = cost_model_for(resolve_instrument(SIGNAL_SYMBOL), tq_align=True)
+    commission_per_lot = cost.tq_commission_per_lot()
     print(f"启动 Falcon v2 回测: 信号={SIGNAL_SYMBOL}", flush=True)
     print(f"区间: {START_DT} ~ {END_DT}（{FLAT_DATE} 起强制清仓）", flush=True)
     print(
         f"账户初始资金: {INIT_BALANCE:,.0f} | 仓位映射: {LOT_BY_SIGNAL} | "
         f"config={cfg.config_version} hash={cfg.config_hash()[:12]} | "
+        f"align={cost.align_mode} fee/lot={commission_per_lot} | "
         f"RiskEngine+Executor | Web UI: http://127.0.0.1{WEB_GUI}",
         flush=True,
     )
@@ -124,7 +129,30 @@ def main() -> None:
         end_flat_announced = False
 
         while True:
-            api.wait_update()
+            try:
+                api.wait_update()
+            except BacktestFinished:
+                raise
+            except Exception as exc:
+                if not is_gfd_day_end_cancel(exc):
+                    raise
+                if executor is not None and position is not None:
+                    try:
+                        decision_px = float(klines.iloc[-1]["open"])
+                    except Exception:
+                        decision_px = None
+                    print(
+                        f"GFD日终撤单，重建 TargetPosTask | {trade_symbol} "
+                        f"net={int(position.pos)} target={pipeline.current_target}",
+                        flush=True,
+                    )
+                    executor.recover_after_gfd_cancel(
+                        current_net=int(position.pos),
+                        decision_price=decision_px,
+                        desired=int(pipeline.current_target),
+                    )
+                continue
+
             if archive is not None:
                 archive.poll(api)
 
@@ -157,12 +185,22 @@ def main() -> None:
                         current_net=net_old,
                         urgency="HIGH",
                         reason_codes=("ROLL_IN_PROGRESS",),
+                        decision_price=float(klines.iloc[-1]["open"]),
                     )
                     if int(position.pos) != 0:
                         continue
                     executor.destroy()
                 trade_symbol = underlying
-                executor = TargetPositionExecutor(api, trade_symbol)
+                try:
+                    sim.set_commission(trade_symbol, commission_per_lot)
+                except Exception:
+                    pass
+                executor = TargetPositionExecutor(
+                    api,
+                    trade_symbol,
+                    align_tq_kline=True,
+                    price_tick=float(cost.tick_size),
+                )
                 position = api.get_position(trade_symbol)
                 print(f"交易合约切换为 {trade_symbol}", flush=True)
 
@@ -209,6 +247,7 @@ def main() -> None:
                         current_net=net_pos,
                         urgency="HIGH",
                         reason_codes=("END_FLAT",),
+                        decision_price=float(klines.iloc[-1]["open"]),
                     )
                 elif not end_flat_announced:
                     print(
@@ -278,6 +317,7 @@ def main() -> None:
                 urgency="HIGH" if result.applied_action != "TARGET" else "NORMAL",
                 reason_codes=pretrade.rule_hits,
                 idempotency_key=f"{result.bar_id}:{desired}:{result.applied_action}",
+                decision_price=float(klines.iloc[-1]["open"]),
             )
             fill = executor.poll_position(
                 int(position.pos),

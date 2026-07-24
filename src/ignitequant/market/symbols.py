@@ -85,8 +85,14 @@ def instrument_by_signal(signal_symbol: str) -> InstrumentSpec | None:
     return None
 
 
-def cost_model_for(spec: InstrumentSpec) -> CostModel:
-    return CostModel(
+def cost_model_for(spec: InstrumentSpec, *, tq_align: bool = True) -> CostModel:
+    """Build cost model for an instrument.
+
+    ``tq_align=True`` (default): mirror TqSim kline backtest — 1-tick synthetic
+    book and no extra roll slip. Pass ``tq_align=False`` for research stress
+    (wider ``roll_slippage_ticks`` from the instrument table).
+    """
+    base = CostModel(
         version=f"falcon_cost_v1_{spec.id}",
         multiplier=spec.multiplier,
         open_fee_per_lot=spec.open_fee_per_lot,
@@ -96,3 +102,4 @@ def cost_model_for(spec: InstrumentSpec) -> CostModel:
         tick_size=spec.tick_size,
         roll_slippage_ticks=spec.roll_slippage_ticks,
     )
+    return base.as_tq_kline() if tq_align else base.as_research()

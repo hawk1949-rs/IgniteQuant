@@ -1,0 +1,1448 @@
+# -*- coding: utf-8 -*-
+"""Read-only Sim Cockpit API (TqKq persistence + market cache)."""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Query
+
+from dashboard.catalog import STRATEGIES, SYMBOLS
+from ignitequant.market.sim_klines import (
+    find_snapshot_for_symbol,
+    load_klines_snapshot,
+)
+from ignitequant.market.symbols import INSTRUMENTS
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_DIR = ROOT / "data" / "runtime"
+
+STALE_AFTER = timedelta(minutes=8)  # ~1.5× 5m bar; heartbeat alone does not touch DB
+DEFAULT_INIT_BALANCE = 1_000_000.0
+
+STATUS_LABELS = {
+    "RUNNING": "运行中",
+    "STALE": "数据滞后",
+    "IDLE": "未运行",
+}
+
+# IgniteQuant 本地品种目录（非天勤「自带列表」）；交易走天勤连续合约，K 线默认读本地 market_cache。
+OVERSEAS_PAIRS: dict[str, dict[str, str]] = {
+    "au": {
+        "id": "xauusd",
+        "name": "国际黄金 XAUUSD",
+        "display_symbol": "XAUUSD",
+        "yahoo_symbol": "GC=F",
+        "note": "外盘对照：以 COMEX 黄金期货（GC=F）近似 XAUUSD；非天勤/MT5 实盘账户。",
+    },
+    "ag": {
+        "id": "xagusd",
+        "name": "国际白银 XAGUSD",
+        "display_symbol": "XAGUSD",
+        "yahoo_symbol": "SI=F",
+        "note": "外盘对照：以 COMEX 白银期货（SI=F）近似 XAGUSD；非天勤/MT5 实盘账户。",
+    },
+}
+
+# instance_id → launcher
+SIM_LAUNCHERS: dict[str, dict[str, Any]] = {
+    "falcon_au_sim": {
+        "label": "Falcon 沪金天勤模拟",
+        "script": ROOT / "strategies" / "falcon_au_sim.py",
+        "symbol_id": "au",
+        "strategy_id": "falcon_v2",
+        "framework": "tq",
+    },
+}
+
+router = APIRouter(prefix="/api/sim", tags=["sim"])
+
+
+def _status_label(status: str) -> str:
+    return STATUS_LABELS.get(status, status)
+
+
+def _live_quote(conn: sqlite3.Connection, instance_id: str) -> dict[str, Any]:
+    """Prefer sim-persisted quote / latest decision close over stale market_cache."""
+    state = conn.execute(
+        """
+        SELECT symbol, payload_json, updated_at
+        FROM strategy_state WHERE instance_id = ?
+        """,
+        (instance_id,),
+    ).fetchone()
+    payload = _loads(state["payload_json"]) if state else {}
+    trade_symbol = str(state["symbol"] if state else "") or None
+
+    raw_price = payload.get("last_price")
+    if raw_price is not None:
+        try:
+            price = float(raw_price)
+            if price > 0:
+                return {
+                    "last_price": price,
+                    "last_price_source": "sim_quote",
+                    "last_price_as_of": payload.get("quote_as_of") or (state["updated_at"] if state else None),
+                    "trade_symbol": trade_symbol,
+                }
+        except (TypeError, ValueError):
+            pass
+
+    row = conn.execute(
+        """
+        SELECT created_at, payload_json FROM decision_event
+        WHERE instance_id = ?
+        ORDER BY seq DESC LIMIT 1
+        """,
+        (instance_id,),
+    ).fetchone()
+    if row is not None:
+        dec = _loads(row["payload_json"])
+        factors = dec.get("factors") if isinstance(dec, dict) else None
+        values = (factors or {}).get("values") if isinstance(factors, dict) else None
+        close = (values or {}).get("close") if isinstance(values, dict) else None
+        if close is not None:
+            try:
+                price = float(close)
+                if price > 0:
+                    return {
+                        "last_price": price,
+                        "last_price_source": "decision_close",
+                        "last_price_as_of": row["created_at"],
+                        "trade_symbol": trade_symbol,
+                    }
+            except (TypeError, ValueError):
+                pass
+
+    return {
+        "last_price": None,
+        "last_price_source": None,
+        "last_price_as_of": None,
+        "trade_symbol": trade_symbol,
+    }
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _open_ro(db_path: Path) -> sqlite3.Connection:
+    if not db_path.is_file():
+        raise FileNotFoundError(str(db_path))
+    uri = f"file:{db_path.resolve().as_posix()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _open_rw(db_path: Path) -> sqlite3.Connection:
+    if not db_path.is_file():
+        raise FileNotFoundError(str(db_path))
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _decision_close_price(
+    conn: sqlite3.Connection, instance_id: str, decision_id: str
+) -> float | None:
+    row = conn.execute(
+        """
+        SELECT payload_json FROM decision_event
+        WHERE instance_id = ? AND (decision_id = ? OR bar_id = ?)
+        ORDER BY seq DESC LIMIT 1
+        """,
+        (instance_id, decision_id, decision_id),
+    ).fetchone()
+    if row is None:
+        return None
+    payload = _loads(row["payload_json"])
+    factors = payload.get("factors") if isinstance(payload, dict) else None
+    values = (factors or {}).get("values") if isinstance(factors, dict) else None
+    close = (values or {}).get("close") if isinstance(values, dict) else None
+    try:
+        price = float(close)
+        return price if price > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _repair_missing_fills(db_path: Path, instance_id: str) -> int:
+    """Persist fills for SUBMITTED intents that clearly reached desired net.
+
+    Happens when TargetPosTask filled asynchronously but runner only polled once.
+    """
+    try:
+        conn = _open_rw(db_path)
+    except FileNotFoundError:
+        return 0
+    repaired = 0
+    try:
+        intents = conn.execute(
+            """
+            SELECT intent_id, decision_id, symbol, current_position, desired_position,
+                   status, created_at
+            FROM order_intent_event
+            WHERE instance_id = ?
+            ORDER BY seq ASC
+            """,
+            (instance_id,),
+        ).fetchall()
+        filled_ids = {
+            str(r["intent_id"])
+            for r in conn.execute(
+                "SELECT intent_id FROM trade_fill_event WHERE instance_id = ?",
+                (instance_id,),
+            ).fetchall()
+        }
+        latest_pos = conn.execute(
+            """
+            SELECT net_position FROM position_snapshot_event
+            WHERE instance_id = ?
+            ORDER BY seq DESC LIMIT 1
+            """,
+            (instance_id,),
+        ).fetchone()
+        latest_net = int(latest_pos["net_position"]) if latest_pos is not None else None
+        if latest_net is None:
+            state = conn.execute(
+                "SELECT payload_json FROM strategy_state WHERE instance_id = ?",
+                (instance_id,),
+            ).fetchone()
+            if state is not None:
+                payload = _loads(state["payload_json"])
+                try:
+                    latest_net = int(payload.get("confirmed_net"))
+                except (TypeError, ValueError):
+                    latest_net = None
+
+        for i, intent in enumerate(intents):
+            intent_id = str(intent["intent_id"])
+            if intent_id in filled_ids:
+                continue
+            status = str(intent["status"] or "")
+            if status == "FILLED":
+                continue
+            cur = int(intent["current_position"])
+            desired = int(intent["desired_position"])
+            if cur == desired:
+                continue
+            reached = False
+            trade_time = str(intent["created_at"] or "")
+            if i + 1 < len(intents):
+                nxt = intents[i + 1]
+                if int(nxt["current_position"]) == desired:
+                    reached = True
+                    trade_time = str(nxt["created_at"] or trade_time)
+            elif latest_net is not None and latest_net == desired:
+                reached = True
+            if not reached:
+                continue
+
+            price = _decision_close_price(conn, instance_id, str(intent["decision_id"] or ""))
+            if price is None:
+                price = 0.0
+            qty = abs(desired - cur)
+            side = "BUY" if desired > cur else "SELL"
+            fill_id = f"fill-backfill-{intent_id}"
+            now = _utc_now().isoformat()
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO trade_fill_event(
+                    instance_id, fill_id, intent_id, symbol, price, qty, fee,
+                    side, trade_time, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    instance_id,
+                    fill_id,
+                    intent_id,
+                    str(intent["symbol"] or ""),
+                    float(price),
+                    int(qty),
+                    0.0,
+                    side,
+                    trade_time or now,
+                    json.dumps(
+                        {
+                            "source": "intent_chain_backfill",
+                            "intent_id": intent_id,
+                            "note": "异步成交补记：意图后持仓已到达目标",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE order_intent_event
+                SET status = ?
+                WHERE instance_id = ? AND intent_id = ?
+                """,
+                ("FILLED", instance_id, intent_id),
+            )
+            repaired += 1
+        if repaired:
+            conn.commit()
+    finally:
+        conn.close()
+    return repaired
+
+
+def _loads(raw: str | None) -> Any:
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+
+# Job / non-persistence DBs that live under data/runtime but are not sim sessions.
+_SKIP_DB_NAMES = frozenset({"backtest_jobs.sqlite"})
+
+
+def _has_persistence_schema(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'strategy_state'
+        LIMIT 1
+        """
+    ).fetchone()
+    return row is not None
+
+
+def _discover_dbs() -> list[Path]:
+    if not RUNTIME_DIR.is_dir():
+        return []
+    out: list[Path] = []
+    for path in sorted(RUNTIME_DIR.glob("*.sqlite")):
+        if path.name in _SKIP_DB_NAMES:
+            continue
+        try:
+            conn = _open_ro(path)
+        except Exception:
+            continue
+        try:
+            if _has_persistence_schema(conn):
+                out.append(path)
+        finally:
+            conn.close()
+    return out
+
+
+def _instance_id_from_path(path: Path) -> str:
+    return path.stem
+
+
+def _pid_path(instance_id: str) -> Path:
+    return RUNTIME_DIR / f"{instance_id}.pid"
+
+
+def _process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _find_sim_pids(script_name: str = "falcon_au_sim.py") -> list[int]:
+    """Best-effort scan for running sim script (Windows-friendly)."""
+    pids: list[int] = []
+    if os.name == "nt":
+        try:
+            out = subprocess.check_output(
+                [
+                    "wmic",
+                    "process",
+                    "where",
+                    f"CommandLine like '%{script_name}%'",
+                    "get",
+                    "ProcessId",
+                ],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+            )
+            for line in out.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    pids.append(int(line))
+        except Exception:
+            pass
+    else:
+        try:
+            out = subprocess.check_output(["pgrep", "-f", script_name], text=True, timeout=5)
+            pids = [int(x) for x in out.split() if x.isdigit()]
+        except Exception:
+            pass
+    return [p for p in pids if _process_alive(p)]
+
+
+def _process_status(instance_id: str) -> dict[str, Any]:
+    launcher = SIM_LAUNCHERS.get(instance_id)
+    pid_file = _pid_path(instance_id)
+    pid: int | None = None
+    if pid_file.is_file():
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+        except ValueError:
+            pid = None
+    alive = bool(pid and _process_alive(pid))
+    if not alive:
+        scanned = _find_sim_pids(Path(launcher["script"]).name if launcher else "falcon_au_sim.py")
+        if scanned:
+            pid = scanned[0]
+            alive = True
+            try:
+                RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+                pid_file.write_text(str(pid), encoding="utf-8")
+            except OSError:
+                pass
+    return {
+        "process_running": alive,
+        "pid": pid if alive else None,
+        "label": (launcher or {}).get("label") or instance_id,
+        "can_start": instance_id in SIM_LAUNCHERS,
+    }
+
+
+def _fetch_yahoo_5m_bars(yahoo_symbol: str, *, limit: int = 400) -> list[dict[str, Any]]:
+    """Fetch recent 5m bars from Yahoo chart API (no key). Fail soft → []."""
+    period2 = max(limit * 300 + 3600, 86400 * 5)
+    qs = urllib.parse.urlencode(
+        {
+            "interval": "5m",
+            "range": "5d",
+            "includePrePost": "false",
+        }
+    )
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(yahoo_symbol)}?{qs}"
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "IgniteQuantSimCockpit/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        return []
+    try:
+        result = payload["chart"]["result"][0]
+        ts_list = result["timestamp"]
+        quote = result["indicators"]["quote"][0]
+    except (KeyError, IndexError, TypeError):
+        return []
+    bars: list[dict[str, Any]] = []
+    opens = quote.get("open") or []
+    highs = quote.get("high") or []
+    lows = quote.get("low") or []
+    closes = quote.get("close") or []
+    volumes = quote.get("volume") or []
+    for i, ts in enumerate(ts_list):
+        o, h, l, c = (
+            opens[i] if i < len(opens) else None,
+            highs[i] if i < len(highs) else None,
+            lows[i] if i < len(lows) else None,
+            closes[i] if i < len(closes) else None,
+        )
+        if None in (o, h, l, c):
+            continue
+        bars.append(
+            {
+                "time": int(ts),
+                "open": float(o),
+                "high": float(h),
+                "low": float(l),
+                "close": float(c),
+                "volume": float(volumes[i] or 0) if i < len(volumes) else 0.0,
+            }
+        )
+    return bars[-limit:]
+
+
+def _status_from_updated(updated_at: str | None) -> str:
+    ts = _parse_ts(updated_at)
+    if ts is None:
+        return "IDLE"
+    age = _utc_now() - ts
+    if age <= STALE_AFTER:
+        return "RUNNING"
+    return "STALE"
+
+
+def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {k: row[k] for k in row.keys()}
+
+
+def _latest_account(conn: sqlite3.Connection, instance_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT equity, available, margin, margin_ratio, as_of, created_at, payload_json
+        FROM account_snapshot_event
+        WHERE instance_id = ?
+        ORDER BY seq DESC LIMIT 1
+        """,
+        (instance_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "equity": float(row["equity"]),
+        "available": float(row["available"]),
+        "margin": float(row["margin"]),
+        "margin_ratio": float(row["margin_ratio"]),
+        "as_of": row["as_of"],
+        "created_at": row["created_at"],
+        "payload": _loads(row["payload_json"]),
+    }
+
+
+def _latest_position(conn: sqlite3.Connection, instance_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT symbol, net_position, source, as_of, created_at, payload_json
+        FROM position_snapshot_event
+        WHERE instance_id = ?
+        ORDER BY seq DESC LIMIT 1
+        """,
+        (instance_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "symbol": row["symbol"],
+        "net_position": int(row["net_position"]),
+        "source": row["source"],
+        "as_of": row["as_of"],
+        "created_at": row["created_at"],
+        "payload": _loads(row["payload_json"]),
+    }
+
+
+def _latest_decision_at(conn: sqlite3.Connection, instance_id: str) -> str | None:
+    row = conn.execute(
+        """
+        SELECT created_at FROM decision_event
+        WHERE instance_id = ?
+        ORDER BY seq DESC LIMIT 1
+        """,
+        (instance_id,),
+    ).fetchone()
+    return None if row is None else str(row["created_at"])
+
+
+def _resolve_db(instance_id: str) -> Path:
+    path = RUNTIME_DIR / f"{instance_id}.sqlite"
+    if not path.is_file():
+        raise HTTPException(404, f"session not found: {instance_id}")
+    return path
+
+
+def _signal_symbol_for_trade(symbol: str) -> str:
+    """Map trade contract or continuous symbol to cache signal symbol."""
+    raw = (symbol or "").strip()
+    if not raw:
+        return "KQ.m@SHFE.au"
+    if raw.startswith("KQ.m@"):
+        return raw
+    # Prefer exact instrument id (au / ag / rb / fg)
+    key = raw.lower()
+    if key in INSTRUMENTS:
+        return INSTRUMENTS[key].signal_symbol
+    for spec in INSTRUMENTS.values():
+        prefix = f"{spec.exchange}.{spec.id}"
+        if raw.startswith(prefix) or raw.startswith(f"{spec.exchange}.{spec.id.upper()}"):
+            return spec.signal_symbol
+        # SHFE.au2608 / CZCE.FG509 → alphabetic product code
+        parts = raw.split(".", 1)
+        if len(parts) == 2 and parts[0] == spec.exchange:
+            product = "".join(ch for ch in parts[1] if ch.isalpha())
+            if product.lower() == spec.id.lower():
+                return spec.signal_symbol
+    return "KQ.m@SHFE.au"
+
+
+def _compute_metrics(conn: sqlite3.Connection, instance_id: str) -> dict[str, Any]:
+    fills = conn.execute(
+        """
+        SELECT price, qty, fee, side, trade_time, created_at
+        FROM trade_fill_event
+        WHERE instance_id = ?
+        ORDER BY seq ASC
+        """,
+        (instance_id,),
+    ).fetchall()
+
+    # Round-trip PnL: walk inventory; when flat after a fill, close a trade.
+    pos = 0
+    avg = 0.0
+    closed: list[float] = []
+    realized = 0.0
+    for f in fills:
+        side = str(f["side"] or "").upper()
+        qty = abs(int(f["qty"]))
+        price = float(f["price"])
+        fee = float(f["fee"] or 0)
+        signed = qty if side in {"BUY", "LONG"} else -qty
+        if side in {"SELL", "SHORT"}:
+            signed = -qty
+        # Some runners may store OPEN/CLOSE; treat positive qty with side.
+        if side not in {"BUY", "SELL", "LONG", "SHORT"}:
+            signed = qty  # fallback
+            if "SELL" in side or "SHORT" in side:
+                signed = -qty
+
+        new_pos = pos + signed
+        if pos == 0:
+            pos = signed
+            avg = price
+            realized -= fee
+            continue
+
+        # Reducing or flipping
+        if (pos > 0 and signed < 0) or (pos < 0 and signed > 0):
+            close_qty = min(abs(pos), abs(signed))
+            direction = 1 if pos > 0 else -1
+            # AU multiplier 1000 — keep price-diff * qty as relative PnL proxy;
+            # prefer equity snapshots for display equity.
+            pnl = (price - avg) * close_qty * direction * 1000.0 - fee * (close_qty / max(qty, 1))
+            closed.append(pnl)
+            realized += pnl
+            if abs(signed) < abs(pos):
+                pos = pos + signed
+            elif abs(signed) == abs(pos):
+                pos = 0
+                avg = 0.0
+            else:
+                remain = abs(signed) - abs(pos)
+                pos = remain if signed > 0 else -remain
+                avg = price
+        else:
+            # Adding
+            new_abs = abs(pos) + qty
+            avg = (avg * abs(pos) + price * qty) / max(new_abs, 1)
+            pos = new_pos
+            realized -= fee
+
+    equities = conn.execute(
+        """
+        SELECT equity, as_of, created_at FROM account_snapshot_event
+        WHERE instance_id = ?
+        ORDER BY seq ASC
+        """,
+        (instance_id,),
+    ).fetchall()
+    equity_curve = [
+        {"t": r["as_of"] or r["created_at"], "equity": float(r["equity"])} for r in equities
+    ]
+    current_equity = float(equities[-1]["equity"]) if equities else DEFAULT_INIT_BALANCE
+    peak = DEFAULT_INIT_BALANCE
+    max_dd = 0.0
+    for pt in equity_curve:
+        eq = float(pt["equity"])
+        peak = max(peak, eq)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - eq) / peak)
+
+    wins = sum(1 for p in closed if p > 0)
+    losses = sum(1 for p in closed if p <= 0)
+    n = len(closed)
+    win_rate = (wins / n) if n else 0.0
+
+    acct = _latest_account(conn, instance_id)
+    if acct is not None:
+        current_equity = float(acct["equity"])
+
+    return {
+        "equity": current_equity,
+        "init_balance": DEFAULT_INIT_BALANCE,
+        "pnl": current_equity - DEFAULT_INIT_BALANCE,
+        "pnl_pct": (current_equity - DEFAULT_INIT_BALANCE) / DEFAULT_INIT_BALANCE,
+        "realized_pnl_proxy": realized,
+        "trade_count": n,
+        "fill_count": len(fills),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "max_drawdown_pct": max_dd,
+        "open_position": pos,
+        "equity_curve": equity_curve[-200:],
+    }
+
+
+def _decision_row(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    payload = _loads(row["payload_json"])
+    risk = conn.execute(
+        """
+        SELECT action, requested_position, approved_position, rule_hits_json, payload_json, created_at
+        FROM risk_decision_event
+        WHERE instance_id = ? AND decision_id = ?
+        ORDER BY seq DESC LIMIT 1
+        """,
+        (row["instance_id"], row["decision_id"]),
+    ).fetchone()
+    risk_out = None
+    if risk is not None:
+        risk_out = {
+            "action": risk["action"],
+            "requested_position": int(risk["requested_position"]),
+            "approved_position": int(risk["approved_position"]),
+            "rule_hits": _loads(risk["rule_hits_json"]) or [],
+            "payload": _loads(risk["payload_json"]),
+            "created_at": risk["created_at"],
+        }
+    factors = (payload.get("factors") or {}) if isinstance(payload, dict) else {}
+    signal = (payload.get("signal") or {}) if isinstance(payload, dict) else {}
+    return {
+        "decision_id": row["decision_id"],
+        "bar_id": row["bar_id"],
+        "symbol": row["symbol"],
+        "applied_action": row["applied_action"],
+        "target_before": int(row["target_before"]),
+        "target_after": int(row["target_after"]),
+        "legacy_signal": int(row["legacy_signal"]),
+        "created_at": row["created_at"],
+        "regime": factors.get("regime"),
+        "factor_values": factors.get("values") or {},
+        "factor_quality": factors.get("quality"),
+        "reason_codes": factors.get("reason_codes") or signal.get("reason_codes") or [],
+        "score_parts": payload.get("legacy_score_parts") if isinstance(payload, dict) else None,
+        "signal": signal,
+        "target": payload.get("target") if isinstance(payload, dict) else None,
+        "risk": risk_out,
+        "payload": payload,
+    }
+
+
+@router.get("/catalog")
+def sim_catalog() -> dict[str, Any]:
+    symbols = []
+    for s in SYMBOLS.values():
+        pair = OVERSEAS_PAIRS.get(s.id)
+        symbols.append(
+            {
+                "id": s.id,
+                "name": s.name,
+                "signal_symbol": s.signal_symbol,
+                "exchange": s.exchange,
+                "source": "ignitequant_catalog",
+                "source_note": "项目内支持的品种目录（本地缓存 + 天勤连续合约），不是天勤客户端自带品种表。",
+                "overseas_pair": pair,
+            }
+        )
+    return {
+        "frameworks": [
+            {
+                "id": "tq",
+                "name": "天勤模拟盘",
+                "enabled": True,
+                "cli": "python strategies/falcon_au_sim.py",
+            },
+            {
+                "id": "mt5",
+                "name": "MetaTrader 5（外盘）",
+                "enabled": False,
+                "note": "即将支持",
+            },
+        ],
+        "strategies": [
+            {
+                "id": s.id,
+                "name": s.name,
+                "description": s.description,
+                "ready": s.runner != "run_vwap_stub",
+            }
+            for s in STRATEGIES.values()
+        ],
+        "symbols": symbols,
+        "launchers": [
+            {
+                "instance_id": iid,
+                "label": meta["label"],
+                "symbol_id": meta["symbol_id"],
+                "strategy_id": meta["strategy_id"],
+                "framework": meta["framework"],
+            }
+            for iid, meta in SIM_LAUNCHERS.items()
+        ],
+        "cli_hint": "python strategies/falcon_au_sim.py",
+        "runtime_dir": str(RUNTIME_DIR),
+        "refresh_hint": "页面按 5 分钟 K 线节奏自动刷新",
+        "symbol_catalog_note": "品种来自 IgniteQuant 本地目录（au/ag/rb/fg），映射天勤主力连续合约；K 线优先读 data/market_cache。",
+    }
+
+
+@router.get("/sessions")
+def list_sessions() -> dict[str, Any]:
+    sessions: list[dict[str, Any]] = []
+    for path in _discover_dbs():
+        instance_id = _instance_id_from_path(path)
+        try:
+            conn = _open_ro(path)
+        except Exception as exc:
+            sessions.append(
+                {
+                    "instance_id": instance_id,
+                    "db_path": str(path),
+                    "status": "IDLE",
+                    "error": f"cannot open db: {exc}",
+                }
+            )
+            continue
+        try:
+            if not _has_persistence_schema(conn):
+                continue
+            state = conn.execute(
+                """
+                SELECT instance_id, strategy_id, account_id, symbol, runtime_state,
+                       payload_json, updated_at
+                FROM strategy_state WHERE instance_id = ?
+                """,
+                (instance_id,),
+            ).fetchone()
+            if state is None:
+                # Prefer any row if stem != instance_id stored in table
+                state = conn.execute(
+                    """
+                    SELECT instance_id, strategy_id, account_id, symbol, runtime_state,
+                           payload_json, updated_at
+                    FROM strategy_state
+                    ORDER BY updated_at DESC LIMIT 1
+                    """
+                ).fetchone()
+            if state is None:
+                sessions.append(
+                    {
+                        "instance_id": instance_id,
+                        "db_path": str(path),
+                        "strategy_id": "falcon_v2" if "falcon" in instance_id else "",
+                        "symbol": "",
+                        "runtime_state": "IDLE",
+                        "status": "IDLE",
+                        "updated_at": None,
+                        "framework": "tq",
+                    }
+                )
+                continue
+            payload = _loads(state["payload_json"])
+            updated = state["updated_at"]
+            sessions.append(
+                {
+                    "instance_id": str(state["instance_id"] or instance_id),
+                    "db_path": str(path),
+                    "strategy_id": state["strategy_id"],
+                    "account_id": state["account_id"],
+                    "symbol": state["symbol"],
+                    "runtime_state": state["runtime_state"],
+                    "status": _status_from_updated(updated),
+                    "status_label": _status_label(_status_from_updated(updated)),
+                    "updated_at": updated,
+                    "payload": payload,
+                    "framework": "tq",
+                    "label": SIM_LAUNCHERS.get(instance_id, {}).get("label") or instance_id,
+                    "last_decision_at": _latest_decision_at(
+                        conn, str(state["instance_id"] or instance_id)
+                    ),
+                    **_process_status(str(state["instance_id"] or instance_id)),
+                }
+            )
+        except sqlite3.Error as exc:
+            sessions.append(
+                {
+                    "instance_id": instance_id,
+                    "db_path": str(path),
+                    "status": "IDLE",
+                    "error": str(exc),
+                }
+            )
+        finally:
+            conn.close()
+    return {"sessions": sessions, "count": len(sessions)}
+
+
+@router.get("/sessions/{instance_id}/summary")
+def session_summary(instance_id: str) -> dict[str, Any]:
+    path = _resolve_db(instance_id)
+    conn = _open_ro(path)
+    try:
+        state = conn.execute(
+            """
+            SELECT instance_id, strategy_id, account_id, symbol, runtime_state,
+                   payload_json, updated_at
+            FROM strategy_state WHERE instance_id = ?
+            """,
+            (instance_id,),
+        ).fetchone()
+        if state is None:
+            raise HTTPException(404, f"no strategy_state for {instance_id}")
+        updated = state["updated_at"]
+        status = _status_from_updated(updated)
+        proc = _process_status(instance_id)
+        # If process is dead, force IDLE for display even if DB looks recent.
+        if not proc["process_running"] and status == "RUNNING":
+            status = "STALE"
+        live = _live_quote(conn, instance_id)
+        return {
+            "instance_id": instance_id,
+            "framework": "tq",
+            "framework_label": "天勤模拟盘",
+            "strategy_id": state["strategy_id"],
+            "account_id": state["account_id"],
+            "symbol": state["symbol"],
+            "runtime_state": state["runtime_state"],
+            "status": status,
+            "status_label": _status_label(status),
+            "label": SIM_LAUNCHERS.get(instance_id, {}).get("label") or instance_id,
+            "updated_at": updated,
+            "payload": _loads(state["payload_json"]),
+            "account": _latest_account(conn, instance_id),
+            "position": _latest_position(conn, instance_id),
+            "last_decision_at": _latest_decision_at(conn, instance_id),
+            "last_price": live["last_price"],
+            "last_price_source": live["last_price_source"],
+            "last_price_as_of": live["last_price_as_of"],
+            "cli_hint": "python strategies/falcon_au_sim.py",
+            **proc,
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/sessions/{instance_id}/process")
+def session_process(instance_id: str) -> dict[str, Any]:
+    return {"instance_id": instance_id, **_process_status(instance_id)}
+
+
+@router.post("/sessions/{instance_id}/start")
+def session_start(instance_id: str) -> dict[str, Any]:
+    """Start local TqKq sim process (CLI equivalent)."""
+    launcher = SIM_LAUNCHERS.get(instance_id)
+    if not launcher:
+        raise HTTPException(400, f"暂不支持从此处启动会话：{instance_id}")
+    proc = _process_status(instance_id)
+    if proc["process_running"]:
+        return {
+            "ok": True,
+            "already_running": True,
+            "message": "模拟盘进程已在运行",
+            **proc,
+        }
+    script: Path = launcher["script"]
+    if not script.is_file():
+        raise HTTPException(500, f"启动脚本不存在：{script}")
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    env.setdefault("FALCON_PROFILE", "falcon_legacy_v1")
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+    log_path = RUNTIME_DIR / f"{instance_id}.launch.log"
+    log_f = open(log_path, "a", encoding="utf-8")
+    try:
+        child = subprocess.Popen(
+            [sys.executable, str(script)],
+            cwd=str(ROOT),
+            env=env,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            creationflags=creationflags,
+            close_fds=os.name != "nt",
+        )
+    except Exception as exc:
+        log_f.close()
+        raise HTTPException(500, f"启动失败：{exc}") from exc
+    _pid_path(instance_id).write_text(str(child.pid), encoding="utf-8")
+    return {
+        "ok": True,
+        "already_running": False,
+        "message": "已启动天勤模拟盘进程",
+        "pid": child.pid,
+        "log_path": str(log_path),
+        "process_running": True,
+        "label": launcher["label"],
+        "can_start": True,
+    }
+
+
+@router.get("/overseas/bars")
+def overseas_bars(
+    symbol_id: str = Query("au"),
+    limit: int = Query(400, ge=10, le=2000),
+) -> dict[str, Any]:
+    pair = OVERSEAS_PAIRS.get(symbol_id)
+    if not pair:
+        return {
+            "symbol_id": symbol_id,
+            "supported": False,
+            "bars": [],
+            "last_price": None,
+            "hint": "当前品种暂无配置外盘对照。",
+        }
+    bars = _fetch_yahoo_5m_bars(pair["yahoo_symbol"], limit=limit)
+    last_price = float(bars[-1]["close"]) if bars else None
+    return {
+        "symbol_id": symbol_id,
+        "supported": True,
+        "pair": pair,
+        "bars": bars,
+        "last_price": last_price,
+        "hint": None
+        if bars
+        else f"暂时无法拉取 {pair['display_symbol']} 行情（网络/源站限制）。{pair['note']}",
+    }
+
+
+@router.get("/market/bars")
+def market_bars(
+    symbol_id: str = Query("au"),
+    limit: int = Query(400, ge=10, le=2000),
+) -> dict[str, Any]:
+    """Sim Cockpit bars: Tq live snapshot only (no market_cache)."""
+    try:
+        spec = INSTRUMENTS[symbol_id]
+    except KeyError as exc:
+        raise HTTPException(404, f"未知品种：{symbol_id}") from exc
+
+    snap = find_snapshot_for_symbol(
+        symbol_id,
+        SIM_LAUNCHERS,
+        runtime_dir=RUNTIME_DIR,
+        limit=limit,
+    )
+    if snap is None:
+        # Also accept any runtime *.klines.json whose signal matches.
+        for path in RUNTIME_DIR.glob("*.klines.json"):
+            iid = path.name.replace(".klines.json", "")
+            candidate = load_klines_snapshot(iid, runtime_dir=RUNTIME_DIR, limit=limit)
+            if not candidate:
+                continue
+            if candidate.get("signal_symbol") == spec.signal_symbol:
+                snap = candidate
+                break
+
+    if snap is None:
+        return {
+            "symbol_id": symbol_id,
+            "name": spec.name,
+            "signal_symbol": spec.signal_symbol,
+            "trade_symbol": spec.signal_symbol,
+            "bars": [],
+            "markers": [],
+            "last_price": None,
+            "last_price_source": None,
+            "hint": "暂无天勤模拟盘 K 线快照。请先启动对应模拟盘进程（启动后会写入实时 K 线）。",
+            "source": "tqsdk_sim_live",
+        }
+
+    bars = list(snap.get("bars") or [])
+    last_price = snap.get("last_price")
+    if last_price is None and bars:
+        last_price = float(bars[-1]["close"])
+    trade_symbol = str(snap.get("trade_symbol") or "")
+    if not trade_symbol and bars:
+        trade_symbol = str(bars[-1].get("underlying_symbol") or spec.signal_symbol)
+
+    return {
+        "symbol_id": symbol_id,
+        "name": spec.name,
+        "signal_symbol": str(snap.get("signal_symbol") or spec.signal_symbol),
+        "trade_symbol": trade_symbol,
+        "bars": bars,
+        "markers": [],
+        "last_price": float(last_price) if last_price is not None else None,
+        "last_price_source": "tqsdk_sim_live",
+        "updated_at": snap.get("updated_at"),
+        "hint": None,
+        "source": "tqsdk_sim_live",
+    }
+
+
+@router.get("/sessions/{instance_id}/metrics")
+def session_metrics(instance_id: str) -> dict[str, Any]:
+    path = _resolve_db(instance_id)
+    conn = _open_ro(path)
+    try:
+        metrics = _compute_metrics(conn, instance_id)
+        return {"instance_id": instance_id, **metrics}
+    finally:
+        conn.close()
+
+
+@router.get("/sessions/{instance_id}/decisions")
+def session_decisions(
+    instance_id: str,
+    limit: int = Query(50, ge=1, le=500),
+    before: str | None = None,
+) -> dict[str, Any]:
+    path = _resolve_db(instance_id)
+    conn = _open_ro(path)
+    try:
+        if before:
+            rows = conn.execute(
+                """
+                SELECT * FROM decision_event
+                WHERE instance_id = ? AND created_at < ?
+                ORDER BY seq DESC LIMIT ?
+                """,
+                (instance_id, before, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM decision_event
+                WHERE instance_id = ?
+                ORDER BY seq DESC LIMIT ?
+                """,
+                (instance_id, limit),
+            ).fetchall()
+        items = [_decision_row(conn, r) for r in rows]
+        return {"instance_id": instance_id, "count": len(items), "decisions": items}
+    finally:
+        conn.close()
+
+
+@router.get("/sessions/{instance_id}/intents")
+def session_intents(
+    instance_id: str,
+    limit: int = Query(100, ge=1, le=500),
+) -> dict[str, Any]:
+    path = _resolve_db(instance_id)
+    _repair_missing_fills(path, instance_id)
+    conn = _open_ro(path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT intent_id, decision_id, symbol, current_position, desired_position,
+                   urgency, idempotency_key, status, reason_codes_json, payload_json, created_at
+            FROM order_intent_event
+            WHERE instance_id = ?
+            ORDER BY seq DESC LIMIT ?
+            """,
+            (instance_id, limit),
+        ).fetchall()
+        items = [
+            {
+                "intent_id": r["intent_id"],
+                "decision_id": r["decision_id"],
+                "symbol": r["symbol"],
+                "current_position": int(r["current_position"]),
+                "desired_position": int(r["desired_position"]),
+                "urgency": r["urgency"],
+                "idempotency_key": r["idempotency_key"],
+                "status": r["status"],
+                "reason_codes": _loads(r["reason_codes_json"]) or [],
+                "payload": _loads(r["payload_json"]),
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+        return {"instance_id": instance_id, "count": len(items), "intents": items}
+    finally:
+        conn.close()
+
+
+@router.get("/sessions/{instance_id}/fills")
+def session_fills(
+    instance_id: str,
+    limit: int = Query(100, ge=1, le=500),
+) -> dict[str, Any]:
+    path = _resolve_db(instance_id)
+    _repair_missing_fills(path, instance_id)
+    conn = _open_ro(path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT fill_id, intent_id, symbol, price, qty, fee, side, trade_time,
+                   payload_json, created_at
+            FROM trade_fill_event
+            WHERE instance_id = ?
+            ORDER BY seq DESC LIMIT ?
+            """,
+            (instance_id, limit),
+        ).fetchall()
+        items = [
+            {
+                "fill_id": r["fill_id"],
+                "intent_id": r["intent_id"],
+                "symbol": r["symbol"],
+                "price": float(r["price"]),
+                "qty": int(r["qty"]),
+                "fee": float(r["fee"] or 0),
+                "side": r["side"],
+                "trade_time": r["trade_time"],
+                "payload": _loads(r["payload_json"]),
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+        return {"instance_id": instance_id, "count": len(items), "fills": items}
+    finally:
+        conn.close()
+
+
+@router.get("/sessions/{instance_id}/bars")
+def session_bars(
+    instance_id: str,
+    symbol: str | None = None,
+    end: str | None = None,
+    limit: int = Query(400, ge=10, le=2000),
+) -> dict[str, Any]:
+    """Bars for cockpit: Tq sim live snapshot only (no market_cache)."""
+    path = _resolve_db(instance_id)
+    conn = _open_ro(path)
+    try:
+        state = conn.execute(
+            "SELECT symbol FROM strategy_state WHERE instance_id = ?",
+            (instance_id,),
+        ).fetchone()
+        trade_symbol = symbol or (state["symbol"] if state else "") or "KQ.m@SHFE.au"
+        signal_symbol = _signal_symbol_for_trade(trade_symbol)
+        live = _live_quote(conn, instance_id)
+
+        snap = load_klines_snapshot(instance_id, runtime_dir=RUNTIME_DIR, limit=limit)
+        bars: list[dict[str, Any]] = list((snap or {}).get("bars") or [])
+        if end:
+            end_ts = _parse_ts(end)
+            if end_ts is not None:
+                end_sec = int(end_ts.timestamp())
+                bars = [b for b in bars if int(b.get("time") or 0) <= end_sec]
+
+        if snap is None or not bars:
+            return {
+                "instance_id": instance_id,
+                "signal_symbol": signal_symbol,
+                "trade_symbol": trade_symbol,
+                "bars": [],
+                "markers": [],
+                "last_price": live["last_price"],
+                "last_price_source": live["last_price_source"],
+                "last_price_as_of": live["last_price_as_of"],
+                "hint": "暂无天勤模拟盘 K 线快照。请确认模拟盘已启动；进程会在登录/每根 K 收盘时写入实时 K 线。",
+                "source": "tqsdk_sim_live",
+            }
+
+        fill_q = """
+            SELECT price, qty, side, trade_time, created_at FROM trade_fill_event
+            WHERE instance_id = ?
+        """
+        params: list[Any] = [instance_id]
+        end_ts = _parse_ts(end)
+        if end_ts is not None:
+            fill_q += " AND created_at <= ?"
+            params.append(end_ts.isoformat())
+        fill_q += " ORDER BY seq ASC"
+        markers: list[dict[str, Any]] = []
+        for f in conn.execute(fill_q, params).fetchall():
+            ts = _parse_ts(f["trade_time"]) or _parse_ts(f["created_at"])
+            if ts is None:
+                continue
+            side = str(f["side"] or "").upper()
+            is_buy = side in {"BUY", "LONG"} or "BUY" in side
+            markers.append(
+                {
+                    "time": int(ts.timestamp()),
+                    "position": "belowBar" if is_buy else "aboveBar",
+                    "color": "#30d158" if is_buy else "#ff453a",
+                    "shape": "arrowUp" if is_buy else "arrowDown",
+                    "text": f"{'B' if is_buy else 'S'}{abs(int(f['qty']))}@{float(f['price']):.2f}",
+                    "side": "BUY" if is_buy else "SELL",
+                    "price": float(f["price"]),
+                    "qty": int(f["qty"]),
+                }
+            )
+
+        dec_q = """
+            SELECT applied_action, target_after, legacy_signal, created_at, bar_id
+            FROM decision_event
+            WHERE instance_id = ? AND applied_action IN ('TARGET','STOP_LOSS','TAKE_PROFIT')
+        """
+        dparams: list[Any] = [instance_id]
+        if end_ts is not None:
+            dec_q += " AND created_at <= ?"
+            dparams.append(end_ts.isoformat())
+        dec_q += " ORDER BY seq ASC"
+        for d in conn.execute(dec_q, dparams).fetchall():
+            ts = _parse_ts(d["created_at"])
+            if ts is None:
+                continue
+            markers.append(
+                {
+                    "time": int(ts.timestamp()),
+                    "position": "aboveBar",
+                    "color": "#0a84ff",
+                    "shape": "circle",
+                    "text": f"{d['applied_action']}:{d['target_after']}",
+                    "side": "SIGNAL",
+                    "price": None,
+                    "qty": int(d["target_after"]),
+                }
+            )
+
+        snap_price = snap.get("last_price")
+        if snap_price is None and bars:
+            snap_price = float(bars[-1]["close"])
+        last_price = live["last_price"] if live["last_price"] is not None else snap_price
+        trade_out = str(snap.get("trade_symbol") or trade_symbol)
+
+        return {
+            "instance_id": instance_id,
+            "signal_symbol": str(snap.get("signal_symbol") or signal_symbol),
+            "trade_symbol": trade_out,
+            "bars": bars,
+            "markers": markers,
+            "last_price": float(last_price) if last_price is not None else None,
+            "last_price_source": live["last_price_source"] or "tqsdk_sim_live",
+            "last_price_as_of": live["last_price_as_of"] or snap.get("updated_at"),
+            "hint": None,
+            "source": "tqsdk_sim_live",
+            "updated_at": snap.get("updated_at"),
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/sessions/{instance_id}/replay")
+def session_replay(
+    instance_id: str,
+    at: str = Query(..., description="ISO timestamp"),
+) -> dict[str, Any]:
+    path = _resolve_db(instance_id)
+    at_ts = _parse_ts(at)
+    if at_ts is None:
+        raise HTTPException(400, "invalid at timestamp")
+    at_iso = at_ts.isoformat()
+    conn = _open_ro(path)
+    try:
+        acct = conn.execute(
+            """
+            SELECT equity, available, margin, margin_ratio, as_of, created_at, payload_json
+            FROM account_snapshot_event
+            WHERE instance_id = ? AND created_at <= ?
+            ORDER BY seq DESC LIMIT 1
+            """,
+            (instance_id, at_iso),
+        ).fetchone()
+        pos = conn.execute(
+            """
+            SELECT symbol, net_position, source, as_of, created_at, payload_json
+            FROM position_snapshot_event
+            WHERE instance_id = ? AND created_at <= ?
+            ORDER BY seq DESC LIMIT 1
+            """,
+            (instance_id, at_iso),
+        ).fetchone()
+        dec = conn.execute(
+            """
+            SELECT * FROM decision_event
+            WHERE instance_id = ? AND created_at <= ?
+            ORDER BY seq DESC LIMIT 1
+            """,
+            (instance_id, at_iso),
+        ).fetchone()
+        fills = conn.execute(
+            """
+            SELECT fill_id, intent_id, symbol, price, qty, fee, side, trade_time, created_at
+            FROM trade_fill_event
+            WHERE instance_id = ? AND created_at <= ?
+            ORDER BY seq ASC
+            """,
+            (instance_id, at_iso),
+        ).fetchall()
+        # Metrics up to at: filter fills temporarily via subquery logic
+        # Reuse compute on a filtered set by reading equity at time
+        equity = float(acct["equity"]) if acct else DEFAULT_INIT_BALANCE
+        decision = _decision_row(conn, dec) if dec is not None else None
+        return {
+            "instance_id": instance_id,
+            "at": at_iso,
+            "mode": "replay",
+            "account": (
+                {
+                    "equity": float(acct["equity"]),
+                    "available": float(acct["available"]),
+                    "margin": float(acct["margin"]),
+                    "margin_ratio": float(acct["margin_ratio"]),
+                    "as_of": acct["as_of"],
+                    "created_at": acct["created_at"],
+                }
+                if acct
+                else None
+            ),
+            "position": (
+                {
+                    "symbol": pos["symbol"],
+                    "net_position": int(pos["net_position"]),
+                    "as_of": pos["as_of"],
+                }
+                if pos
+                else None
+            ),
+            "decision": decision,
+            "fills": [
+                {
+                    "fill_id": f["fill_id"],
+                    "intent_id": f["intent_id"],
+                    "symbol": f["symbol"],
+                    "price": float(f["price"]),
+                    "qty": int(f["qty"]),
+                    "fee": float(f["fee"] or 0),
+                    "side": f["side"],
+                    "trade_time": f["trade_time"],
+                    "created_at": f["created_at"],
+                }
+                for f in fills
+            ],
+            "metrics_snapshot": {
+                "equity": equity,
+                "pnl": equity - DEFAULT_INIT_BALANCE,
+                "fill_count": len(fills),
+            },
+        }
+    finally:
+        conn.close()

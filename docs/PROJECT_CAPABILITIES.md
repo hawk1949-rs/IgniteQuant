@@ -121,7 +121,7 @@
 | 数据 | 来源 | 用途 | 是否落盘到本仓库 |
 | --- | --- | --- | --- |
 | 5 分钟 K 线（在线） | 天勤行情 / TqBacktest | 决策输入、缓存下载 | 否（在线） |
-| 5 分钟 K 线（本地缓存） | `tools/download_market_cache.py` | 离线回放；含 `underlying_symbol` | `data/market_cache/**/*.csv`（gitignore） |
+| 5 分钟 K 线（本地缓存） | `tools/download_market_cache.py` | 离线回放；含 `underlying_symbol`；**写入规则见 `docs/market_cache_rules.md`** | `data/market_cache/**/*.csv`（gitignore） |
 | Tick / 盘口 | 天勤（模拟盘） | 成交与心跳展示 | 否 |
 | 账户权益 / 持仓 | `TqSim` / `TqKq` / `LocalSimAccount` | 回测指标、对账 | 部分写入 runtime SQLite |
 | 成交明细 | `TqSim.trade_log` / LocalSim fills | 笔数、归因、夏普估算 | 回测结果摘要进 JSON；完整 log 不长期存库 |
@@ -133,7 +133,7 @@
 | 路径 | 内容 | 格式 |
 | --- | --- | --- |
 | `data/backtest_runs/*.json` | 看板每次回测档案：指标、打分、归因、压力、配置哈希、笔记 | JSON |
-| `data/market_cache/` | 四品种 5m 连续 K + underlying（本地引擎） | CSV + meta.json |
+| `data/market_cache/` | 四品种 5m 连续 K + underlying（本地引擎）；规则：`docs/market_cache_rules.md` | CSV + meta.json |
 | `data/runtime/*.sqlite` | 模拟盘策略状态、决策/订单/成交事件、对账与审计链；异步 job 表 | SQLite WAL |
 | `data/research/*.json` | Phase 6 离线标定报告 | JSON |
 | 桌面 Excel（可选） | 回测对账单（成交 + 信号强度） | `.xlsx` |

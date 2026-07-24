@@ -28,6 +28,7 @@ from dashboard.catalog import ENGINES, STRATEGIES, SYMBOLS
 from dashboard.jobs import get_job_queue
 from dashboard.runners import run_falcon_local, run_falcon_v2, run_vwap_stub
 from dashboard.scoring import score_metrics
+from dashboard.sim_api import router as sim_router
 from dashboard.store import delete_run, get_run, list_runs, save_run, update_run
 from ignitequant.analytics import plan_walk_forward
 from ignitequant.config import default_decision_config, list_profiles, load_profile_dict
@@ -47,6 +48,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(sim_router)
 
 
 class BacktestRequest(BaseModel):

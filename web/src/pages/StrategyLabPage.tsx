@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import { WorkbenchPanel } from './strategy-lab/WorkbenchPanel'
 import { FactorPanel } from './strategy-lab/FactorPanel'
+import { SignalPanel } from './strategy-lab/SignalPanel'
 import { ComingSoonPanel } from './strategy-lab/ComingSoonPanel'
 
 type Props = {
@@ -37,7 +38,7 @@ const LAB_NAV: {
     id: 'signal',
     title: 'Signal',
     subtitle: '信号发生器',
-    summary: 'Alpha / Score 映射、确认根数、TTL 与原因码。',
+    summary: '选用已编译因子组成做多 / 做空 / 平仓公式，并附加门禁条件。',
   },
   {
     id: 'sizing',
@@ -61,6 +62,7 @@ function SectionBody({ id }: { id: LabSection }) {
     case 'factor':
       return <FactorPanel />
     case 'signal':
+      return <SignalPanel />
     case 'sizing':
     case 'admin':
       return (

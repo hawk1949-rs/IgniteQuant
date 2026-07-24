@@ -1,11 +1,20 @@
-"""Download continuous klines + per-bar underlying via TqBacktest into local cache."""
+"""Download continuous klines + per-bar underlying via TqBacktest into local cache.
+
+Mandatory capture semantics: see ``docs/market_cache_rules.md``.
+
+On each ``is_changing(klines.iloc[-1], \"datetime\")`` event:
+  * upsert ``iloc[-2]`` as the **completed** bar (full OHLC / volume);
+  * upsert ``iloc[-1]`` as the new **stub** bar.
+
+Saving only stubs forever collapses ATR and desyncs local replay from TqSim.
+"""
 
 from __future__ import annotations
 
 import datetime as dt
 import os
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -31,7 +40,6 @@ def _iter_chunks(start: dt.date, end: dt.date, *, months: int = 6) -> list[tuple
     chunks: list[tuple[dt.date, dt.date]] = []
     cur = start
     while cur < end:
-        # advance by `months`
         year = cur.year + (cur.month + months - 1) // 12
         month = (cur.month + months - 1) % 12 + 1
         boundary = dt.date(year, month, 1)
@@ -41,6 +49,42 @@ def _iter_chunks(start: dt.date, end: dt.date, *, months: int = 6) -> list[tuple
         chunks.append((cur, chunk_end))
         cur = chunk_end
     return chunks
+
+
+def _bar_record(row: Any, underlying: str) -> dict[str, Any]:
+    return {
+        "datetime": int(row["datetime"]),
+        "open": float(row["open"]),
+        "high": float(row["high"]),
+        "low": float(row["low"]),
+        "close": float(row["close"]),
+        "volume": float(row.get("volume", 0) or 0),
+        "open_oi": float(row.get("open_oi", 0) or 0),
+        "close_oi": float(row.get("close_oi", 0) or 0),
+        "underlying_symbol": underlying,
+    }
+
+
+def upsert_completed_and_stub(
+    by_dt: dict[int, dict[str, Any]],
+    klines: pd.DataFrame,
+    *,
+    underlying: str,
+) -> int | None:
+    """Mirror Tq ``is_changing(datetime)`` snapshots into a datetime→bar map.
+
+    When a new bar appears, ``iloc[-2]`` is the just-finished bar (full OHLC) and
+    ``iloc[-1]`` is the new stub (often o=h=l=c, volume=0). Older downloaders only
+    saved the stub forever, which collapses ATR and desyncs local vs TqSim.
+    """
+    if klines is None or len(klines) == 0:
+        return None
+    if len(klines) >= 2:
+        prev = _bar_record(klines.iloc[-2], underlying)
+        by_dt[int(prev["datetime"])] = prev
+    cur = _bar_record(klines.iloc[-1], underlying)
+    by_dt[int(cur["datetime"])] = cur
+    return int(cur["datetime"])
 
 
 def _download_chunk(
@@ -57,7 +101,6 @@ def _download_chunk(
 ) -> pd.DataFrame:
     from tqsdk import BacktestFinished, TqApi, TqAuth, TqBacktest, TqSim
 
-    # Keep serial modest; we accumulate every closed bar into `records`.
     data_length = 8_000
     api = TqApi(
         TqSim(init_balance=1_000_000),
@@ -71,7 +114,7 @@ def _download_chunk(
     quote = api.get_quote(signal_symbol)
     klines = api.get_kline_serial(signal_symbol, duration_seconds, data_length=data_length)
 
-    records: list[dict] = []
+    by_dt: dict[int, dict[str, Any]] = {}
     last_dt: int | None = None
     last_progress_day: dt.date | None = None
 
@@ -80,25 +123,12 @@ def _download_chunk(
             api.wait_update()
             if not api.is_changing(klines.iloc[-1], "datetime"):
                 continue
-            row = klines.iloc[-1]
-            bar_ns = int(row["datetime"])
+            bar_ns = int(klines.iloc[-1]["datetime"])
             if last_dt is not None and bar_ns <= last_dt:
                 continue
             last_dt = bar_ns
             underlying = str(getattr(quote, "underlying_symbol", "") or "")
-            records.append(
-                {
-                    "datetime": bar_ns,
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": float(row.get("volume", 0) or 0),
-                    "open_oi": float(row.get("open_oi", 0) or 0),
-                    "close_oi": float(row.get("close_oi", 0) or 0),
-                    "underlying_symbol": underlying,
-                }
-            )
+            upsert_completed_and_stub(by_dt, klines, underlying=underlying)
             bar_day = dt.datetime.fromtimestamp(bar_ns / 1_000_000_000).date()
             if progress_cb is not None and bar_day != last_progress_day:
                 last_progress_day = bar_day
@@ -107,12 +137,16 @@ def _download_chunk(
                 pct = progress_base + progress_span * min(done / span, 1.0)
                 progress_cb(min(pct, 0.99), f"缓存 {bar_day} {underlying or signal_symbol}")
     except BacktestFinished:
-        pass
+        underlying = str(getattr(quote, "underlying_symbol", "") or "")
+        if len(klines) >= 1:
+            last = _bar_record(klines.iloc[-1], underlying)
+            by_dt[int(last["datetime"])] = last
     finally:
         api.close()
 
-    if not records:
+    if not by_dt:
         return pd.DataFrame(columns=BAR_COLUMNS)
+    records = [by_dt[k] for k in sorted(by_dt.keys())]
     return pd.DataFrame(records)
 
 
@@ -130,6 +164,9 @@ def download_klines(
 
     Uses incremental bar capture (not the rolling kline serial alone) so long
     ranges are not truncated to ~10k bars. Downloads in date chunks and merges.
+
+    Each datetime-change event finalizes ``iloc[-2]`` (completed OHLC) and upserts
+    the new stub ``iloc[-1]``, matching what Falcon sees under TqBacktest.
     """
     _load_dotenv(ROOT / ".env")
     user = os.environ.get("TQ_USER", "").strip()
@@ -162,7 +199,6 @@ def download_klines(
         )
         if not part.empty:
             frames.append(part)
-            # Merge after each chunk so crash mid-way still keeps progress.
             merge_and_save(
                 signal_symbol,
                 part,
@@ -177,7 +213,6 @@ def download_klines(
     frame = pd.concat(frames, ignore_index=True)
     if progress_cb is not None:
         progress_cb(1.0, f"已写入完整缓存 ({len(frame)} bars 本轮)")
-    # Final merge ensures meta.json reflects full file.
     return merge_and_save(
         signal_symbol,
         frame,

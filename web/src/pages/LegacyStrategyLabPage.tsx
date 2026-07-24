@@ -127,6 +127,7 @@ export default function LegacyStrategyLabPage({ onBackHome }: Props) {
         end,
         init_balance: balance,
         engine,
+        force: true,
         onProgress,
       })
       setProgress(100)

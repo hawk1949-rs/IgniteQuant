@@ -1,6 +1,10 @@
 #!/usr/bin/env python
 """Download 5m continuous klines (+ underlying) into data/market_cache/.
 
+Writing rules (mandatory): docs/market_cache_rules.md
+  - On Tq datetime-change: upsert completed iloc[-2] full OHLC, then stub iloc[-1]
+  - Never keep history as open-only stubs (breaks ATR / local↔tq alignment)
+
 Examples:
   python tools/download_market_cache.py --all --start 2024-01-01 --end 2025-06-30
   python tools/download_market_cache.py --ids au,ag,rb,fg --start 2025-01-01 --end 2025-03-01

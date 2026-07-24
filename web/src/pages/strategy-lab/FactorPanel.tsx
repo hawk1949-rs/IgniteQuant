@@ -6,7 +6,7 @@ import {
   Col,
   Flex,
   Input,
-  InputNumber,
+  Modal,
   Row,
   Select,
   Space,
@@ -15,36 +15,26 @@ import {
   Tag,
   Typography,
 } from 'antd'
-import {
-  PlusOutlined,
-  SaveOutlined,
-  CopyOutlined,
-  CloudUploadOutlined,
-  DeleteOutlined,
-} from '@ant-design/icons'
+import { PlusOutlined, SaveOutlined, CopyOutlined } from '@ant-design/icons'
 import { FactorCodeEditor } from './FactorCodeEditor'
 import {
   BOUNDARY_RULES,
+  DEFAULT_CATEGORY,
   FACTOR_MODULE_CONTRACT,
-  RAW_FIELDS,
   TIMEFRAME_OPTIONS,
   buildFeatureDictPreview,
+  collectCategories,
   collectOutputKeys,
   createDefaultMiningConfig,
   createEmptyModule,
-  deleteFactorCombo,
   loadFactorMiningConfig,
-  loadSavedFactorCombos,
   modulePathFromFileName,
+  normalizeCategory,
   persistFactorMiningConfig,
   sanitizePyFileName,
-  saveFactorComboAsNew,
-  summarizeFactorCombo,
-  updateFactorCombo,
   validateModules,
   type FactorMiningConfig,
   type FactorModule,
-  type SavedFactorCombo,
   type TimeframeId,
 } from './factor-data'
 
@@ -58,7 +48,6 @@ function ModuleEditor({
   onChange: (partial: Partial<FactorModule>) => void
 }) {
   const renameFactor = (name: string) => {
-    // 中文显示名不强制改写 .py 文件名；仅 ASCII 命名时同步 fileName
     const stem = name.trim()
     if (/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(stem)) {
       const fileName = sanitizePyFileName(stem)
@@ -119,73 +108,52 @@ function ModuleEditor({
 }
 
 export function FactorPanel() {
-  const { message, modal } = App.useApp()
+  const { message } = App.useApp()
   const [cfg, setCfg] = useState<FactorMiningConfig>(() => loadFactorMiningConfig())
-  const [combos, setCombos] = useState<SavedFactorCombo[]>(() => loadSavedFactorCombos())
-  const [selectedComboId, setSelectedComboId] = useState<string>()
-  const [comboName, setComboName] = useState('')
-  const [comboNote, setComboNote] = useState('')
   const [activeModuleId, setActiveModuleId] = useState<string>(
     () => loadFactorMiningConfig().modules[0]?.id ?? '',
   )
+  /** 空字符串 = 显示全部分类 */
+  const [categoryFilter, setCategoryFilter] = useState<string>('')
+  const [categoryModalOpen, setCategoryModalOpen] = useState(false)
+  const [newCategoryName, setNewCategoryName] = useState('')
+
+  const categories = useMemo(
+    () => collectCategories(cfg.modules, cfg.categories),
+    [cfg.modules, cfg.categories],
+  )
+
+  const filteredModules = useMemo(() => {
+    if (!categoryFilter) return cfg.modules
+    return cfg.modules.filter(
+      (m) => normalizeCategory(m.category) === categoryFilter,
+    )
+  }, [cfg.modules, categoryFilter])
 
   useEffect(() => {
-    if (cfg.modules.length === 0) {
-      setActiveModuleId('')
+    if (filteredModules.length === 0) {
+      if (cfg.modules.length === 0) setActiveModuleId('')
       return
     }
-    if (!cfg.modules.some((m) => m.id === activeModuleId)) {
-      setActiveModuleId(cfg.modules[0].id)
+    if (!filteredModules.some((m) => m.id === activeModuleId)) {
+      setActiveModuleId(filteredModules[0].id)
     }
-  }, [cfg.modules, activeModuleId])
+  }, [filteredModules, cfg.modules.length, activeModuleId])
 
   const activeModule = cfg.modules.find((m) => m.id === activeModuleId)
-
   const errors = useMemo(() => validateModules(cfg.modules), [cfg.modules])
-  const saveErrors = useMemo(
-    () => validateModules(cfg.modules, { lintSource: true }),
-    [cfg.modules],
-  )
   const keys = useMemo(() => collectOutputKeys(cfg.modules), [cfg.modules])
   const preview = useMemo(() => buildFeatureDictPreview(cfg), [cfg])
 
-  const patchPipeline = (partial: Partial<FactorMiningConfig['pipeline']>) => {
-    setCfg((prev) => ({
-      ...prev,
-      pipeline: {
-        ...prev.pipeline,
-        ...partial,
-        closedBarsOnly: true,
-        rawFields: prev.pipeline.rawFields,
-      },
-    }))
-  }
-
   const updateModule = (id: string, partial: Partial<FactorModule>) => {
-    setCfg((prev) => ({
-      ...prev,
-      modules: prev.modules.map((m) => (m.id === id ? { ...m, ...partial } : m)),
-    }))
-  }
-
-  const syncDraft = (next: FactorMiningConfig) => {
-    setCfg(next)
-    persistFactorMiningConfig(next)
-  }
-
-  const onLoadCombo = (id: string | undefined) => {
-    setSelectedComboId(id)
-    if (!id) return
-    const hit = combos.find((c) => c.id === id)
-    if (!hit) {
-      message.error('组合不存在')
-      return
-    }
-    syncDraft(hit.config)
-    setComboName(hit.name)
-    setComboNote(hit.note)
-    setActiveModuleId(hit.config.modules[0]?.id ?? '')
-    message.success(`已载入因子组合「${hit.name}」`)
+    setCfg((prev) => {
+      const modules = prev.modules.map((m) => (m.id === id ? { ...m, ...partial } : m))
+      const categories =
+        partial.category !== undefined
+          ? collectCategories(modules, [...prev.categories, partial.category])
+          : prev.categories
+      return { ...prev, modules, categories }
+    })
   }
 
   const onSaveDraft = () => {
@@ -194,88 +162,52 @@ export function FactorPanel() {
       return
     }
     persistFactorMiningConfig(cfg)
-    message.success('草稿已保存（仅本机编辑缓存，不会出现在回测看板）')
-  }
-
-  const onSaveAsNewCombo = () => {
-    if (saveErrors.length) {
-      message.error(saveErrors[0])
-      return
-    }
-    const name = comboName.trim() || cfg.workspaceName.trim()
-    if (!name) {
-      message.error('请先填写因子组合名称')
-      return
-    }
-    const { list, combo } = saveFactorComboAsNew(name, comboNote, cfg)
-    setCombos(list)
-    setSelectedComboId(combo.id)
-    setComboName(combo.name)
-    persistFactorMiningConfig({ ...cfg, workspaceName: combo.name })
-    setCfg((p) => ({ ...p, workspaceName: combo.name }))
-    message.success(`已保存因子组合「${combo.name}」，可在回测看板节点 1 选用`)
-  }
-
-  const onUpdateCombo = () => {
-    if (!selectedComboId) {
-      message.warning('请先从下拉框选中要覆盖的组合，或改用「另存为」')
-      return
-    }
-    if (saveErrors.length) {
-      message.error(saveErrors[0])
-      return
-    }
-    const name = comboName.trim() || cfg.workspaceName.trim()
-    if (!name) {
-      message.error('请先填写因子组合名称')
-      return
-    }
-    const result = updateFactorCombo(selectedComboId, name, comboNote, cfg)
-    if (!result) {
-      message.error('组合不存在，请另存为新组合')
-      return
-    }
-    setCombos(result.list)
-    setComboName(result.combo.name)
-    persistFactorMiningConfig({ ...cfg, workspaceName: result.combo.name })
-    setCfg((p) => ({ ...p, workspaceName: result.combo.name }))
-    message.success(`已更新因子组合「${result.combo.name}」`)
-  }
-
-  const onDeleteCombo = () => {
-    if (!selectedComboId) {
-      message.warning('请先选中要删除的组合')
-      return
-    }
-    const hit = combos.find((c) => c.id === selectedComboId)
-    modal.confirm({
-      title: `删除因子组合「${hit?.name ?? selectedComboId}」？`,
-      content: '回测看板中已引用该组合的装配将无法解析描述（需重新选择）。',
-      okText: '删除',
-      okButtonProps: { danger: true },
-      onOk: () => {
-        const next = deleteFactorCombo(selectedComboId)
-        setCombos(next)
-        setSelectedComboId(undefined)
-        message.success('已删除')
-      },
-    })
+    message.success('已保存因子挖掘草稿')
   }
 
   const onReset = () => {
     const next = createDefaultMiningConfig()
-    syncDraft(next)
-    setSelectedComboId(undefined)
-    setComboName('')
-    setComboNote('')
+    setCfg(next)
+    persistFactorMiningConfig(next)
+    setCategoryFilter('')
     setActiveModuleId(next.modules[0]?.id ?? '')
-    message.success('已重置为空白示范草稿')
+    message.success('已重置为示范草稿')
   }
 
   const onAddModule = () => {
-    const next = createEmptyModule()
-    setCfg((prev) => ({ ...prev, modules: [...prev.modules, next] }))
+    const next = createEmptyModule(categoryFilter || DEFAULT_CATEGORY)
+    setCfg((prev) => ({
+      ...prev,
+      modules: [...prev.modules, next],
+      categories: collectCategories([...prev.modules, next], prev.categories),
+    }))
     setActiveModuleId(next.id)
+  }
+
+  const openCategoryModal = () => {
+    setNewCategoryName('')
+    setCategoryModalOpen(true)
+  }
+
+  const confirmAddCategory = () => {
+    const name = normalizeCategory(newCategoryName)
+    if (!newCategoryName.trim()) {
+      message.error('请输入分类名称')
+      return
+    }
+    if (categories.includes(name)) {
+      message.warning(`分类「${name}」已存在`)
+      setCategoryFilter(name)
+      setCategoryModalOpen(false)
+      return
+    }
+    setCfg((prev) => ({
+      ...prev,
+      categories: collectCategories(prev.modules, [...prev.categories, name]),
+    }))
+    setCategoryFilter(name)
+    setCategoryModalOpen(false)
+    message.success(`已创建分类「${name}」`)
   }
 
   const onCopyContract = async () => {
@@ -286,6 +218,15 @@ export function FactorPanel() {
       message.warning('复制失败，请手动选中下方代码')
     }
   }
+
+  const categoryCounts = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const m of cfg.modules) {
+      const c = normalizeCategory(m.category)
+      map.set(c, (map.get(c) ?? 0) + 1)
+    }
+    return map
+  }, [cfg.modules])
 
   return (
     <Flex vertical gap={16}>
@@ -304,106 +245,9 @@ export function FactorPanel() {
         <Title level={3} style={{ marginTop: 8, marginBottom: 8, color: '#F5F5F7' }}>
           因子与特征
         </Title>
-        <Paragraph type="secondary" style={{ marginBottom: 0, maxWidth: 680 }}>
-          编辑模块与管道后，用下方「命名保存」写入因子组合库；回测看板装配区节点 1 只从该库选用。
+        <Paragraph type="secondary" style={{ marginBottom: 12, maxWidth: 680 }}>
+          专注因子编译与挖掘：写你自己的 <Text code>compute</Text>，用归类管理大量因子，方便筛选。
         </Paragraph>
-      </Card>
-
-      <Card
-        title="因子组合库（供回测看板）"
-        extra={<Tag color="blue">{combos.length} 个已保存</Tag>}
-      >
-        <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 16 }}>
-          给当前模块组合起名并入库后，即可在回测看板「因子与特征」下拉中选择。草稿仅本地编辑缓存，不会出现在看板。
-        </Paragraph>
-        <Row gutter={[16, 16]}>
-          <Col xs={24} md={12}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
-              加载已保存组合
-            </Text>
-            <Select
-              allowClear
-              style={{ width: '100%' }}
-              placeholder="选择后载入到编辑区…"
-              value={selectedComboId}
-              options={combos.map((c) => ({
-                value: c.id,
-                label: c.name,
-              }))}
-              onChange={(v) => onLoadCombo(v)}
-            />
-          </Col>
-          <Col xs={24} md={12}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
-              组合名称（回测看板显示名）
-            </Text>
-            <Input
-              value={comboName}
-              placeholder="例如：au_5m_vol_filter_v1"
-              onChange={(e) => setComboName(e.target.value)}
-            />
-          </Col>
-          <Col span={24}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
-              备注（可选，显示在回测看板节点说明）
-            </Text>
-            <Input
-              value={comboNote}
-              placeholder="一句话说明本组合假设"
-              onChange={(e) => setComboNote(e.target.value)}
-            />
-          </Col>
-          <Col span={24}>
-            <Space wrap>
-              <Button type="primary" icon={<CloudUploadOutlined />} onClick={onSaveAsNewCombo}>
-                另存为新组合
-              </Button>
-              <Button icon={<SaveOutlined />} onClick={onUpdateCombo} disabled={!selectedComboId}>
-                覆盖更新选中
-              </Button>
-              <Button danger icon={<DeleteOutlined />} onClick={onDeleteCombo} disabled={!selectedComboId}>
-                删除选中
-              </Button>
-            </Space>
-          </Col>
-          {combos.length > 0 && (
-            <Col span={24}>
-              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
-                库内一览
-              </Text>
-              <Space direction="vertical" style={{ width: '100%' }} size={6}>
-                {combos.map((c) => (
-                  <Flex
-                    key={c.id}
-                    justify="space-between"
-                    align="center"
-                    gap={8}
-                    style={{
-                      padding: '8px 12px',
-                      borderRadius: 10,
-                      background:
-                        selectedComboId === c.id ? 'rgba(10,132,255,0.16)' : '#121C30',
-                      border: '1px solid rgba(180, 200, 230, 0.22)',
-                      cursor: 'pointer',
-                    }}
-                    onClick={() => onLoadCombo(c.id)}
-                  >
-                    <div>
-                      <Text strong>{c.name}</Text>
-                      <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
-                        {summarizeFactorCombo(c)}
-                      </Text>
-                    </div>
-                    <Tag>{c.config.modules.filter((m) => m.enabled).length} 启用</Tag>
-                  </Flex>
-                ))}
-              </Space>
-            </Col>
-          )}
-        </Row>
-      </Card>
-
-      <Card title="边界">
         <Row gutter={[12, 12]}>
           {BOUNDARY_RULES.map((r) => (
             <Col key={r.title} xs={24} md={8}>
@@ -419,71 +263,14 @@ export function FactorPanel() {
       </Card>
 
       <Card
-        title="纯净数据管道"
-        extra={<Tag color="processing">仅 OHLCV(+OI) · 已闭合 bar</Tag>}
-      >
-        <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 16 }}>
-          绕过臃肿内置指标函数：直接拿底层 K 线，多周期自己处理。高周期未闭合时只
-          forward-fill 上一根已确认数据。
-        </Paragraph>
-        <Row gutter={[16, 16]}>
-          <Col xs={24} sm={8}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
-              决策主周期
-            </Text>
-            <Select
-              style={{ width: '100%' }}
-              value={cfg.pipeline.baseTimeframe}
-              options={TIMEFRAME_OPTIONS.map((t) => ({ value: t.id, label: t.label }))}
-              onChange={(v: TimeframeId) => patchPipeline({ baseTimeframe: v })}
-            />
-          </Col>
-          <Col xs={24} sm={8}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
-              额外周期（对齐用）
-            </Text>
-            <Select
-              mode="multiple"
-              style={{ width: '100%' }}
-              value={cfg.pipeline.alignTimeframes}
-              options={TIMEFRAME_OPTIONS.filter(
-                (t) => t.id !== cfg.pipeline.baseTimeframe,
-              ).map((t) => ({ value: t.id, label: t.label }))}
-              onChange={(v: TimeframeId[]) => patchPipeline({ alignTimeframes: v })}
-            />
-          </Col>
-          <Col xs={24} sm={8}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
-              warmup_bars
-            </Text>
-            <InputNumber
-              style={{ width: '100%' }}
-              min={50}
-              max={2000}
-              value={cfg.pipeline.warmupBars}
-              onChange={(v) => patchPipeline({ warmupBars: Number(v ?? 200) })}
-            />
-          </Col>
-          <Col span={24}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
-              管道字段（固定；无预装指标列）
-            </Text>
-            <Space wrap>
-              {RAW_FIELDS.map((f) => (
-                <Tag key={f.id}>{f.label}</Tag>
-              ))}
-              <Tag color="blue">closed_bars_only = true</Tag>
-            </Space>
-          </Col>
-        </Row>
-      </Card>
-
-      <Card
-        title="我的因子模块"
+        title="因子编译与挖掘"
         extra={
           <Space wrap>
-            <Button type="primary" icon={<PlusOutlined />} onClick={onAddModule}>
-              新建模块
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCategoryModal}>
+              新建分类
+            </Button>
+            <Button icon={<PlusOutlined />} onClick={onAddModule}>
+              添加因子
             </Button>
             <Button icon={<SaveOutlined />} onClick={onSaveDraft}>
               保存草稿
@@ -492,16 +279,60 @@ export function FactorPanel() {
         }
       >
         <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
-          每个模块：启用开关、因子命名、触发 K 线周期、Python 编辑器。一个组合可挂多个模块。
+          先选或新建分类，再用「添加因子」在当前筛选分类下编译。每个因子：启用、命名、触发周期、Python 源码。
         </Paragraph>
+
+        <Flex wrap="wrap" gap={8} align="center" style={{ marginBottom: 14 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            按归类筛选
+          </Text>
+          <Select
+            allowClear
+            style={{ minWidth: 180 }}
+            placeholder="全部归类"
+            value={categoryFilter || undefined}
+            options={categories.map((c) => ({
+              value: c,
+              label: `${c}（${categoryCounts.get(c) ?? 0}）`,
+            }))}
+            onChange={(v) => setCategoryFilter(v ?? '')}
+          />
+          {categoryFilter ? (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              当前：{categoryFilter} · 添加因子将归入此类
+            </Text>
+          ) : null}
+        </Flex>
+
         {errors.length > 0 && (
           <Paragraph type="danger" style={{ fontSize: 12 }}>
             {errors.slice(0, 4).join('；')}
             {errors.length > 4 ? `…共 ${errors.length} 项` : ''}
           </Paragraph>
         )}
-        {cfg.modules.length === 0 ? (
-          <Text type="secondary">还没有模块。点「新建模块」开始写代码。</Text>
+
+        {filteredModules.length === 0 ? (
+          <Flex
+            vertical
+            align="center"
+            justify="center"
+            gap={12}
+            style={{
+              padding: '36px 16px',
+              borderRadius: 12,
+              border: '1px dashed rgba(180, 200, 230, 0.35)',
+              background: '#121C30',
+            }}
+          >
+            <Text type="secondary" style={{ textAlign: 'center', maxWidth: 420 }}>
+              {categoryFilter
+                ? `「${categoryFilter}」下还没有因子。点击下方按钮，在此分类中新建一个。`
+                : '还没有因子。可先筛选或新建分类，再添加因子开始编译。'}
+            </Text>
+            <Button type="primary" icon={<PlusOutlined />} onClick={onAddModule}>
+              {categoryFilter ? `在「${categoryFilter}」下添加因子` : '添加因子'}
+            </Button>
+          </Flex>
         ) : (
           <Tabs
             type="editable-card"
@@ -518,14 +349,15 @@ export function FactorPanel() {
             }}
             tabBarExtraContent={
               <Button size="small" type="link" icon={<PlusOutlined />} onClick={onAddModule}>
-                添加
+                添加因子
               </Button>
             }
-            items={cfg.modules.map((m) => ({
+            items={filteredModules.map((m) => ({
               key: m.id,
               label: (
                 <span>
                   {m.enabled ? '' : '⏸ '}
+                  <Tag style={{ marginInlineEnd: 6 }}>{normalizeCategory(m.category)}</Tag>
                   {m.name || m.fileName}
                 </span>
               ),
@@ -544,8 +376,29 @@ export function FactorPanel() {
         </Button>
       </Card>
 
+      <Modal
+        title="新建分类"
+        open={categoryModalOpen}
+        okText="创建"
+        cancelText="取消"
+        onOk={confirmAddCategory}
+        onCancel={() => setCategoryModalOpen(false)}
+        destroyOnHidden
+      >
+        <Text type="secondary" style={{ display: 'block', marginBottom: 8, fontSize: 12 }}>
+          分类用于归组筛选；创建后可在筛选中选中，再「添加因子」。
+        </Text>
+        <Input
+          autoFocus
+          value={newCategoryName}
+          placeholder="例如：结构 / 微观结构"
+          onChange={(e) => setNewCategoryName(e.target.value)}
+          onPressEnter={confirmAddCategory}
+        />
+      </Modal>
+
       <Card
-        title="串联契约 · Feature Dict"
+        title="Feature Dict 预览"
         extra={
           <Button size="small" icon={<CopyOutlined />} onClick={onCopyContract}>
             复制 Python 契约
@@ -555,11 +408,11 @@ export function FactorPanel() {
         <Row gutter={[16, 16]}>
           <Col xs={24} lg={12}>
             <Text strong style={{ display: 'block', marginBottom: 8 }}>
-              当前启用输出键 → 预览
+              当前启用输出（契约形状）
             </Text>
             {keys.length === 0 ? (
               <Text type="secondary" style={{ fontSize: 12 }}>
-                启用至少一个模块并声明输出键后，这里会出现 Feature Dict。
+                启用至少一个因子后，这里预览 Feature Dict。
               </Text>
             ) : (
               <pre
@@ -578,11 +431,13 @@ export function FactorPanel() {
               >
                 {JSON.stringify(
                   {
-                    combo_name: comboName || cfg.workspaceName,
-                    base_timeframe: cfg.pipeline.baseTimeframe,
                     modules: cfg.modules
                       .filter((m) => m.enabled)
-                      .map((m) => m.modulePath),
+                      .map((m) => ({
+                        name: m.name,
+                        category: normalizeCategory(m.category),
+                        path: m.modulePath,
+                      })),
                     values: preview,
                   },
                   null,
@@ -593,7 +448,7 @@ export function FactorPanel() {
           </Col>
           <Col xs={24} lg={12}>
             <Text strong style={{ display: 'block', marginBottom: 8 }}>
-              FactorModule 接口（主干只调用，不实现指标）
+              FactorModule 接口
             </Text>
             <pre
               style={{

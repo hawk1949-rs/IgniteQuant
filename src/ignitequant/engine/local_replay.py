@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import math
 import time
 from typing import Any, Callable
 
@@ -22,6 +21,7 @@ from ignitequant.engine.runtime_bridge import (
 from ignitequant.execution.roll import RollStateMachine
 from ignitequant.market.cache import ensure_cache, resolve_instrument
 from ignitequant.market.symbols import cost_model_for
+from ignitequant.market.trading_day import trading_day_from_timestamp_ns
 import ignitequant as _iq
 
 ProgressCb = Callable[[float, str], None]
@@ -33,71 +33,40 @@ def _last_business_day_on_or_before(d: dt.date) -> dt.date:
     return d
 
 
-def _bar_date(ns: int) -> dt.date:
-    return dt.datetime.fromtimestamp(int(ns) / 1_000_000_000).date()
-
-
 def _window(bars: pd.DataFrame, end_idx: int, data_length: int) -> pd.DataFrame:
     start_idx = max(0, end_idx - data_length + 1)
     return bars.iloc[start_idx : end_idx + 1]
 
 
-def _finite_float(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
+def _tq_datetime_change_window(bars: pd.DataFrame, end_idx: int, data_length: int) -> pd.DataFrame:
+    """Build the kline window Falcon sees under TqBacktest ``is_changing(datetime)``.
+
+    History bars keep completed OHLC; the decision bar is collapsed to an open stub
+    (o=h=l=c=open, volume=0), matching Tq's newly opened last bar.
+    """
+    window = _window(bars, end_idx, data_length).copy()
+    if window.empty:
+        return window
+    open_px = float(window.iloc[-1]["open"])
+    window.iloc[-1, window.columns.get_loc("high")] = open_px
+    window.iloc[-1, window.columns.get_loc("low")] = open_px
+    window.iloc[-1, window.columns.get_loc("close")] = open_px
+    if "volume" in window.columns:
+        window.iloc[-1, window.columns.get_loc("volume")] = 0
+    return window
 
 
-def _sharpe_from_daily_balances(
-    balances: list[float],
+def _record_settle_day(
+    sim: LocalSimAccount,
     *,
-    init_balance: float,
-    risk_free_annual: float = 0.025,
-    trading_days_of_year: int = 250,
-) -> float | None:
-    if len(balances) < 2:
-        return None
-    prev = float(init_balance) if init_balance > 0 else balances[0]
-    if prev <= 0:
-        return None
-    yields: list[float] = []
-    for bal in balances:
-        if prev <= 0:
-            return None
-        yields.append(bal / prev - 1.0)
-        prev = bal
-    if len(yields) < 2:
-        return None
-    mean = sum(yields) / len(yields)
-    var = sum((y - mean) ** 2 for y in yields) / len(yields)
-    std = math.sqrt(var)
-    if std <= 1e-12:
-        return None
-    rf_daily = (1.0 + risk_free_annual) ** (1.0 / trading_days_of_year) - 1.0
-    return _finite_float(math.sqrt(trading_days_of_year) * (mean - rf_daily) / std)
-
-
-def _sharpe_fallback(
-    *,
-    ror: float | None,
-    annual_yield: float | None,
-    max_drawdown: float | None,
-    start: dt.date | None,
-    end: dt.date | None,
-) -> float | None:
-    ay = annual_yield
-    if ay is None and ror is not None and start and end and end > start:
-        years = max((end - start).days / 365.25, 1 / 365.25)
-        ay = (1.0 + float(ror)) ** (1.0 / years) - 1.0
-    dd = abs(float(max_drawdown)) if max_drawdown is not None else None
-    if ay is None or dd is None or dd < 1e-8:
-        return None
-    approx = _finite_float((float(ay) - 0.025) / max(dd, 1e-4))
-    if approx is None:
-        return None
-    return max(-5.0, min(5.0, approx))
+    symbol: str,
+    settle_day: dt.date,
+    mark_price: float,
+) -> None:
+    """Write EOD equity using completed-bar close (TqSim settle last_price)."""
+    if symbol:
+        sim.mark(symbol, float(mark_price))
+    sim.record_day(settle_day)
 
 
 def run_local_falcon_backtest(
@@ -112,6 +81,7 @@ def run_local_falcon_backtest(
     auto_download: bool = True,
     bars: pd.DataFrame | None = None,
     config: DecisionConfig | None = None,
+    record_decisions: bool = False,
 ) -> dict[str, Any]:
     """Mirror dashboard/runners.run_falcon_v2 semantics without tqsdk event loop."""
     flat_date = _last_business_day_on_or_before(end)
@@ -128,7 +98,7 @@ def run_local_falcon_backtest(
     )
 
     spec = resolve_instrument(signal_symbol)
-    cost = cost_model_for(spec)
+    cost = cost_model_for(spec, tq_align=True)
 
     if bars is None:
         bars = ensure_cache(
@@ -158,23 +128,36 @@ def run_local_falcon_backtest(
     risk_engine = make_risk_engine(cfg)
     roll = RollStateMachine()
     sim = LocalSimAccount(init_balance=init_balance, cost=cost)
+    # Match TqSim trade_log: first settle day carries init pre_balance.
+    sim.record_day(start)
 
     trade_symbol = ""
     last_progress_day: dt.date | None = None
     t0 = time.time()
-    warmup = max(int(cfg.factor.warmup_bars), int(cfg.factor.ma_slow), 60)
+    # Respect profile warmup; do not force ma_slow/60 floor (smoke/test may use warmup=5).
+    warmup = max(int(cfg.factor.warmup_bars), 1)
+    decisions: list[dict[str, Any]] = []
 
     for i in trade_indices:
         if i + 1 < warmup:
             continue
 
         row = bars.iloc[i]
-        bar_dt = _bar_date(int(row["datetime"]))
+        bar_ns = int(row["datetime"])
+        # TQ decision gate uses wall-clock date (same as dashboard/runners).
+        calendar_day = dt.datetime.fromtimestamp(bar_ns // 1_000_000_000).date()
+        # TqSim trade_log / TqReport settle on exchange trading day.
+        settle_day = trading_day_from_timestamp_ns(bar_ns)
+        # TqBacktest(end_dt=end) stops at that trading day's settle — exclude later nights.
+        if settle_day > end:
+            continue
         underlying = str(row.get("underlying_symbol") or "").strip()
         if not underlying:
             underlying = signal_symbol.replace("KQ.m@", "LOCAL.")
 
         close_px = float(row["close"])
+        # Tq decides on datetime-change using the new bar's open as last/close.
+        decision_px = float(row["open"])
 
         if underlying != trade_symbol:
             if trade_symbol and not roll.in_progress:
@@ -185,20 +168,24 @@ def run_local_falcon_backtest(
                 net_old = sim.net_pos(trade_symbol)
                 if pipeline.current_target != 0 or net_old != 0:
                     pipeline.force_flat()
-                    mark_px = sim.marks.get(trade_symbol, close_px)
+                    mark_px = sim.marks.get(trade_symbol, decision_px)
                     sim.fill_to_target(
                         symbol=trade_symbol,
                         desired=0,
                         signal_price=mark_px,
                         regime="ROLL",
                         is_roll=True,
-                        month=bar_dt.strftime("%Y-%m"),
+                        month=settle_day.strftime("%Y-%m"),
                     )
                     net_old = sim.net_pos(trade_symbol)
                 roll.on_old_position(net_old)
                 if net_old != 0:
-                    sim.mark(trade_symbol, sim.marks.get(trade_symbol, close_px))
-                    sim.record_day(bar_dt)
+                    _record_settle_day(
+                        sim,
+                        symbol=trade_symbol,
+                        settle_day=settle_day,
+                        mark_price=close_px,
+                    )
                     continue
                 try:
                     roll.complete_switch()
@@ -209,17 +196,20 @@ def run_local_falcon_backtest(
             if roll.in_progress:
                 roll.abort_to_idle()
 
-        sim.mark(trade_symbol, close_px)
-        window = _window(bars, i, data_length)
-        allow_trade = bar_dt < flat_date
+        sim.mark(trade_symbol, decision_px)
+        window = _tq_datetime_change_window(bars, i, data_length)
+        allow_trade = calendar_day < flat_date
         result = pipeline.on_bar_close(window, trade=allow_trade)
 
-        if last_progress_day != bar_dt:
-            last_progress_day = bar_dt
+        if last_progress_day != calendar_day:
+            last_progress_day = calendar_day
             if progress_cb is not None:
                 span = max((end - start).days, 1)
-                done = max((bar_dt - start).days, 0)
-                progress_cb(min(done / span, 0.99), f"{bar_dt} {trade_symbol}")
+                done = max((calendar_day - start).days, 0)
+                progress_cb(
+                    min(0.36 + 0.63 * (done / span), 0.99),
+                    f"回测 {calendar_day} {trade_symbol}",
+                )
 
         net_pos = sim.net_pos(trade_symbol)
 
@@ -229,15 +219,19 @@ def run_local_falcon_backtest(
                 sim.fill_to_target(
                     symbol=trade_symbol,
                     desired=0,
-                    signal_price=close_px,
+                    signal_price=decision_px,
                     regime=result.factors.regime.value,
-                    month=bar_dt.strftime("%Y-%m"),
+                    month=settle_day.strftime("%Y-%m"),
                 )
-            sim.record_day(bar_dt)
+            _record_settle_day(
+                sim, symbol=trade_symbol, settle_day=settle_day, mark_price=close_px
+            )
             continue
 
         if result.applied_action not in {"STOP_LOSS", "TAKE_PROFIT", "TARGET"}:
-            sim.record_day(bar_dt)
+            _record_settle_day(
+                sim, symbol=trade_symbol, settle_day=settle_day, mark_price=close_px
+            )
             continue
 
         pretrade = apply_pretrade(
@@ -249,7 +243,9 @@ def run_local_falcon_backtest(
             symbol=trade_symbol,
         )
         if pretrade.action in {RiskAction.REJECT, RiskAction.HALT}:
-            sim.record_day(bar_dt)
+            _record_settle_day(
+                sim, symbol=trade_symbol, settle_day=settle_day, mark_price=close_px
+            )
             continue
 
         desired = (
@@ -258,34 +254,43 @@ def run_local_falcon_backtest(
             else int(pretrade.approved_position)
         )
         if roll.in_progress and abs(desired) > abs(net_pos):
-            sim.record_day(bar_dt)
+            _record_settle_day(
+                sim, symbol=trade_symbol, settle_day=settle_day, mark_price=close_px
+            )
             continue
 
+        before = sim.net_pos(trade_symbol)
         sim.fill_to_target(
             symbol=trade_symbol,
             desired=desired,
-            signal_price=close_px,
+            signal_price=decision_px,
             regime=result.factors.regime.value,
             is_roll=False,
-            month=bar_dt.strftime("%Y-%m"),
+            month=settle_day.strftime("%Y-%m"),
         )
-        sim.record_day(bar_dt)
+        if record_decisions and before != desired:
+            decisions.append(
+                {
+                    "bar_id": result.bar_id,
+                    "day": settle_day.isoformat(),
+                    "calendar_day": calendar_day.isoformat(),
+                    "symbol": trade_symbol,
+                    "action": result.applied_action,
+                    "desired": desired,
+                    "net_before": before,
+                    "close": decision_px,
+                    "bar_close": close_px,
+                }
+            )
+        _record_settle_day(
+            sim, symbol=trade_symbol, settle_day=settle_day, mark_price=close_px
+        )
 
     elapsed = time.time() - t0
     if progress_cb is not None:
         progress_cb(1.0, "完成")
 
     metrics = sim.metrics(start=start, end=end)
-    daily = [sim.daily_balances[k] for k in sorted(sim.daily_balances.keys())]
-    metrics["sharpe"] = _sharpe_from_daily_balances(daily, init_balance=init_balance)
-    if metrics["sharpe"] is None:
-        metrics["sharpe"] = _sharpe_fallback(
-            ror=metrics.get("ror"),
-            annual_yield=metrics.get("annual_yield"),
-            max_drawdown=metrics.get("max_drawdown"),
-            start=start,
-            end=end,
-        )
 
     attribution = attribute_fills(sim.fills, cost=cost)
     stress_rows = run_cost_stress(sim.fills, base=cost) if sim.fills else []
@@ -294,7 +299,7 @@ def run_local_falcon_backtest(
     metrics["net_pnl_attr"] = attribution.net_pnl
     metrics["slippage_attr"] = attribution.slippage_pnl
 
-    return {
+    out: dict[str, Any] = {
         "strategy_id": "falcon_v2",
         "engine": "local",
         "signal_symbol": signal_symbol,
@@ -304,6 +309,10 @@ def run_local_falcon_backtest(
         "init_balance": init_balance,
         "elapsed_sec": round(elapsed, 2),
         "metrics": metrics,
+        "equity_curve": [
+            {"t": day, "equity": float(bal)}
+            for day, bal in sorted(sim.daily_balances.items())
+        ],
         "config_version": cfg.config_version,
         "config_hash": cfg.config_hash(),
         "entry_mode": cfg.entry_mode,
@@ -321,6 +330,24 @@ def run_local_falcon_backtest(
             "data_length": data_length,
             "entry_mode": cfg.entry_mode,
             "engine": "local",
+            "align_mode": cost.align_mode,
             "bars": len(bars),
         },
     }
+    if record_decisions:
+        out["decisions"] = decisions
+        out["fills"] = [
+            {
+                "trade_id": f.trade_id,
+                "symbol": f.symbol,
+                "side": f.side,
+                "offset": f.offset,
+                "price": f.price,
+                "qty": f.qty,
+                "fee": f.fee,
+                "signal_price": f.signal_price,
+                "is_roll": f.is_roll,
+            }
+            for f in sim.fills
+        ]
+    return out

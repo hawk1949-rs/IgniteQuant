@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ignitequant.config.decision import DecisionConfig, default_decision_config
 from ignitequant.domain.enums import RiskAction
@@ -17,8 +17,10 @@ from ignitequant.domain.models import (
     RiskDecision,
     RuntimeSnapshot,
 )
-from ignitequant.execution.target_position import TargetPositionExecutor
 from ignitequant.risk import RiskEngine
+
+if TYPE_CHECKING:
+    from ignitequant.execution.target_position import TargetPositionExecutor
 
 
 def healthy_runtime(*, roll_in_progress: bool = False) -> RuntimeSnapshot:

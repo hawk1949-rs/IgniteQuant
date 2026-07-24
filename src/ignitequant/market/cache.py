@@ -71,7 +71,12 @@ def _normalize_bars(frame: pd.DataFrame) -> pd.DataFrame:
         out[col] = pd.to_numeric(out[col], errors="coerce")
     out["underlying_symbol"] = out["underlying_symbol"].fillna("").astype(str)
     out = out.dropna(subset=["datetime", "open", "high", "low", "close"])
-    out = out.sort_values("datetime").drop_duplicates(subset=["datetime"], keep="last")
+    out = out.sort_values("datetime")
+    # Prefer richer snapshots when merging stub (vol=0, ohlc flat) with completed bars.
+    out["_range"] = (out["high"] - out["low"]).abs()
+    out = out.sort_values(["datetime", "volume", "_range"])
+    out = out.drop_duplicates(subset=["datetime"], keep="last")
+    out = out.drop(columns=["_range"])
     out = out.reset_index(drop=True)
     return out
 
@@ -149,6 +154,68 @@ def slice_bars(
     return bars.iloc[warm_start : last_idx + 1].reset_index(drop=True)
 
 
+def coverage_ok(
+    bars: pd.DataFrame,
+    *,
+    start: dt.date,
+    end: dt.date,
+    max_end_gap_days: int = 3,
+    max_start_gap_days: int = 5,
+    max_resume_gap_days: int = 20,
+    max_internal_gap_days: int = 20,
+) -> bool:
+    """True when cache covers the requested window for trading purposes.
+
+    Rules:
+    1. At least one bar inside ``[start, end]``.
+    2. First in-range bar is not much later than ``start`` (weekend / New Year).
+    3. No multi-week hole inside the window (weekends/CNY OK; missing whole months not).
+    4. Last in-range bar reaches near ``end``, **or** the cache resumes shortly
+       after ``end`` (holiday gap — e.g. 2025 CNY 1/28–2/4 while January ends
+       on 1/31). Bars that only resume months later do **not** count.
+    """
+    if bars.empty:
+        return False
+    start_ns = int(dt.datetime.combine(start, dt.time.min).timestamp() * 1_000_000_000)
+    end_exclusive = end + dt.timedelta(days=1)
+    end_ns = int(dt.datetime.combine(end_exclusive, dt.time.min).timestamp() * 1_000_000_000)
+    in_range = bars[(bars["datetime"] >= start_ns) & (bars["datetime"] < end_ns)]
+    if in_range.empty:
+        return False
+
+    first_day = dt.datetime.fromtimestamp(int(in_range["datetime"].iloc[0]) / 1_000_000_000).date()
+    if first_day > start + dt.timedelta(days=max(0, int(max_start_gap_days))):
+        return False
+
+    # Reject large holes inside the window (e.g. Feb present, all of March missing
+    # while end is Mar 31 — last_day alone is not enough when after_end is distant).
+    days: list[dt.date] = []
+    seen: set[dt.date] = set()
+    for ns in in_range["datetime"].tolist():
+        d = dt.datetime.fromtimestamp(int(ns) / 1_000_000_000).date()
+        if d not in seen:
+            seen.add(d)
+            days.append(d)
+    days.sort()
+    max_internal = max(0, int(max_internal_gap_days))
+    for prev, cur in zip(days, days[1:]):
+        if (cur - prev).days > max_internal:
+            return False
+
+    last_day = days[-1]
+    if last_day >= end - dt.timedelta(days=max(0, int(max_end_gap_days))):
+        return True
+
+    # Holiday: resume must be soon after end, not months later (broken cache gap).
+    after_end = bars[bars["datetime"] >= end_ns]
+    if after_end.empty:
+        return False
+    first_after = dt.datetime.fromtimestamp(
+        int(after_end["datetime"].iloc[0]) / 1_000_000_000
+    ).date()
+    return first_after <= end + dt.timedelta(days=max(0, int(max_resume_gap_days)))
+
+
 def ensure_cache(
     signal_symbol: str,
     *,
@@ -163,27 +230,49 @@ def ensure_cache(
     path = cache_path(signal_symbol, duration_seconds=duration_seconds, root=root)
     if path.is_file():
         bars = load_bars(signal_symbol, duration_seconds=duration_seconds, root=root)
-        try:
+        # Require data through the requested end (weekend gaps allowed via max_end_gap_days=3).
+        if coverage_ok(bars, start=start, end=end, max_end_gap_days=3):
             return slice_bars(bars, start=start, end=end, warmup_bars=400)
-        except ValueError:
-            if not auto_download:
-                raise
+        if not auto_download:
+            raise ValueError(
+                f"cache for {signal_symbol} does not cover [{start.isoformat()}, {end.isoformat()}]"
+            )
     elif not auto_download:
         raise FileNotFoundError(f"market cache missing: {path}")
 
     from ignitequant.market.download import download_klines
 
+    warm_start = start - dt.timedelta(days=45)
     if progress_cb is not None:
-        progress_cb(0.02, f"下载缓存 {signal_symbol}")
+        progress_cb(
+            0.02,
+            f"补拉行情（含指标预热 {warm_start}→{end}；回测区间仍为 {start}→{end}）",
+        )
+
+    def _download_progress(pct: float, msg: str) -> None:
+        if progress_cb is None:
+            return
+        progress_cb(
+            0.02 + 0.33 * max(0.0, min(float(pct), 1.0)),
+            f"补拉预热 {msg}｜回测仍按 {start}→{end}",
+        )
+
     download_klines(
         signal_symbol,
-        start=start - dt.timedelta(days=45),  # warmup buffer
+        start=warm_start,
         end=end,
         duration_seconds=duration_seconds,
         root=root,
-        progress_cb=progress_cb,
+        progress_cb=_download_progress,
     )
+    if progress_cb is not None:
+        progress_cb(0.36, f"缓存就绪，开始回测 {start}→{end}")
     bars = load_bars(signal_symbol, duration_seconds=duration_seconds, root=root)
+    if not coverage_ok(bars, start=start, end=end, max_end_gap_days=3):
+        raise RuntimeError(
+            f"download finished but cache still missing coverage for "
+            f"{signal_symbol} [{start.isoformat()}, {end.isoformat()}]"
+        )
     return slice_bars(bars, start=start, end=end, warmup_bars=400)
 
 

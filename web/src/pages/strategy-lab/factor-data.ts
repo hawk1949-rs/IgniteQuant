@@ -13,12 +13,13 @@ export type FactorModuleStatus = 'draft' | 'ready'
 
 /**
  * 用户自己的因子模块 = 一份可命名的 .py 代码块。
- * 一个因子组合（SavedFactorCombo）对应多个 FactorModule。
  */
 export type FactorModule = {
   id: string
   /** 模块显示名（给人看） */
   name: string
+  /** 归类，便于因子多时筛选 */
+  category: string
   /** .py 文件名，例如 vol_filter.py；决定入库路径 */
   fileName: string
   /** 相对仓库根路径，由 fileName 推导 */
@@ -49,6 +50,8 @@ export type FactorMiningConfig = {
   workspaceName: string
   pipeline: DataPipelineConfig
   modules: FactorModule[]
+  /** 用户自定义归类列表（可为空分类，尚未挂因子） */
+  categories: string[]
 }
 
 /** 已命名的因子组合：写入库后可在回测看板「因子与特征」节点选用 */
@@ -69,6 +72,42 @@ export const TIMEFRAME_OPTIONS: { id: TimeframeId; label: string }[] = [
   { id: '60m', label: '60 分钟' },
   { id: '1d', label: '日线' },
 ]
+
+export const DEFAULT_CATEGORY = '未分类'
+
+/** 预制归类；也可在「新建分类」中追加自定义 */
+export const SUGGESTED_CATEGORIES = [
+  '价格趋势',
+  '波动率',
+  '成交量',
+  '基本面',
+] as const
+
+export function normalizeCategory(raw: string | undefined | null): string {
+  const s = (raw ?? '').trim()
+  return s || DEFAULT_CATEGORY
+}
+
+/** 合并预制、配置里登记的分类、以及因子上已用的分类 */
+export function collectCategories(
+  modules: FactorModule[],
+  registered: string[] = [],
+): string[] {
+  const set = new Set<string>([...SUGGESTED_CATEGORIES, DEFAULT_CATEGORY])
+  for (const c of registered) set.add(normalizeCategory(c))
+  for (const m of modules) set.add(normalizeCategory(m.category))
+  return Array.from(set).sort((a, b) => {
+    const order = [...SUGGESTED_CATEGORIES, DEFAULT_CATEGORY]
+    const ia = order.indexOf(a as (typeof order)[number])
+    const ib = order.indexOf(b as (typeof order)[number])
+    if (ia >= 0 || ib >= 0) {
+      if (ia < 0) return 1
+      if (ib < 0) return -1
+      return ia - ib
+    }
+    return a.localeCompare(b, 'zh-CN')
+  })
+}
 
 export const RAW_FIELDS: { id: RawField; label: string }[] = [
   { id: 'open', label: 'Open' },
@@ -203,6 +242,7 @@ export function normalizeModule(raw: Partial<FactorModule> & { id?: string }): F
   return {
     id: raw.id || newId(),
     name: (raw.name || fileName.replace(/\.py$/i, '')).trim() || '未命名因子',
+    category: normalizeCategory(raw.category),
     fileName,
     modulePath: modulePathFromFileName(fileName),
     hypothesis: raw.hypothesis ?? '',
@@ -217,12 +257,13 @@ export function normalizeModule(raw: Partial<FactorModule> & { id?: string }): F
   }
 }
 
-export function createEmptyModule(): FactorModule {
+export function createEmptyModule(category?: string): FactorModule {
   const slug = Math.random().toString(36).slice(2, 6)
   const fileName = `my_factor_${slug}.py`
   const outputKeys = [`f_${slug}`]
   return normalizeModule({
     name: '未命名因子',
+    category: category,
     fileName,
     hypothesis: '在此写清你要验证的市场假设。',
     outputKeys,
@@ -233,11 +274,12 @@ export function createEmptyModule(): FactorModule {
   })
 }
 
-/** 示范：一个组合里两份 .py 代码块 */
+/** 示范：两份 .py 因子 */
 export function createStarterModules(): FactorModule[] {
   return [
     normalizeModule({
       name: '波动率过滤',
+      category: '波动率',
       fileName: 'vol_filter.py',
       hypothesis: '仅当短窗波动相对长窗偏低时，趋势类特征才可信。',
       outputKeys: ['vol_ratio', 'vol_regime'],
@@ -248,6 +290,7 @@ export function createStarterModules(): FactorModule[] {
     }),
     normalizeModule({
       name: '跨周期趋势差',
+      category: '价格趋势',
       fileName: 'xtf_trend.py',
       hypothesis: '用已闭合 60m 方向过滤 5m 价格行为。',
       outputKeys: ['trend_bias_60m', 'price_behavior_5m'],
@@ -265,11 +308,12 @@ export function createDefaultMiningConfig(): FactorMiningConfig {
     pipeline: {
       baseTimeframe: '5m',
       alignTimeframes: ['60m'],
-      warmupBars: 200,
+      warmupBars: 5,
       closedBarsOnly: true,
       rawFields: [...ALL_RAW],
     },
     modules: createStarterModules(),
+    categories: ['价格趋势', '波动率', '成交量', '基本面'],
   }
 }
 
@@ -279,6 +323,13 @@ const LS_COMBOS = 'ignitequant.lab.factor_combos_v1'
 function normalizeConfig(partial: Partial<FactorMiningConfig> | undefined): FactorMiningConfig {
   const base = createDefaultMiningConfig()
   if (!partial) return base
+  const registered = Array.isArray(partial.categories)
+    ? partial.categories.map(normalizeCategory).filter(Boolean)
+    : base.categories
+  const modules =
+    Array.isArray(partial.modules) && partial.modules.length > 0
+      ? partial.modules.map((m) => normalizeModule(m))
+      : base.modules
   return {
     workspaceName: partial.workspaceName || base.workspaceName,
     pipeline: {
@@ -287,10 +338,8 @@ function normalizeConfig(partial: Partial<FactorMiningConfig> | undefined): Fact
       closedBarsOnly: true,
       rawFields: ALL_RAW,
     },
-    modules:
-      Array.isArray(partial.modules) && partial.modules.length > 0
-        ? partial.modules.map((m) => normalizeModule(m))
-        : base.modules,
+    modules,
+    categories: collectCategories(modules, registered),
   }
 }
 

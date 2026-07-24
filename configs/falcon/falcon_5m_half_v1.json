@@ -8,7 +8,7 @@
   "scale_factor": 6,
   "rollback_to": "falcon_legacy_v1",
   "factor": {
-    "warmup_bars": 200,
+    "warmup_bars": 5,
     "subscription_bars": 800,
     "ma_fast": 42,
     "ma_mid": 84,

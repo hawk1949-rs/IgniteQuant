@@ -1,4 +1,8 @@
-"""Simplified local account/sim — TqSim-like equity + FIFO fills (no tqsdk)."""
+"""Local account/sim — mirrors TqSim kline market fills (no tqsdk).
+
+Fill price comes from ``CostModel.slip_price`` which in ``tq_kline`` align mode
+uses the same ask/bid = last ± price_tick rule as TqSim under TqBacktest.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from typing import Any
 
 from ignitequant.analytics.attribution import TradeFillRecord
 from ignitequant.analytics.cost_model import CostModel
+from ignitequant.analytics.tq_metrics import equity_curve_metrics
 
 
 @dataclass
@@ -251,14 +256,15 @@ class LocalSimAccount:
         start: dt.date | None = None,
         end: dt.date | None = None,
     ) -> dict[str, Any]:
+        del start, end  # period length comes from settle-day count (tqsdk style)
         final = float(self.equity())
-        ror = (final - self.init_balance) / self.init_balance if self.init_balance else 0.0
-        balances = [self.daily_balances[k] for k in sorted(self.daily_balances.keys())]
-        max_dd = _max_drawdown(balances) if balances else _max_drawdown([self.init_balance, final])
-        annual = None
-        if start and end and end > start:
-            years = max((end - start).days / 365.25, 1 / 365.25)
-            annual = (1.0 + ror) ** (1.0 / years) - 1.0
+        if self.daily_balances:
+            equity_m = equity_curve_metrics(self.daily_balances, init_balance=self.init_balance)
+        else:
+            equity_m = equity_curve_metrics(
+                {"_": final},
+                init_balance=self.init_balance,
+            )
         wins = self.win_trades
         losses = self.loss_trades
         closed = wins + losses
@@ -271,13 +277,14 @@ class LocalSimAccount:
         return {
             "init_balance": self.init_balance,
             "trade_count": len(self.fills),
-            "ror": ror,
-            "annual_yield": annual,
-            "max_drawdown": max_dd,
-            "sharpe": None,  # filled by runner helper
+            "ror": equity_m["ror"],
+            "annual_yield": equity_m["annual_yield"],
+            "max_drawdown": equity_m["max_drawdown"],
+            "sharpe": equity_m["sharpe"],
             "winning_rate": winning_rate,
             "profit_loss_ratio": pl_ratio,
-            "final_balance": final,
+            "final_balance": equity_m["final_balance"],
+            "trading_days": equity_m["trading_days"],
             "realized_pnl": self.realized_pnl,
             "fees_paid": self.fees_paid,
         }
@@ -289,14 +296,3 @@ class LocalSimAccount:
             out[day] = {"account": {"balance": bal}, "trades": {}}
         return out
 
-
-def _max_drawdown(balances: list[float]) -> float:
-    if not balances:
-        return 0.0
-    peak = balances[0]
-    max_dd = 0.0
-    for bal in balances:
-        peak = max(peak, bal)
-        if peak > 0:
-            max_dd = max(max_dd, (peak - bal) / peak)
-    return max_dd

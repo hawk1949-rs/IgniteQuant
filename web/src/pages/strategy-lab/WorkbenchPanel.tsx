@@ -26,6 +26,7 @@ import {
   SaveOutlined,
 } from '@ant-design/icons'
 import dayjs, { type Dayjs } from 'dayjs'
+import { runBacktest, type RunRecord } from '@/lib/api'
 import {
   BACKTEST_ENGINE_OPTIONS,
   CHART_METRIC_OPTIONS,
@@ -36,9 +37,8 @@ import {
   PIPELINE_STEPS,
   WORKBENCH_SYMBOLS,
   aggregateSeries,
-  buildDemoSeries,
-  buildDemoTrades,
-  demoKpis,
+  chartStrokeColor,
+  enrichEquitySeries,
   formatMetricValue,
   loadAssemblySnapshots,
   loadBacktestRuns,
@@ -60,11 +60,6 @@ import {
   type SeriesPoint,
   type WorkbenchTrade,
 } from './workbench-data'
-import {
-  loadSavedFactorCombos,
-  summarizeFactorCombo,
-  type SavedFactorCombo,
-} from './factor-data'
 
 const { Text } = Typography
 const PAGE_SIZE = 10
@@ -92,18 +87,28 @@ function MetricChart({
   const h = 260
   const pad = { t: 20, r: 16, b: 36, l: 58 }
   const vals = series.map((p) => metricValue(p, metric))
-  const min = Math.min(...vals)
-  const max = Math.max(...vals)
-  const span = Math.max(max - min, 1)
+  let min = Math.min(...vals)
+  let max = Math.max(...vals)
+  // Keep zero in view for return / drawdown charts
+  if (metric === 'ror' || metric === 'drawdown' || metric === 'pnl') {
+    min = Math.min(min, 0)
+    max = Math.max(max, 0)
+  }
+  const span = Math.max(max - min, metric === 'ror' || metric === 'drawdown' ? 1e-6 : 1)
   const xAt = (i: number) => pad.l + (i / (series.length - 1)) * (w - pad.l - pad.r)
   const yAt = (v: number) => pad.t + (1 - (v - min) / span) * (h - pad.t - pad.b)
+  const stroke = chartStrokeColor(metric)
   const path = series
     .map(
       (p, i) =>
         `${i === 0 ? 'M' : 'L'} ${xAt(i).toFixed(1)} ${yAt(metricValue(p, metric)).toFixed(1)}`,
     )
     .join(' ')
-  const area = `${path} L ${xAt(series.length - 1).toFixed(1)} ${h - pad.b} L ${pad.l} ${h - pad.b} Z`
+  const baselineY = yAt(0)
+  const area =
+    metric === 'drawdown' || metric === 'ror' || metric === 'pnl'
+      ? `${path} L ${xAt(series.length - 1).toFixed(1)} ${baselineY.toFixed(1)} L ${pad.l} ${baselineY.toFixed(1)} Z`
+      : `${path} L ${xAt(series.length - 1).toFixed(1)} ${h - pad.b} L ${pad.l} ${h - pad.b} Z`
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((r) => min + span * (1 - r))
   const metricLabel =
     CHART_METRIC_OPTIONS.find((o) => o.id === metric)?.label ?? metric
@@ -136,7 +141,7 @@ function MetricChart({
         onMouseLeave={() => setHover(null)}
       >
         {ticks.map((tv) => (
-          <g key={tv}>
+          <g key={String(tv)}>
             <line
               x1={pad.l}
               x2={w - pad.r}
@@ -156,8 +161,18 @@ function MetricChart({
             </text>
           </g>
         ))}
-        <path d={area} fill="rgba(10,132,255,0.12)" />
-        <path d={path} fill="none" stroke="#0A84FF" strokeWidth="2.25" strokeLinecap="round" />
+        {(metric === 'ror' || metric === 'drawdown' || metric === 'pnl') && min < 0 && max > 0 && (
+          <line
+            x1={pad.l}
+            x2={w - pad.r}
+            y1={baselineY}
+            y2={baselineY}
+            stroke="rgba(245,245,247,0.45)"
+            strokeWidth={1}
+          />
+        )}
+        <path d={area} fill={stroke} fillOpacity={0.12} />
+        <path d={path} fill="none" stroke={stroke} strokeWidth="2.25" strokeLinecap="round" />
         {hover && (
           <g>
             <line
@@ -173,7 +188,7 @@ function MetricChart({
               cy={hover.y}
               r={5}
               fill="#F5F5F7"
-              stroke="#0A84FF"
+              stroke={stroke}
               strokeWidth={2}
             />
           </g>
@@ -190,20 +205,26 @@ function MetricChart({
           size="small"
           style={{
             position: 'absolute',
-            left: `min(${(hover.x / w) * 100}%, calc(100% - 170px))`,
+            left: `min(${(hover.x / w) * 100}%, calc(100% - 190px))`,
             top: 8,
             pointerEvents: 'none',
-            minWidth: 140,
+            minWidth: 160,
             boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
           }}
         >
           <Text strong>{series[hover.idx].t}</Text>
           <div>
             <Text type="secondary">{metricLabel} </Text>
-            <Text style={{ color: '#0A84FF' }}>
+            <Text style={{ color: stroke }}>
               {formatMetricValue(metricValue(series[hover.idx], metric), metric)}
             </Text>
           </div>
+          {metric !== 'equity' && (
+            <div>
+              <Text type="secondary">总资产 </Text>
+              <Text>{Math.round(series[hover.idx].equity).toLocaleString('zh-CN')}</Text>
+            </div>
+          )}
         </Card>
       )}
     </div>
@@ -291,25 +312,6 @@ export function WorkbenchPanel() {
   const [page, setPage] = useState(1)
   const [chartMetric, setChartMetric] = useState<ChartMetric>('equity')
   const [chartPeriod, setChartPeriod] = useState<ChartPeriod>('day')
-  const [factorCombos] = useState<SavedFactorCombo[]>(() =>
-    typeof window === 'undefined' ? [] : loadSavedFactorCombos(),
-  )
-
-  const factorNodeOptions = useMemo(() => {
-    const opts = factorCombos.map((c) => ({
-      value: c.id,
-      label: c.name,
-      desc: summarizeFactorCombo(c),
-    }))
-    if (nodes.factor && !opts.some((o) => o.value === nodes.factor)) {
-      opts.unshift({
-        value: nodes.factor,
-        label: `（缺失）${nodes.factor.slice(0, 18)}`,
-        desc: '该因子组合已从库中删除，请重新选择',
-      })
-    }
-    return opts
-  }, [factorCombos, nodes.factor])
 
   const symbol =
     WORKBENCH_SYMBOLS.find((s) => s.id === account.symbolId) ?? WORKBENCH_SYMBOLS[0]
@@ -460,7 +462,12 @@ export function WorkbenchPanel() {
     // 只回放该次结果；退出策略选中，避免误点「更新」把历史装配写回档案
     setActiveStrategyId('')
     setStrategyName(run.strategyName || '历史回测')
-    setSeries(run.series)
+    setSeries(
+      enrichEquitySeries(
+        run.series.map((p) => ({ t: p.t, equity: p.equity, lots: p.lots ?? 0 })),
+        run.account.initBalance,
+      ),
+    )
     setTrades(run.trades)
     setKpis(run.kpis)
     setNodes({ ...run.nodes })
@@ -482,31 +489,45 @@ export function WorkbenchPanel() {
     message.info('已重置测试账号配置与图表')
   }
 
-  /** 按回测机制模拟分阶段进度（后续可换成真实 job 轮询） */
-  const runWithProgress = async (engine: BacktestEngine) => {
-    const steps =
-      engine === 'cache'
-        ? [
-            { pct: 8, msg: '读取本地行情缓存…', wait: 180 },
-            { pct: 28, msg: '校验 K 线完整性…', wait: 220 },
-            { pct: 52, msg: '回放决策流水线…', wait: 320 },
-            { pct: 78, msg: '汇总成交与权益…', wait: 260 },
-            { pct: 94, msg: '写入结果…', wait: 160 },
-          ]
-        : [
-            { pct: 6, msg: '连接天勤回测通道…', wait: 280 },
-            { pct: 18, msg: '订阅合约与初始化 TqBacktest…', wait: 360 },
-            { pct: 42, msg: '时光机推进中…', wait: 480 },
-            { pct: 68, msg: '同步成交与持仓…', wait: 420 },
-            { pct: 88, msg: '拉取绩效指标…', wait: 300 },
-            { pct: 96, msg: '收尾归档…', wait: 200 },
-          ]
-
-    for (const step of steps) {
-      setProgress(step.pct)
-      setProgressMsg(step.msg)
-      await new Promise((r) => setTimeout(r, step.wait))
+  const kpisFromRun = (rec: RunRecord, initBalance: number): KpiSet => {
+    const m = rec.metrics || {}
+    const num = (key: string, fallback = 0) => {
+      const v = m[key]
+      return typeof v === 'number' && Number.isFinite(v) ? v : fallback
     }
+    return {
+      ror: num('ror'),
+      maxDrawdown: num('max_drawdown'),
+      sharpe: num('sharpe'),
+      tradeCount: Math.round(num('trade_count')),
+      winRate: num('winning_rate'),
+      profitLossRatio: num('profit_loss_ratio'),
+      annualYield: num('annual_yield'),
+      finalBalance: num('final_balance', initBalance),
+    }
+  }
+
+  const seriesFromRun = (rec: RunRecord, initBalance: number): SeriesPoint[] => {
+    const curve = rec.equity_curve || []
+    if (curve.length === 0) {
+      const final =
+        typeof rec.metrics?.final_balance === 'number'
+          ? rec.metrics.final_balance
+          : initBalance
+      const start = rec.start || account.start
+      const end = rec.end || account.end
+      return enrichEquitySeries(
+        [
+          { t: start, equity: initBalance, lots: 0 },
+          { t: end, equity: final, lots: 0 },
+        ],
+        initBalance,
+      )
+    }
+    return enrichEquitySeries(
+      curve.map((p) => ({ t: p.t, equity: p.equity, lots: 0 })),
+      initBalance,
+    )
   }
 
   const onRun = async () => {
@@ -528,42 +549,71 @@ export function WorkbenchPanel() {
     setPage(1)
     setProgress(2)
     setProgressMsg(
-      account.engine === 'cache' ? '准备缓存回测…' : '准备天勤回测…',
+      `提交回测 ${account.start} → ${account.end}（${account.engine === 'tq' ? '天勤' : '本地缓存'}）…`,
     )
     try {
-      await runWithProgress(account.engine)
-      const curve = buildDemoSeries(account.initBalance, 90, account.enableCommission)
-      const list = buildDemoTrades(symbol.name)
-      const metrics = demoKpis(account.initBalance, account.enableCommission)
+      const engineApi = account.engine === 'tq' ? 'tq' : 'local'
+      const out = await runBacktest({
+        strategy_id: 'falcon_v2',
+        symbol_ids: [account.symbolId],
+        start: account.start,
+        end: account.end,
+        init_balance: account.initBalance,
+        engine: engineApi,
+        auto_download: true,
+        force: true,
+        onProgress: (job) => {
+          const pct = Math.max(0, Math.min(100, Math.round(Number(job.progress || 0) * 100)))
+          setProgress(pct)
+          setProgressMsg(
+            job.progress_msg ||
+              (job.status === 'QUEUED'
+                ? '排队中…'
+                : job.status === 'RUNNING'
+                  ? `回测运行中（${account.start}→${account.end}）…`
+                  : job.status),
+          )
+        },
+      })
+
+      const rec = out.runs[0]
+      if (!rec) {
+        throw new Error('回测完成但未返回结果记录')
+      }
+
+      const curve = seriesFromRun(rec, account.initBalance)
+      const metrics = kpisFromRun(rec, account.initBalance)
       setSeries(curve)
-      setTrades(list)
+      setTrades([])
       setKpis(metrics)
 
       const engineLabel = account.engine === 'tq' ? '天勤' : '缓存'
       const run: BacktestRun = {
-        id: newId('run'),
-        name: `${strategyName} · ${engineLabel} · ${account.start}~${account.end}`,
-        savedAt: new Date().toISOString(),
-        strategyId: activeStrategyId || 'draft',
+        id: rec.run_id || newId('run'),
+        name: `${strategyName} · ${engineLabel} · ${rec.start || account.start}~${rec.end || account.end}`,
+        savedAt: rec.saved_at || new Date().toISOString(),
+        strategyId: activeStrategyId || 'falcon_v2',
         strategyName,
         account: { ...account },
         nodes: { ...nodes },
         series: curve,
-        trades: list,
+        trades: [],
         kpis: metrics,
       }
 
       setProgress(100)
-      setProgressMsg('回测完成')
+      setProgressMsg(`回测完成 ${run.name}`)
 
       if (account.persistDb) {
         const nextRuns = [run, ...runs].slice(0, 50)
         setRuns(nextRuns)
         persistBacktestRuns(nextRuns)
         setSelectedRunId(run.id)
-        message.success(`${engineLabel}回测完成，结果已写入历史归档`)
+        message.success(`${engineLabel}回测完成（区间 ${account.start}～${account.end}）`)
       } else {
-        message.success(`${engineLabel}回测完成（未落库，不会出现在历史列表）`)
+        message.success(
+          `${engineLabel}回测完成（区间 ${account.start}～${account.end}；未写入本地历史列表）`,
+        )
       }
     } catch (e) {
       setProgressMsg('回测失败')
@@ -680,21 +730,18 @@ export function WorkbenchPanel() {
         }
       >
         <Text type="secondary" style={{ display: 'block', marginBottom: 16, fontSize: 12 }}>
-          流水线：因子与特征 → 信号发生器 → 仓位控制。节点 1 的选项来自「因子与特征」页已命名保存的组合；无组合时请先去该页入库。
+          装配信号发生器与仓位控制。因子在「因子与特征」页独立编译挖掘，不在此选择。
         </Text>
         <Row gutter={[12, 12]}>
           {PIPELINE_STEPS.map((step, i) => {
-            const options =
-              step.key === 'factor'
-                ? factorNodeOptions
-                : PIPELINE_OPTIONS[step.key].map((o) => ({
-                    value: o.id,
-                    label: o.label,
-                    desc: o.desc,
-                  }))
+            const options = PIPELINE_OPTIONS[step.key].map((o) => ({
+              value: o.id,
+              label: o.label,
+              desc: o.desc,
+            }))
             const selected = options.find((o) => o.value === nodes[step.key])
             return (
-              <Col key={step.key} xs={24} sm={12} lg={8}>
+              <Col key={step.key} xs={24} sm={12} lg={12}>
                 <Card size="small" styles={{ body: { padding: 14 } }}>
                   <Flex justify="space-between" align="center">
                     <Text type="secondary" style={{ fontSize: 11 }}>
@@ -712,22 +759,11 @@ export function WorkbenchPanel() {
                   <Select
                     style={{ width: '100%', marginTop: 10 }}
                     value={nodes[step.key] || undefined}
-                    placeholder={
-                      step.key === 'factor'
-                        ? factorCombos.length
-                          ? '选择已保存因子组合…'
-                          : '暂无组合，请先到「因子与特征」命名保存'
-                        : undefined
-                    }
-                    disabled={step.key === 'factor' && factorCombos.length === 0 && !nodes.factor}
                     options={options.map((o) => ({ value: o.value, label: o.label }))}
                     onChange={(v) => setNodes((prev) => ({ ...prev, [step.key]: v }))}
                   />
                   <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 11 }}>
-                    {selected?.desc ??
-                      (step.key === 'factor'
-                        ? '在「因子与特征」页：起名 → 另存为新组合 → 回到此处选择'
-                        : '')}
+                    {selected?.desc ?? ''}
                   </Text>
                 </Card>
               </Col>
@@ -825,6 +861,9 @@ export function WorkbenchPanel() {
                 })
               }}
             />
+            <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 11 }}>
+              实际下单回测严格按此区间；本地缓存若缺数，进度条可能先显示更早的「预热补拉」日期。
+            </Text>
           </Col>
           <Col xs={24} md={8}>
             <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
@@ -922,16 +961,18 @@ export function WorkbenchPanel() {
       </Card>
 
       <Card
-        title="可视化图表"
+        title="收益时间折线图"
         extra={
           <Space wrap>
-            <Segmented
+            <Select
               value={chartMetric}
               onChange={(v) => setChartMetric(v as ChartMetric)}
+              style={{ width: 140 }}
               options={CHART_METRIC_OPTIONS.map((o) => ({
                 value: o.id,
                 label: o.label,
               }))}
+              popupMatchSelectWidth={false}
             />
             <Segmented
               value={chartPeriod}

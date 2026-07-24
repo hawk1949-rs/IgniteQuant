@@ -6,7 +6,7 @@
   "status": "production_default",
   "rollback_of": null,
   "factor": {
-    "warmup_bars": 52,
+    "warmup_bars": 5,
     "subscription_bars": 400,
     "ma_fast": 7,
     "ma_mid": 14,
