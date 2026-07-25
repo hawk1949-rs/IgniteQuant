@@ -1,0 +1,23 @@
+{
+  "name": "llmquant-skills",
+  "version": "0.1.0",
+  "description": "Finance research, trading, risk, and portfolio Agent Skills grounded in LLMQuant Data. Bundles every llmquant-* category skill under skills/.",
+  "author": {
+    "name": "LLMQuant",
+    "url": "https://llmquant.com"
+  },
+  "homepage": "https://github.com/LLMQuant/skills",
+  "repository": "https://github.com/LLMQuant/skills",
+  "license": "MIT",
+  "keywords": [
+    "llmquant",
+    "finance",
+    "trading",
+    "portfolio",
+    "risk",
+    "macro",
+    "crypto",
+    "credit",
+    "skills"
+  ]
+}

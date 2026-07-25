@@ -1,0 +1,274 @@
+@import 'tailwindcss';
+
+@theme {
+  /* Apple-adjacent dark palette: base / elevated / labels / system blue */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'PingFang SC',
+    'Microsoft YaHei', 'Segoe UI', sans-serif;
+  --font-display:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'PingFang SC',
+    'Microsoft YaHei', 'Segoe UI', sans-serif;
+  --color-ink: #f5f5f7;
+  --color-muted: #c8d0dc;
+  --color-faint: #a8b2c2;
+  --color-line: rgba(180, 200, 230, 0.42);
+  --color-blue: #0a84ff;
+  --color-blue-soft: rgba(10, 132, 255, 0.22);
+  --color-surface: #243352;
+  --color-panel: #1a2740;
+  --color-base: #070d18;
+  --color-good: #30d158;
+  --color-bad: #ff453a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+  background-color: #070d18;
+  background-image:
+    radial-gradient(ellipse 85% 55% at 50% -18%, rgba(10, 132, 255, 0.22), transparent 58%),
+    radial-gradient(ellipse 50% 40% at 0% 100%, rgba(30, 64, 120, 0.35), transparent 55%),
+    linear-gradient(180deg, #0a1424 0%, #070d18 45%, #050a14 100%);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Ant Design：提高可读性，少用半透明毛玻璃（对比度差） */
+.ant-card {
+  border-color: rgba(180, 200, 230, 0.38) !important;
+}
+
+.ant-card .ant-card-head-title {
+  color: #f5f5f7;
+  font-weight: 650;
+}
+
+.ant-btn-primary {
+  box-shadow: none !important;
+}
+
+.ant-typography.ant-typography-secondary,
+.ant-form-item-explain,
+.ant-empty-description {
+  color: #c8d0dc !important;
+}
+
+.ant-table-wrapper .ant-table {
+  background: transparent;
+  color: #f5f5f7;
+}
+
+.ant-select-selection-placeholder,
+.ant-picker-input > input::placeholder,
+.ant-input::placeholder {
+  color: #a8b2c2 !important;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+input[type='date'],
+input[type='number'],
+select,
+textarea {
+  color-scheme: dark;
+}
+
+::selection {
+  background: rgba(10, 132, 255, 0.35);
+}
+
+option {
+  background: #152238;
+  color: #f5f5f7;
+}
+
+/* —— Welcome portal (Apple dark, deep blue) —— */
+.welcome-shell {
+  min-height: 100vh;
+  padding: 0 1.25rem 3rem;
+  color: #f5f5f7;
+}
+
+.site-header {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 1.1rem 0 0;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  background: rgba(7, 13, 24, 0.78);
+}
+
+.site-header__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.35rem;
+  align-items: center;
+  border-bottom: 1px solid rgba(120, 140, 180, 0.28);
+  padding-bottom: 0.85rem;
+}
+
+.site-header__brand {
+  margin-right: auto;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: #f5f5f7;
+}
+
+.site-header__nav a,
+.site-header__link-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 0.4rem 0.1rem;
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: #a8b0c0;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.site-header__nav a:hover,
+.site-header__link-btn:hover {
+  color: #f5f5f7;
+}
+
+.site-header__nav a.is-active {
+  color: #f5f5f7;
+}
+
+.welcome {
+  max-width: 44rem;
+  margin: 0 auto;
+  padding-top: 4.5rem;
+}
+
+.welcome-hero {
+  text-align: center;
+  padding: 1rem 0.5rem 2.25rem;
+}
+
+.welcome-hero__eyebrow {
+  display: inline-block;
+  margin: 0 0 1rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #0a84ff;
+}
+
+.welcome-hero h1 {
+  margin: 0 0 0.85rem;
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 5vw, 2.75rem);
+  font-weight: 650;
+  letter-spacing: -0.045em;
+  line-height: 1.12;
+  color: #f5f5f7;
+}
+
+.welcome-hero__lead {
+  margin: 0 auto;
+  max-width: 28rem;
+  color: #a8b0c0;
+  font-size: 1.05rem;
+  line-height: 1.65;
+  font-weight: 400;
+}
+
+.welcome-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 0.85rem;
+  margin-top: 0.5rem;
+}
+
+.welcome-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 1.35rem 1.4rem;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  background: rgba(16, 28, 48, 0.92);
+  border: 1px solid rgba(120, 140, 180, 0.28);
+  border-radius: 18px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  color: inherit;
+  transition:
+    border-color 0.2s ease,
+    background 0.2s ease,
+    transform 0.2s ease;
+}
+
+.welcome-card:hover {
+  border-color: rgba(10, 132, 255, 0.5);
+  background: #152840;
+  transform: translateY(-1px);
+}
+
+.welcome-card:focus-visible {
+  outline: 2px solid #0a84ff;
+  outline-offset: 3px;
+}
+
+.welcome-card__title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: #f5f5f7;
+}
+
+.welcome-card__desc {
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: #a8b0c0;
+}
+
+.welcome-card__arrow {
+  margin-top: 0.55rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #0a84ff;
+}
+
+.welcome-foot {
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid rgba(120, 140, 180, 0.25);
+  text-align: center;
+  font-size: 0.75rem;
+  color: #6e7a90;
+  line-height: 1.65;
+}
+
+@media (min-width: 640px) {
+  .welcome {
+    padding-top: 6rem;
+  }
+}

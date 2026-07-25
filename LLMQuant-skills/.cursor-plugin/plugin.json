@@ -1,0 +1,7 @@
+{
+  "name": "llmquant-skills",
+  "version": "0.1.0",
+  "description": "LLMQuant finance Agent Skills grounded in LLMQuant Data.",
+  "repository": "https://github.com/LLMQuant/skills",
+  "skills": "./skills/"
+}

@@ -1,0 +1,32 @@
+---
+description: Apple HIG 跨平台 UI/UX 设计审查与改进（基于 apple-design-skill）
+globs:
+  - "**/*.dart"
+  - "**/*.tsx"
+  - "**/*.jsx"
+  - "**/*.vue"
+  - "**/*.svelte"
+  - "**/*.swift"
+  - "**/*.css"
+  - "**/*.html"
+  - "**/*.canvas.tsx"
+alwaysApply: false
+---
+
+# Apple Design Review
+
+当用户要求设计审查、UI audit、HIG 合规、改进界面、无障碍审计，或上传截图/线框/设计稿征求反馈时，使用本规则。
+
+## 必读入口
+
+1. 主流程：`apple-design-skill/SKILL.md`（或 Agent Skill：`apple-design`）
+2. 主题索引：`apple-design-skill/references/hig-lookup.md`
+3. 细则目录：`apple-design-skill/references/hig/`（按需加载 3–8 个相关文件，不要一次全读）
+
+## 审查要求
+
+- 按 SKILL 中的 5 步流程执行
+- 问题分级：Critical → High → Medium → Low
+- 输出结构：Summary → Critical Issues → Improvements → Positive Notes → Platform-Specific Notes
+- 每条问题包含：What（问题）/ Why（引用具体 guideline）/ Fix（可落地的改法）
+- 用用户框架的术语（Flutter / React / Electron 等），不要硬套 UIKit 名称

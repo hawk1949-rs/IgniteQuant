@@ -1,0 +1,107 @@
+"""Domain enums for Falcon decision objects."""
+
+from __future__ import annotations
+
+from enum import Enum
+
+
+class FactorQuality(str, Enum):
+    READY = "READY"
+    WARMING_UP = "WARMING_UP"
+    STALE = "STALE"
+    MISSING_DATA = "MISSING_DATA"
+    INVALID_VALUE = "INVALID_VALUE"
+
+
+class Regime(str, Enum):
+    TREND_UP = "TREND_UP"
+    TREND_DOWN = "TREND_DOWN"
+    RANGE = "RANGE"
+    TRANSITION = "TRANSITION"
+
+
+class SignalAction(str, Enum):
+    HOLD = "HOLD"
+    ENTER_LONG = "ENTER_LONG"
+    ENTER_SHORT = "ENTER_SHORT"
+    REDUCE_LONG = "REDUCE_LONG"
+    REDUCE_SHORT = "REDUCE_SHORT"
+    EXIT = "EXIT"
+
+
+class DecisionAction(str, Enum):
+    """Explicit target semantics (replaces implicit None/0 in new core)."""
+
+    HOLD = "HOLD"
+    TARGET = "TARGET"
+    FLAT = "FLAT"
+
+
+class RiskAction(str, Enum):
+    PASS = "PASS"
+    RESIZE = "RESIZE"
+    REJECT = "REJECT"
+    HALT = "HALT"
+
+
+class LegacyExitAction(str, Enum):
+    """Mirrors strategies.falcon.risk.RiskAction for audit mapping."""
+
+    NONE = "NONE"
+    STOP_LOSS = "STOP_LOSS"
+    TAKE_PROFIT = "TAKE_PROFIT"
+
+
+class PositionPhase(str, Enum):
+    FLAT = "FLAT"
+    ENTRY_PENDING = "ENTRY_PENDING"
+    OPEN = "OPEN"
+    EXIT_PENDING = "EXIT_PENDING"
+    REBALANCE_PENDING = "REBALANCE_PENDING"
+    COOLDOWN = "COOLDOWN"
+
+
+class OrderStatus(str, Enum):
+    CREATED = "CREATED"
+    SUBMITTED = "SUBMITTED"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
+    CANCELED = "CANCELED"
+    REJECTED = "REJECTED"
+    UNKNOWN = "UNKNOWN"
+
+
+class RollPhase(str, Enum):
+    IDLE = "IDLE"
+    FREEZE_NEW_RISK = "FREEZE_NEW_RISK"
+    FLATTENING_OLD = "FLATTENING_OLD"
+    WAIT_FLAT = "WAIT_FLAT"
+    SWITCHING = "SWITCHING"
+    READY = "READY"
+
+
+class ReasonCode(str, Enum):
+    DATA_STALE = "DATA_STALE"
+    FACTOR_NOT_READY = "FACTOR_NOT_READY"
+    SIGNAL_EXPIRED = "SIGNAL_EXPIRED"
+    REGIME_NOT_ALLOWED = "REGIME_NOT_ALLOWED"
+    CONTRACT_INVALID = "CONTRACT_INVALID"
+    ROLL_IN_PROGRESS = "ROLL_IN_PROGRESS"
+    SPREAD_TOO_WIDE = "SPREAD_TOO_WIDE"
+    INSUFFICIENT_LIQUIDITY = "INSUFFICIENT_LIQUIDITY"
+    PRICE_LIMIT_LOCKED = "PRICE_LIMIT_LOCKED"
+    MARGIN_LIMIT = "MARGIN_LIMIT"
+    DAILY_LOSS_LIMIT = "DAILY_LOSS_LIMIT"
+    DRAWDOWN_LIMIT = "DRAWDOWN_LIMIT"
+    SYMBOL_RISK_LIMIT = "SYMBOL_RISK_LIMIT"
+    PORTFOLIO_RISK_LIMIT = "PORTFOLIO_RISK_LIMIT"
+    POSITION_LIMIT = "POSITION_LIMIT"
+    DUPLICATE_ORDER = "DUPLICATE_ORDER"
+    UNKNOWN_ORDER_EXISTS = "UNKNOWN_ORDER_EXISTS"
+    RECONCILIATION_MISMATCH = "RECONCILIATION_MISMATCH"
+    KILL_SWITCH_ACTIVE = "KILL_SWITCH_ACTIVE"
+    RISK_REDUCING_ORDER = "RISK_REDUCING_ORDER"
+    COOLDOWN = "COOLDOWN"
+    LEGACY_EXIT_STOP = "LEGACY_EXIT_STOP"
+    LEGACY_EXIT_TAKE = "LEGACY_EXIT_TAKE"

@@ -1,0 +1,77 @@
+name: PR Title Check
+
+# Validates pull request titles against Conventional Commits.
+#
+# Why: PR titles are the unit reviewers and changelogs read. If this repo
+# squash-merges, the PR title becomes the squash commit subject on `main`.
+# Individual commits on a PR branch are not constrained — only the PR title is.
+#
+# Spec: see CONTRIBUTING.md -> "PR Title & Commit Conventions".
+#
+# Allowed types:
+#   feat · fix · docs · refactor · chore · ci · style
+#
+# Allowed scopes (optional — small PRs may omit a scope):
+#   a category short name (the llmquant-* folder without the prefix, e.g.
+#   `options`, `macro`, `crypto`) or a cross-cutting area
+#   (`templates` · `ci` · `infra` · `readme` · `zh-CN`).
+#   Add the short name here when a new llmquant-* category is introduced.
+#
+# Subject rules (enforced via subjectPattern):
+#   - Must start with a lowercase letter (imperative mood, no caps).
+#   - Must not end with a period.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  validate:
+    name: Validate PR title (Conventional Commits)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            refactor
+            chore
+            ci
+            style
+          scopes: |
+            equities
+            etfs
+            options
+            equity-derivatives
+            commodities
+            crypto
+            prediction-markets
+            macro
+            credit
+            rates-fx
+            events
+            investor-lenses
+            strategies
+            risk
+            portfolio
+            portfolio-lab
+            data
+            market-intelligence
+            templates
+            ci
+            infra
+            readme
+            zh-CN
+          requireScope: false
+          subjectPattern: ^[a-z].+[^.]$
+          subjectPatternError: |
+            The subject "{subject}" doesn't match the required pattern.
+            It must start with a lowercase letter and must not end with a
+            period. See CONTRIBUTING.md "PR Title & Commit Conventions".

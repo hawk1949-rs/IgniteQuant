@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "skills": {
+    "apple-design": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\apple-design-skill",
+      "sourceType": "local",
+      "computedHash": "4db2c9201eceaaa0473c3280afa43f2faa14a9b368ee07a418dd9a82efe7b7ec"
+    },
+    "llmquant-commodities": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "50df0a887d38cd9f5f0fc5e8f6c86f7ba2742425211b0d352fba526ff7ec769a"
+    },
+    "llmquant-credit": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "248c16a0363c9498e3a4d8b90c898bbd5775ffe753c27af4ead76bbfe62b593c"
+    },
+    "llmquant-crypto": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "622788d1ed1952e1d82abcda8d6d0245437f888c49ec6871701c86b7c8682e8d"
+    },
+    "llmquant-data": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "3bda87eae7518126adf9e8237e1ccb008edbfb65e5af2c6f96e6eb6cf27d0794"
+    },
+    "llmquant-equities": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "37fb732a88f787298bb74af4618313fdf961844a64fc49bca33f8467a9740e34"
+    },
+    "llmquant-equity-derivatives": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "5744bc9c386484ae38bb5b37b04588b627413dd80f653e468eb80543b20a5074"
+    },
+    "llmquant-etfs": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "ce8d463864fe594eb77e8a4743e8cb522aed5eede6f42bf024d26e8e7673e1de"
+    },
+    "llmquant-events": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "a0de3f07593ba12aa4c0f48ed181a24615faab13c23508d5cdecbfcc7fb154f5"
+    },
+    "llmquant-investor-lenses": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "6bba77086d99f71c3a56a6e493d0152653f3653a00cf7a9fe128414dbd0c626e"
+    },
+    "llmquant-macro": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "dc3f14e955cc2cea78ad87f1d0959ee74f70e82fd75bef4f2c71cbefa5152dbc"
+    },
+    "llmquant-market-intelligence": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "c30d36115be308dc2472fbd97a29f792d61b6d6f9b4b1ff3346195f40d8005d0"
+    },
+    "llmquant-options": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "4e9e6424e2cf688b630db4975cc4095b6c0715369e15a0d91d892be4f44eea99"
+    },
+    "llmquant-portfolio": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "f9105f5d2824d83fe488d006dd9021e9bba72c5ec5fe395cbd58c27a91618a73"
+    },
+    "llmquant-portfolio-lab": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "9f89714bda45b8f366972af98ad96ff2ae76b4c55fe1987ab52269ba26db7a2a"
+    },
+    "llmquant-prediction-markets": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "b5a7f7c3f6e1a5b3dcd2cf01af79bfa56c23ab65f8094fff68c8ba536b08f227"
+    },
+    "llmquant-rates-fx": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "8c5535cb1d55ea048c7f1725112fa05f299432b766415886f08393f5ee9ba699"
+    },
+    "llmquant-risk": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "7e8ac22f832851c3ac8b5547b2f4ed266f2ee1a6b9b7dec63701776a0e52a181"
+    },
+    "llmquant-strategies": {
+      "source": "D:\\Cursor\\IGNITE\\AIQuant\\LLMQuant-skills",
+      "sourceType": "local",
+      "computedHash": "927744feb5e8a823155556df98140751068fbdbd7ad114afcb011c514b4cfce9"
+    }
+  }
+}

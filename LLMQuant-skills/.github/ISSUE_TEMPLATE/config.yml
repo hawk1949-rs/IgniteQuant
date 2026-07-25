@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contribution guide & contract
+    url: https://github.com/LLMQuant/skills/blob/main/CONTRIBUTING.md
+    about: Read the Required Contract and Quality Bar before filing.
+  - name: Skill catalog (README)
+    url: https://github.com/LLMQuant/skills/blob/main/README.md
+    about: Browse the existing llmquant-* categories and workflows.
+  - name: LLMQuant Data MCP
+    url: https://github.com/LLMQuant/data-mcp
+    about: The native data layer these skills are grounded in.
+  - name: Questions & discussion
+    url: https://github.com/LLMQuant/skills/discussions
+    about: Ask a usage question or float an idea before opening an issue.

@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "purpose": "Phase 0 characterization only; not strategy validation",
+  "source": "tqsdk historical KQ.m@SHFE.au",
+  "symbol": "KQ.m@SHFE.au",
+  "duration_seconds": 300,
+  "capture_period": {
+    "start": "2025-01-01",
+    "end": "2025-03-31"
+  },
+  "selection": "non-overlapping 400-bar windows: maximum net return, minimum net return, then minimum path efficiency",
+  "scenarios": {
+    "trend_up": {
+      "file": "tests/fixtures/falcon_phase0/trend_up.csv",
+      "bars": 400,
+      "first_bar": "2025-01-27T05:35:00",
+      "last_bar": "2025-02-10T13:20:00",
+      "input_sha256": "863d87a8b9ec4b96c10b2f83ad9d635c78cbd5cd08e503b0e1875ad24a0c48a6",
+      "selection_metrics": {
+        "net_return": 0.0555314936,
+        "path_efficiency": 0.2482367584
+      },
+      "golden_file": "tests/golden/falcon_phase0/trend_up.json",
+      "golden_sha256": "d317ef9b9d8312bb1b82bb106c0c801c232597820deb1479e170f5a7d727d9d3",
+      "golden_records": 349
+    },
+    "trend_down": {
+      "file": "tests/fixtures/falcon_phase0/trend_down.csv",
+      "bars": 400,
+      "first_bar": "2025-02-25T01:20:00",
+      "last_bar": "2025-02-28T15:05:00",
+      "input_sha256": "112e0ff1ed1702baba7255eea17296e5e04b5b3fa53598cfc3c0541e952405c2",
+      "selection_metrics": {
+        "net_return": -0.0320079003,
+        "path_efficiency": 0.1618683901
+      },
+      "golden_file": "tests/golden/falcon_phase0/trend_down.json",
+      "golden_sha256": "b3ecc1d0f8449b58eed092dc58d8e64a303471413c0857c0e6520d101e5605eb",
+      "golden_records": 349
+    },
+    "sideways_transition": {
+      "file": "tests/fixtures/falcon_phase0/sideways_transition.csv",
+      "bars": 400,
+      "first_bar": "2025-03-20T14:00:00",
+      "last_bar": "2025-03-26T02:00:00",
+      "input_sha256": "212e4443d9383ebc743e9ae0fe60449a4613935a4defc2527b26041095f10f40",
+      "selection_metrics": {
+        "net_return": -2.82294e-05,
+        "path_efficiency": 0.0002223705
+      },
+      "golden_file": "tests/golden/falcon_phase0/sideways_transition.json",
+      "golden_sha256": "151bc403736eab4abc36dbaf65fcaf33297bfb2ed972755eafc95ecee85ae948",
+      "golden_records": 349
+    }
+  }
+}

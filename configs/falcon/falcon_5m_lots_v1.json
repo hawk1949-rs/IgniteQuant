@@ -1,0 +1,38 @@
+{
+  "profile_id": "falcon_5m_lots_v1",
+  "decision_mode": "calibrated_5m",
+  "config_version": "falcon_5m_lots_v1",
+  "description": "候选：指标/风控保持 legacy 条数；仅启用信号强度手数 {1:1,2:2,3:3}。用于单独评估「扁平手数」债项。",
+  "status": "candidate",
+  "rollback_to": "falcon_legacy_v1",
+  "factor": {
+    "warmup_bars": 52,
+    "subscription_bars": 400,
+    "ma_fast": 7,
+    "ma_mid": 14,
+    "ma_slow": 52,
+    "atr_period": 14,
+    "adx_period": 14,
+    "adx_threshold": 25.0,
+    "vol_ma_period": 20,
+    "kdj_n": 9,
+    "kline_seconds": 300
+  },
+  "signal": {
+    "model_version": "falcon_score_legacy_v1",
+    "confirmation_bars": 1,
+    "signal_ttl_bars": 1
+  },
+  "sizing": {
+    "mode": "signal_strength_lot",
+    "lot_scale": 1,
+    "lot_by_signal": {"1": 1, "2": 2, "3": 3}
+  },
+  "risk": {
+    "sl_atr_mult": 1.3,
+    "tp_atr_mult": 2.3,
+    "cooldown_bars": 4,
+    "max_bar_delay_seconds": 30.0,
+    "max_symbol_lots": 3
+  }
+}

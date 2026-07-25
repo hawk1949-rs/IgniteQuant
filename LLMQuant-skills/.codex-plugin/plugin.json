@@ -1,0 +1,44 @@
+{
+  "name": "llmquant-skills",
+  "version": "0.1.0",
+  "description": "Finance research, trading, risk, and portfolio Agent Skills grounded in LLMQuant Data.",
+  "author": {
+    "name": "LLMQuant"
+  },
+  "homepage": "https://github.com/LLMQuant/skills",
+  "repository": "https://github.com/LLMQuant/skills",
+  "license": "MIT",
+  "keywords": [
+    "llmquant",
+    "finance",
+    "trading",
+    "portfolio",
+    "risk",
+    "macro",
+    "crypto",
+    "credit",
+    "skills"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "LLMQuant Skills",
+    "shortDescription": "Finance Agent Skills powered by LLMQuant Data.",
+    "longDescription": "LLMQuant Skills provides category-level Agent Skills for equities, ETFs, options, commodities, crypto, prediction markets, macro, credit, rates/FX, events, portfolio, risk, strategy, and investor-lens workflows. Each skill routes to repeatable workflows and keeps external evidence grounded in LLMQuant Data.",
+    "developerName": "LLMQuant",
+    "category": "Data & Analytics",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Analyze"
+    ],
+    "websiteURL": "https://github.com/LLMQuant/skills",
+    "brandColor": "#0B5FFF",
+    "defaultPrompt": [
+      "Use llmquant-equities to build a five-lens stock analysis.",
+      "Use llmquant-options to evaluate IV rank and strategy choices.",
+      "Use llmquant-crypto to diagnose the current crypto market regime.",
+      "Use llmquant-macro to map macro data into portfolio impact."
+    ],
+    "screenshots": []
+  }
+}
