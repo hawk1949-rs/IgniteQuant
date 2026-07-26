@@ -30,7 +30,7 @@ loadDotEnv(envPath);
 
 if (!process.env.LLMQUANT_API_KEY || !process.env.LLMQUANT_API_KEY.trim()) {
   console.error(
-    "[llmquant-data] Missing LLMQUANT_API_KEY in D:\\Cursor\\IGNITE\\AIQuant\\.env"
+    `[llmquant-data] Missing LLMQUANT_API_KEY in ${envPath}`
   );
   process.exit(1);
 }

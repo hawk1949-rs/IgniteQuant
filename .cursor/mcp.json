@@ -2,9 +2,7 @@
   "mcpServers": {
     "llmquant-data": {
       "command": "node",
-      "args": [
-        "D:\\Cursor\\IGNITE\\AIQuant\\.cursor\\run-llmquant-mcp.cjs"
-      ]
+      "args": ["${workspaceFolder}/.cursor/run-llmquant-mcp.cjs"]
     }
   }
 }
