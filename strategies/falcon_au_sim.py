@@ -74,7 +74,21 @@ ENABLE_CLOUD_SYNC = os.environ.get("ENABLE_CLOUD_SYNC", "1").strip() not in {
 }
 INSTANCE_ID = "falcon_au_sim"
 PERSIST_DB = ROOT / "data" / "runtime" / "falcon_au_sim.sqlite"
+PID_FILE = PERSIST_DB.parent / f"{INSTANCE_ID}.pid"
 RECON_EVERY_BARS = 12  # ~1 hour on 5m bars
+MAX_CONSECUTIVE_ERRORS = 5
+
+
+def _write_pid_file() -> None:
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+
+
+def _cleanup_pid_file() -> None:
+    try:
+        PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _cloud_sync_outbox(persist: PersistenceSession | None) -> None:
@@ -274,6 +288,7 @@ def main() -> None:
             instance_id=INSTANCE_ID,
             strategy_id="falcon_v2",
         )
+    _write_pid_file()
 
     print(f"启动 Falcon v2 快期模拟盘: 信号={SIGNAL_SYMBOL}", flush=True)
     print(
@@ -374,6 +389,14 @@ def main() -> None:
                     )
                 )
                 _cloud_sync_outbox(persist)
+                try:
+                    from ignitequant.persistence.repair import repair_missing_fills
+
+                    repaired = repair_missing_fills(PERSIST_DB, INSTANCE_ID)
+                    if repaired:
+                        print(f"[补录成交] repaired={repaired}", flush=True)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[补录成交] 跳过: {exc}", flush=True)
                 # Retry flatten if a prior STOP/pending-0 left broker lots open.
                 pending0 = payload.get("pending_desired")
                 net_boot = int(position.pos)
@@ -554,10 +577,26 @@ def main() -> None:
                         )
                         last_saved_bar_id = result0.bar_id
 
+        consecutive_errors = 0
         while True:
             # Deadline keeps heartbeats / kline dumps alive during session breaks
             # when Tq may not push quote updates for a long time.
-            api.wait_update(deadline=time.time() + 2.0)
+            try:
+                api.wait_update(deadline=time.time() + 2.0)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                consecutive_errors += 1
+                print(
+                    f"[行情等待异常] {exc} ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS})",
+                    flush=True,
+                )
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    print("[行情等待异常] 连续失败过多，退出主循环", flush=True)
+                    break
+                time.sleep(min(30.0, 2.0 ** consecutive_errors))
+                continue
+            consecutive_errors = 0
             now = time.time()
 
             # Confirm async TargetPosTask fills between bars.
@@ -717,6 +756,17 @@ def main() -> None:
                     )
                     if intent and persist is not None:
                         persist.record_intent(intent)
+                    _wait_fill_briefly(
+                        api,
+                        executor=executor,
+                        position=position,
+                        persist=persist,
+                        last_price=q_px if q_px > 0 else float(getattr(main_quote, "last_price", 0) or 0),
+                        atr=last_fill_atr,
+                        signal=last_fill_signal,
+                        rounds=12,
+                        timeout_s=2.0,
+                    )
                     if int(position.pos) != 0:
                         continue
                     executor.destroy()
@@ -993,6 +1043,7 @@ def main() -> None:
             flush=True,
         )
     finally:
+        _cleanup_pid_file()
         if persist is not None:
             persist.close()
         api.close()

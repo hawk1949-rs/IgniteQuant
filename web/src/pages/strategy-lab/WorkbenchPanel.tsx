@@ -1,6 +1,7 @@
 import { useMemo, useState, type MouseEvent } from 'react'
 import {
   App,
+  Alert,
   Button,
   Card,
   Col,
@@ -554,7 +555,7 @@ export function WorkbenchPanel() {
     try {
       const engineApi = account.engine === 'tq' ? 'tq' : 'local'
       const out = await runBacktest({
-        strategy_id: 'falcon_v2',
+        strategy_id: 'falcon_v2', // 装配节点尚未接入回测 API
         symbol_ids: [account.symbolId],
         start: account.start,
         end: account.end,
@@ -607,7 +608,11 @@ export function WorkbenchPanel() {
       if (account.persistDb) {
         const nextRuns = [run, ...runs].slice(0, 50)
         setRuns(nextRuns)
-        persistBacktestRuns(nextRuns)
+        try {
+          persistBacktestRuns(nextRuns)
+        } catch (saveErr) {
+          message.error(saveErr instanceof Error ? saveErr.message : String(saveErr))
+        }
         setSelectedRunId(run.id)
         message.success(`${engineLabel}回测完成（区间 ${account.start}～${account.end}）`)
       } else {
@@ -661,6 +666,11 @@ export function WorkbenchPanel() {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <Alert
+        type="info"
+        showIcon
+        message="回测当前固定使用 Falcon v2 决策核；上方信号/仓位装配为预览，尚未接入回测 API。"
+      />
       <Card
         title="策略档案"
         extra={
@@ -905,7 +915,7 @@ export function WorkbenchPanel() {
                 background: '#121C30',
               }}
             >
-              <Text>{account.persistDb ? '写入数据库' : '仅本次展示'}</Text>
+              <Text>{account.persistDb ? '保存到本机历史' : '仅本次展示'}</Text>
               <Switch
                 checked={account.persistDb}
                 disabled={busy}

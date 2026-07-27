@@ -185,8 +185,30 @@ function loadJson<T>(key: string, fallback: T): T {
   }
 }
 
-function saveJson(key: string, value: unknown) {
-  localStorage.setItem(key, JSON.stringify(value))
+function saveJson(key: string, value: unknown): boolean {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+    return true
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'QuotaExceededError') {
+      console.warn('localStorage quota exceeded for', key)
+    }
+    return false
+  }
+}
+
+export type SaveJsonResult = { ok: true } | { ok: false; reason: 'quota' | 'unknown' }
+
+export function trySaveJson(key: string, value: unknown): SaveJsonResult {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+    return { ok: true }
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'QuotaExceededError') {
+      return { ok: false, reason: 'quota' }
+    }
+    return { ok: false, reason: 'unknown' }
+  }
 }
 
 export function loadSavedStrategies(): SavedStrategy[] {
@@ -211,7 +233,9 @@ export function loadSavedStrategies(): SavedStrategy[] {
 }
 
 export function persistSavedStrategies(list: SavedStrategy[]) {
-  saveJson(LS_STRATEGIES, list)
+  if (!saveJson(LS_STRATEGIES, list)) {
+    throw new Error('策略档案保存失败：浏览器存储空间不足，请导出备份或清理旧回测')
+  }
 }
 
 export function loadAssemblySnapshots(): AssemblySnapshot[] {
@@ -262,7 +286,9 @@ export function loadBacktestRuns(): BacktestRun[] {
 }
 
 export function persistBacktestRuns(list: BacktestRun[]) {
-  saveJson(LS_RUNS, list)
+  if (!saveJson(LS_RUNS, list)) {
+    throw new Error('回测历史保存失败：浏览器存储空间不足，请清理旧记录')
+  }
 }
 
 export function newId(prefix: string) {

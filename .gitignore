@@ -8,6 +8,11 @@ data/backtest_runs/*.json
 # Phase 4 运行时 SQLite（保留目录，忽略库文件）
 data/runtime/*.sqlite
 data/runtime/*.sqlite-*
+data/runtime/*.pid
+data/runtime/*.launch.log
+
+# 临时脚本（可能含交易样本数据）
+data/_tmp_*.py
 
 # Phase 6 研究报告输出
 data/research/*.json
@@ -36,3 +41,6 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 测试缓存
+.pytest_cache/

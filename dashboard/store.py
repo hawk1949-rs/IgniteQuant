@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dashboard.safe_path import resolve_run_json, validate_safe_id
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = ROOT / "data" / "backtest_runs"
 
@@ -21,6 +23,7 @@ def _ensure_dir() -> Path:
 def save_run(record: dict[str, Any]) -> Path:
     _ensure_dir()
     run_id = record.get("run_id") or uuid.uuid4().hex[:12]
+    validate_safe_id(str(run_id), field="run_id")
     record["run_id"] = run_id
     record.setdefault("saved_at", datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"))
     path = RUNS_DIR / f"{run_id}.json"
@@ -40,8 +43,9 @@ def list_runs() -> list[dict[str, Any]]:
 
 
 def get_run(run_id: str) -> dict[str, Any] | None:
-    path = RUNS_DIR / f"{run_id}.json"
-    if not path.is_file():
+    try:
+        path = resolve_run_json(RUNS_DIR, run_id)
+    except Exception:
         return None
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -55,8 +59,9 @@ def update_run(run_id: str, **fields: Any) -> Path | None:
 
 
 def delete_run(run_id: str) -> bool:
-    path = RUNS_DIR / f"{run_id}.json"
-    if path.is_file():
-        path.unlink()
-        return True
-    return False
+    try:
+        path = resolve_run_json(RUNS_DIR, run_id)
+    except Exception:
+        return False
+    path.unlink()
+    return True

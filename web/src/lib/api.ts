@@ -1,21 +1,35 @@
 const API_BASE = ''
+const REQUEST_TIMEOUT_MS = 30_000
+const BACKTEST_POLL_MAX_MS = 30 * 60_000
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
-    ...init,
-  })
-  if (!res.ok) {
-    let detail = res.statusText
-    try {
-      const body = await res.json()
-      detail = body.detail || JSON.stringify(body)
-    } catch {
-      /* ignore */
+  const ctrl = new AbortController()
+  const timer = window.setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+      signal: ctrl.signal,
+      ...init,
+    })
+    if (!res.ok) {
+      let detail = res.statusText
+      try {
+        const body = await res.json()
+        detail = body.detail || JSON.stringify(body)
+      } catch {
+        /* ignore */
+      }
+      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
     }
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    return res.json() as Promise<T>
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('请求超时，请检查 API 是否已启动')
+    }
+    throw err
+  } finally {
+    window.clearTimeout(timer)
   }
-  return res.json() as Promise<T>
 }
 
 export type Strategy = {
@@ -140,7 +154,11 @@ export async function runBacktest(body: {
     }
   }
 
+  const started = Date.now()
   for (;;) {
+    if (Date.now() - started > BACKTEST_POLL_MAX_MS) {
+      throw new Error('回测轮询超时（30 分钟），请稍后在任务列表查看结果')
+    }
     await sleep(1500)
     job = await fetchJob(job.job_id)
     onProgress?.(job)
@@ -465,6 +483,13 @@ export function fetchSimIntents(instanceId: string, limit = 100) {
 export function fetchSimFills(instanceId: string, limit = 100) {
   return request<{ fills: SimFill[]; count: number }>(
     `/api/sim/sessions/${encodeURIComponent(instanceId)}/fills?limit=${limit}`,
+  )
+}
+
+export function repairSimFills(instanceId: string) {
+  return request<{ instance_id: string; repaired: number }>(
+    `/api/sim/sessions/${encodeURIComponent(instanceId)}/repair-fills`,
+    { method: 'POST' },
   )
 }
 

@@ -8,6 +8,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,6 +18,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
+from dashboard.safe_path import resolve_runtime_db
 from dashboard.catalog import STRATEGIES, SYMBOLS
 from ignitequant.market.sim_klines import (
     find_snapshot_for_symbol,
@@ -70,6 +72,16 @@ SIM_LAUNCHERS: dict[str, dict[str, Any]] = {
 }
 
 router = APIRouter(prefix="/api/sim", tags=["sim"])
+
+_start_locks: dict[str, threading.Lock] = {}
+_start_locks_guard = threading.Lock()
+
+
+def _start_lock(instance_id: str) -> threading.Lock:
+    with _start_locks_guard:
+        if instance_id not in _start_locks:
+            _start_locks[instance_id] = threading.Lock()
+        return _start_locks[instance_id]
 
 
 def _status_label(status: str) -> str:
@@ -272,7 +284,7 @@ def _repair_missing_fills(db_path: Path, instance_id: str) -> int:
 
             price = _decision_close_price(conn, instance_id, str(intent["decision_id"] or ""))
             if price is None:
-                price = 0.0
+                continue
             qty = abs(desired - cur)
             side = "BUY" if desired > cur else "SELL"
             fill_id = f"fill-backfill-{intent_id}"
@@ -898,10 +910,7 @@ def _latest_decision_at(conn: sqlite3.Connection, instance_id: str) -> str | Non
 
 
 def _resolve_db(instance_id: str) -> Path:
-    path = RUNTIME_DIR / f"{instance_id}.sqlite"
-    if not path.is_file():
-        raise HTTPException(404, f"session not found: {instance_id}")
-    return path
+    return resolve_runtime_db(RUNTIME_DIR, instance_id)
 
 
 def _signal_symbol_for_trade(symbol: str) -> str:
@@ -1149,7 +1158,6 @@ def list_sessions() -> dict[str, Any]:
             sessions.append(
                 {
                     "instance_id": instance_id,
-                    "db_path": str(path),
                     "status": "IDLE",
                     "error": f"cannot open db: {exc}",
                 }
@@ -1180,7 +1188,6 @@ def list_sessions() -> dict[str, Any]:
                 sessions.append(
                     {
                         "instance_id": instance_id,
-                        "db_path": str(path),
                         "strategy_id": "falcon_v2" if "falcon" in instance_id else "",
                         "symbol": "",
                         "runtime_state": "IDLE",
@@ -1195,7 +1202,6 @@ def list_sessions() -> dict[str, Any]:
             sessions.append(
                 {
                     "instance_id": str(state["instance_id"] or instance_id),
-                    "db_path": str(path),
                     "strategy_id": state["strategy_id"],
                     "account_id": state["account_id"],
                     "symbol": state["symbol"],
@@ -1216,7 +1222,6 @@ def list_sessions() -> dict[str, Any]:
             sessions.append(
                 {
                     "instance_id": instance_id,
-                    "db_path": str(path),
                     "status": "IDLE",
                     "error": str(exc),
                 }
@@ -1294,53 +1299,69 @@ def session_process(instance_id: str) -> dict[str, Any]:
 @router.post("/sessions/{instance_id}/start")
 def session_start(instance_id: str) -> dict[str, Any]:
     """Start local TqKq sim process (CLI equivalent)."""
+    from dashboard.safe_path import validate_safe_id
+
+    validate_safe_id(instance_id, field="instance_id")
     launcher = SIM_LAUNCHERS.get(instance_id)
     if not launcher:
         raise HTTPException(400, f"暂不支持从此处启动会话：{instance_id}")
-    proc = _process_status(instance_id)
-    if proc["process_running"]:
+    with _start_lock(instance_id):
+        proc = _process_status(instance_id)
+        if proc["process_running"]:
+            return {
+                "ok": True,
+                "already_running": True,
+                "message": "模拟盘进程已在运行",
+                **proc,
+            }
+        script: Path = launcher["script"]
+        if not script.is_file():
+            raise HTTPException(500, f"启动脚本不存在：{script}")
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+        env.setdefault("FALCON_PROFILE", "falcon_legacy_v1")
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+        log_path = RUNTIME_DIR / f"{instance_id}.launch.log"
+        log_f = open(log_path, "a", encoding="utf-8")
+        try:
+            child = subprocess.Popen(
+                [sys.executable, str(script)],
+                cwd=str(ROOT),
+                env=env,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                creationflags=creationflags,
+                close_fds=os.name != "nt",
+                start_new_session=os.name != "nt",
+            )
+        except Exception as exc:
+            log_f.close()
+            raise HTTPException(500, f"启动失败：{exc}") from exc
+        log_f.close()
+        _pid_path(instance_id).write_text(str(child.pid), encoding="utf-8")
         return {
             "ok": True,
-            "already_running": True,
-            "message": "模拟盘进程已在运行",
-            **proc,
+            "already_running": False,
+            "message": "已启动天勤模拟盘进程",
+            "pid": child.pid,
+            "log_path": str(log_path),
+            "process_running": True,
+            "label": launcher["label"],
+            "can_start": True,
         }
-    script: Path = launcher["script"]
-    if not script.is_file():
-        raise HTTPException(500, f"启动脚本不存在：{script}")
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    env.setdefault("FALCON_PROFILE", "falcon_legacy_v1")
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
-    log_path = RUNTIME_DIR / f"{instance_id}.launch.log"
-    log_f = open(log_path, "a", encoding="utf-8")
-    try:
-        child = subprocess.Popen(
-            [sys.executable, str(script)],
-            cwd=str(ROOT),
-            env=env,
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-            creationflags=creationflags,
-            close_fds=os.name != "nt",
-        )
-    except Exception as exc:
-        log_f.close()
-        raise HTTPException(500, f"启动失败：{exc}") from exc
-    _pid_path(instance_id).write_text(str(child.pid), encoding="utf-8")
-    return {
-        "ok": True,
-        "already_running": False,
-        "message": "已启动天勤模拟盘进程",
-        "pid": child.pid,
-        "log_path": str(log_path),
-        "process_running": True,
-        "label": launcher["label"],
-        "can_start": True,
-    }
+
+
+@router.post("/sessions/{instance_id}/repair-fills")
+def session_repair_fills(instance_id: str) -> dict[str, Any]:
+    """Backfill missing fills for async TargetPosTask (explicit write; not on GET)."""
+    from ignitequant.persistence.repair import repair_missing_fills
+
+    path = _resolve_db(instance_id)
+    repaired = repair_missing_fills(path, instance_id)
+    return {"instance_id": instance_id, "repaired": repaired}
 
 
 @router.get("/overseas/bars")
@@ -1531,7 +1552,6 @@ def session_intents(
     limit: int = Query(100, ge=1, le=500),
 ) -> dict[str, Any]:
     path = _resolve_db(instance_id)
-    _repair_missing_fills(path, instance_id)
     conn = _open_ro(path)
     try:
         rows = conn.execute(
@@ -1571,7 +1591,6 @@ def session_fills(
     limit: int = Query(100, ge=1, le=500),
 ) -> dict[str, Any]:
     path = _resolve_db(instance_id)
-    _repair_missing_fills(path, instance_id)
     conn = _open_ro(path)
     try:
         rows = conn.execute(

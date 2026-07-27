@@ -15,7 +15,7 @@ def _now() -> datetime:
 
 
 def test_schema_version_has_outbox(tmp_path: Path) -> None:
-    assert SCHEMA_VERSION >= 3
+    assert SCHEMA_VERSION >= 4
     conn = open_sqlite(tmp_path / "o.sqlite")
     row = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
     assert int(row["v"]) >= 3

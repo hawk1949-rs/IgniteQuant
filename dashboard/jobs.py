@@ -212,6 +212,26 @@ class BacktestJobQueue:
             ).fetchall()
             return [self._row_to_dict(r) for r in rows]
 
+    def recover_queued(self) -> int:
+        """Re-submit QUEUED jobs after API process restart."""
+        resumed = 0
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT job_id FROM backtest_job
+                    WHERE status = 'QUEUED'
+                    ORDER BY created_at ASC
+                    """
+                ).fetchall()
+                for row in rows:
+                    job_id = str(row["job_id"])
+                    if job_id in self._futures:
+                        continue
+                    self._futures[job_id] = self._executor.submit(self._run_job, job_id)
+                    resumed += 1
+        return resumed
+
     def cancel(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             with self._connect() as conn:

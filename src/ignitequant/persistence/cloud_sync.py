@@ -29,6 +29,24 @@ def database_url(*, root: Path | None = None) -> str:
     return os.environ.get("DATABASE_URL", "").strip()
 
 
+def owner_id(*, root: Path | None = None) -> str | None:
+    if root is not None:
+        _load_dotenv(root / ".env")
+    value = os.environ.get("SUPABASE_OWNER_ID", "").strip()
+    return value or None
+
+
+def _map_sim_status(runtime_state: str | None, event_type: str) -> str:
+    state = (runtime_state or "").upper()
+    if state in {"HALT", "SHUTDOWN"}:
+        return "error"
+    if state in {"DEGRADED", "STALE"}:
+        return "stale"
+    if event_type == "heartbeat.tick":
+        return "running"
+    return "running"
+
+
 def push_outbox_once(
     conn: sqlite3.Connection,
     *,
@@ -36,11 +54,12 @@ def push_outbox_once(
     db_hint: str = "",
     limit: int = 200,
     instance_key_override: str | None = None,
+    owner_id_value: str | None = None,
 ) -> dict[str, Any]:
     """Push pending outbox rows. Returns counts; raises only on hard import/connect errors
     that callers may choose to catch.
     """
-    from ignitequant.persistence.outbox import list_pending, mark_failed, mark_synced
+    from ignitequant.persistence.outbox import list_pending, mark_failed, mark_synced, prune_synced
 
     if not database_url:
         return {"synced": 0, "failed": 0, "pending": 0, "skipped": "no_database_url"}
@@ -53,7 +72,7 @@ def push_outbox_once(
     from psycopg2.extras import Json
 
     pg = psycopg2.connect(database_url, connect_timeout=8)
-    pg.autocommit = True
+    pg.autocommit = False
     synced = 0
     failed = 0
     instance_keys: set[str] = set()
@@ -65,12 +84,16 @@ def push_outbox_once(
                 instance_keys.add(instance_key)
                 try:
                     payload = json.loads(row["payload_json"])
+                    status = _map_sim_status(
+                        payload.get("runtime_state"),
+                        str(row["event_type"]),
+                    )
                     cur.execute(
                         """
                         INSERT INTO trading_event_inbox(
                             instance_key, local_outbox_id, event_type, aggregate_type,
-                            aggregate_id, payload_json, occurred_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            aggregate_id, payload_json, occurred_at, owner_id
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (instance_key, local_outbox_id) DO NOTHING
                         """,
                         (
@@ -81,6 +104,7 @@ def push_outbox_once(
                             row["aggregate_id"],
                             Json(payload),
                             row["occurred_at"],
+                            owner_id_value,
                         ),
                     )
                     symbol_id = payload.get("symbol") or payload.get("symbol_id") or "au"
@@ -91,27 +115,29 @@ def push_outbox_once(
                         INSERT INTO sim_instance(
                             instance_key, strategy_id, symbol_id, framework, status,
                             runtime_state, last_heartbeat_at, last_synced_at,
-                            local_db_hint, payload_json, updated_at
+                            local_db_hint, payload_json, updated_at, owner_id
                         ) VALUES (
-                            %s, %s, %s, 'tq', 'running', %s,
+                            %s, %s, %s, 'tq', %s, %s,
                             CASE WHEN %s = 'heartbeat.tick' THEN NOW() ELSE NULL END,
-                            NOW(), %s, %s, NOW()
+                            NOW(), %s, %s, NOW(), %s
                         )
                         ON CONFLICT (instance_key) DO UPDATE SET
                             strategy_id = EXCLUDED.strategy_id,
                             symbol_id = COALESCE(NULLIF(EXCLUDED.symbol_id, ''), sim_instance.symbol_id),
-                            status = 'running',
+                            status = EXCLUDED.status,
                             runtime_state = COALESCE(EXCLUDED.runtime_state, sim_instance.runtime_state),
                             last_heartbeat_at = COALESCE(EXCLUDED.last_heartbeat_at, sim_instance.last_heartbeat_at),
                             last_synced_at = NOW(),
                             local_db_hint = EXCLUDED.local_db_hint,
                             payload_json = sim_instance.payload_json || EXCLUDED.payload_json,
-                            updated_at = NOW()
+                            updated_at = NOW(),
+                            owner_id = COALESCE(sim_instance.owner_id, EXCLUDED.owner_id)
                         """,
                         (
                             instance_key,
                             strategy_id,
                             str(symbol_id),
+                            status,
                             runtime_state,
                             row["event_type"],
                             db_hint,
@@ -130,15 +156,23 @@ def push_outbox_once(
                                     },
                                 }
                             ),
+                            owner_id_value,
                         ),
                     )
+                    pg.commit()
                     mark_synced(conn, int(row["id"]))
                     synced += 1
                 except Exception as exc:  # noqa: BLE001
+                    pg.rollback()
                     mark_failed(conn, int(row["id"]), f"{type(exc).__name__}: {exc}")
                     failed += 1
     finally:
         pg.close()
+
+    try:
+        prune_synced(conn, keep_days=7)
+    except Exception:
+        pass
 
     return {
         "synced": synced,
@@ -167,6 +201,7 @@ def try_push_outbox(
             db_hint=db_hint,
             limit=limit,
             instance_key_override=instance_key,
+            owner_id_value=owner_id(root=root),
         )
     except Exception as exc:  # noqa: BLE001
         return {

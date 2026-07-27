@@ -341,13 +341,32 @@ def test_sim_backfills_fills_from_submitted_intents(
     client: TestClient, runtime_db: Path
 ) -> None:
     """Submitted intents that clearly reached target should show as fills."""
-    import dashboard.sim_api as sim_api
-
     conn = sqlite3.connect(str(runtime_db))
     now = datetime.now(timezone.utc).isoformat()
     # Wipe fixture fill; leave a SUBMITTED open→flat chain.
     conn.execute("DELETE FROM trade_fill_event")
     conn.execute("DELETE FROM order_intent_event")
+    for bar_id, close in (("bar-a", 880.0), ("bar-b", 881.0)):
+        conn.execute(
+            """
+            INSERT INTO decision_event(
+                instance_id, decision_id, bar_id, symbol, applied_action,
+                target_before, target_after, legacy_signal, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "falcon_au_sim",
+                bar_id,
+                bar_id,
+                "SHFE.au2608",
+                "HOLD",
+                0,
+                0,
+                0,
+                json.dumps({"factors": {"values": {"close": close}}}),
+                now,
+            ),
+        )
     conn.execute(
         """
         INSERT INTO order_intent_event(
@@ -409,14 +428,21 @@ def test_sim_backfills_fills_from_submitted_intents(
     conn.commit()
     conn.close()
 
+    repair = client.post("/api/sim/sessions/falcon_au_sim/repair-fills")
+    assert repair.status_code == 200
+    assert repair.json()["repaired"] >= 2
+
     fills = client.get("/api/sim/sessions/falcon_au_sim/fills").json()
     assert fills["count"] >= 2
     intents = client.get("/api/sim/sessions/falcon_au_sim/intents").json()
     statuses = {i["intent_id"]: i["status"] for i in intents["intents"]}
     assert statuses["intent-a"] == "FILLED"
     assert statuses["intent-b"] == "FILLED"
-    # Repair is idempotent
-    assert (
-        sim_api._repair_missing_fills(sim_api.RUNTIME_DIR / "falcon_au_sim.sqlite", "falcon_au_sim")
-        == 0
-    )
+    from ignitequant.persistence.repair import repair_missing_fills
+
+    assert repair_missing_fills(runtime_db, "falcon_au_sim") == 0
+
+
+def test_sim_rejects_path_traversal_instance_id(client: TestClient) -> None:
+    res = client.get("/api/sim/sessions/../../tmp/evil/summary")
+    assert res.status_code in {400, 404}

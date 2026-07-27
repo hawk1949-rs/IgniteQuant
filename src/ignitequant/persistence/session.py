@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,7 @@ class PersistenceSession:
     healthy: bool = True
     _db_path: str | None = None
     sync_outbox_enabled: bool = True
+    _last_heartbeat_outbox_mono: float = 0.0
 
     def _enqueue(
         self,
@@ -359,21 +361,24 @@ class PersistenceSession:
                 session_open=session_open,
                 payload=payload,
             )
-            self._enqueue(
-                event_type="heartbeat.tick",
-                aggregate_type="runtime_health",
-                aggregate_id=self.instance_id,
-                payload={
-                    "last_price": last_price,
-                    "confirmed_net": confirmed_net,
-                    "current_target": current_target,
-                    "pending_desired": pending_desired,
-                    "runtime_state": self.runtime.runtime_state,
-                    "session_open": session_open,
-                    "strategy_id": self.strategy_id,
-                    "symbol": self.symbol,
-                },
-            )
+            now_mono = time.monotonic()
+            if now_mono - self._last_heartbeat_outbox_mono >= 300:
+                self._last_heartbeat_outbox_mono = now_mono
+                self._enqueue(
+                    event_type="heartbeat.tick",
+                    aggregate_type="runtime_health",
+                    aggregate_id=self.instance_id,
+                    payload={
+                        "last_price": last_price,
+                        "confirmed_net": confirmed_net,
+                        "current_target": current_target,
+                        "pending_desired": pending_desired,
+                        "runtime_state": self.runtime.runtime_state,
+                        "session_open": session_open,
+                        "strategy_id": self.strategy_id,
+                        "symbol": self.symbol,
+                    },
+                )
             self.healthy = True
         except Exception:
             self.healthy = False

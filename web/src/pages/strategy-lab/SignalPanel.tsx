@@ -292,7 +292,8 @@ export function SignalPanel() {
 
   const onSave = () => {
     if (errors.length) {
-      message.warning(errors[0])
+      message.error(errors[0])
+      return
     }
     persistSignalConfig(cfg)
     setCfg((prev) => ({ ...prev, updatedAt: new Date().toISOString() }))

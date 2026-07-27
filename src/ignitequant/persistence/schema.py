@@ -7,7 +7,7 @@ via ``migrate()`` in sqlite.py (including safe ADD COLUMN helpers).
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # ---------------------------------------------------------------------------
 # Base DDL — full latest shape for new databases
@@ -446,7 +446,8 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
     sync_status TEXT NOT NULL DEFAULT 'pending',
     synced_at TEXT,
     sync_error TEXT,
-    attempts INTEGER NOT NULL DEFAULT 0
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_decision_instance ON decision_event(instance_id, seq);
@@ -788,8 +789,16 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
     sync_status TEXT NOT NULL DEFAULT 'pending',
     synced_at TEXT,
     sync_error TEXT,
-    attempts INTEGER NOT NULL DEFAULT 0
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending ON sync_outbox(sync_status, id);
 """
+
+# Columns added at version 4 (outbox retry backoff)
+V4_ADD_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "sync_outbox": [
+        ("next_retry_at", "TEXT"),
+    ],
+}

@@ -165,6 +165,7 @@ def _execute_backtest_request(
 def _startup() -> None:
     queue = get_job_queue()
     queue.set_handler(_execute_backtest_request)
+    queue.recover_queued()
 
 
 @app.get("/api/health")

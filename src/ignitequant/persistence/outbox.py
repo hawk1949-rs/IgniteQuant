@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 
@@ -19,6 +19,11 @@ def _utc_now() -> str:
 
 def _dumps(payload: Mapping[str, Any] | dict[str, Any]) -> str:
     return json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _retry_delay_seconds(attempts: int) -> int:
+    """Exponential backoff capped at 1 hour."""
+    return min(3600, 30 * (2 ** min(max(attempts, 0), 6)))
 
 
 def enqueue_outbox(
@@ -37,8 +42,8 @@ def enqueue_outbox(
         """
         INSERT INTO sync_outbox(
             instance_id, event_type, aggregate_type, aggregate_id,
-            payload_json, occurred_at, created_at, sync_status, attempts
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0)
+            payload_json, occurred_at, created_at, sync_status, attempts, next_retry_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL)
         """,
         (
             instance_id,
@@ -60,6 +65,10 @@ def list_pending(conn: sqlite3.Connection, *, limit: int = 200) -> list[dict[str
         """
         SELECT * FROM sync_outbox
         WHERE sync_status = 'pending'
+          AND (
+            next_retry_at IS NULL
+            OR next_retry_at <= datetime('now')
+          )
         ORDER BY id ASC
         LIMIT ?
         """,
@@ -72,7 +81,7 @@ def mark_synced(conn: sqlite3.Connection, outbox_id: int) -> None:
     conn.execute(
         """
         UPDATE sync_outbox
-        SET sync_status = 'synced', synced_at = ?, sync_error = NULL
+        SET sync_status = 'synced', synced_at = ?, sync_error = NULL, next_retry_at = NULL
         WHERE id = ?
         """,
         (_utc_now(), int(outbox_id)),
@@ -81,14 +90,46 @@ def mark_synced(conn: sqlite3.Connection, outbox_id: int) -> None:
 
 
 def mark_failed(conn: sqlite3.Connection, outbox_id: int, error: str) -> None:
+    row = conn.execute(
+        "SELECT attempts FROM sync_outbox WHERE id = ?",
+        (int(outbox_id),),
+    ).fetchone()
+    attempts = int(row["attempts"] or 0) if row is not None else 0
+    next_attempts = attempts + 1
+    delay = _retry_delay_seconds(next_attempts)
+    next_retry = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+    status = "dead" if next_attempts >= 8 else "pending"
     conn.execute(
         """
         UPDATE sync_outbox
-        SET attempts = attempts + 1,
+        SET attempts = ?,
             sync_error = ?,
-            sync_status = CASE WHEN attempts + 1 >= 8 THEN 'dead' ELSE 'pending' END
+            sync_status = ?,
+            next_retry_at = CASE WHEN ? = 'pending' THEN ? ELSE NULL END
         WHERE id = ?
         """,
-        (error[:2000], int(outbox_id)),
+        (
+            next_attempts,
+            error[:2000],
+            status,
+            status,
+            next_retry,
+            int(outbox_id),
+        ),
     )
     conn.commit()
+
+
+def prune_synced(conn: sqlite3.Connection, *, keep_days: int = 7) -> int:
+    """Delete old synced rows to keep outbox bounded."""
+    cur = conn.execute(
+        """
+        DELETE FROM sync_outbox
+        WHERE sync_status = 'synced'
+          AND synced_at IS NOT NULL
+          AND synced_at < datetime('now', ?)
+        """,
+        (f"-{int(keep_days)} days",),
+    )
+    conn.commit()
+    return int(cur.rowcount)

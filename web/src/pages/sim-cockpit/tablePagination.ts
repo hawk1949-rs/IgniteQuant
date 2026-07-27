@@ -28,6 +28,7 @@ export function writeStoredPageSize(key: string, size: number): void {
 export function useSimTablePagination(
   storageKey: string,
   defaultPageSize = 10,
+  totalItems = 0,
 ): TablePaginationConfig {
   const [pageSize, setPageSize] = useState(() =>
     typeof window === 'undefined'
@@ -36,18 +37,23 @@ export function useSimTablePagination(
   )
   const [current, setCurrent] = useState(1)
 
+  const maxPage = Math.max(1, Math.ceil(totalItems / pageSize) || 1)
+  const safeCurrent = Math.min(current, maxPage)
+
   const onChange = useCallback((page: number, size?: number) => {
-    setCurrent(page)
+    const nextSize = size && size !== pageSize ? size : pageSize
+    const nextMax = Math.max(1, Math.ceil(totalItems / nextSize) || 1)
+    setCurrent(Math.min(page, nextMax))
     if (size && size !== pageSize) {
       setPageSize(size)
       writeStoredPageSize(storageKey, size)
       setCurrent(1)
     }
-  }, [pageSize, storageKey])
+  }, [pageSize, storageKey, totalItems])
 
   return useMemo(
     () => ({
-      current,
+      current: safeCurrent,
       pageSize,
       size: 'small' as const,
       showSizeChanger: true,
@@ -62,6 +68,6 @@ export function useSimTablePagination(
         setCurrent(1)
       },
     }),
-    [current, pageSize, onChange, storageKey],
+    [safeCurrent, pageSize, onChange, storageKey],
   )
 }

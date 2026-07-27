@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react'
@@ -19,6 +20,7 @@ import {
   fetchSimReplay,
   fetchSimSessions,
   fetchSimSummary,
+  repairSimFills,
   type SimBarsResponse,
   type SimCatalog,
   type SimDecision,
@@ -50,6 +52,7 @@ type Ctx = {
   bars: SimBarsResponse | null
   overseas: SimOverseasBars | null
   error: string | null
+  warn: string | null
   loading: boolean
   starting: boolean
   setStarting: (v: boolean) => void
@@ -64,14 +67,25 @@ const SimCockpitContext = createContext<Ctx | null>(null)
 /** Align live cockpit refresh; decisions still only appear on 5m bar close. */
 const BOOTSTRAP_POLL_MS = 5_000
 const LIVE_POLL_MS = 5_000
+const LS_INSTANCE = 'ignitequant.sim.instanceId'
+const LS_SYMBOL = 'ignitequant.sim.symbolId'
+
+function readLs(key: string, fallback: string) {
+  try {
+    const v = localStorage.getItem(key)
+    return v && v.trim() ? v : fallback
+  } catch {
+    return fallback
+  }
+}
 
 export function SimCockpitProvider({ children }: { children: ReactNode }) {
   const [catalog, setCatalog] = useState<SimCatalog | null>(null)
   const [sessions, setSessions] = useState<SimSession[]>([])
-  const [instanceId, setInstanceId] = useState('falcon_au_sim')
+  const [instanceId, setInstanceId] = useState(() => readLs(LS_INSTANCE, 'falcon_au_sim'))
   const [framework, setFramework] = useState('tq')
   const [strategyId, setStrategyId] = useState('falcon_v2')
-  const [symbolId, setSymbolId] = useState('au')
+  const [symbolId, setSymbolId] = useState(() => readLs(LS_SYMBOL, 'au'))
   const [summary, setSummary] = useState<SimSummary | null>(null)
   const [metrics, setMetrics] = useState<SimMetrics | null>(null)
   const [decisions, setDecisions] = useState<SimDecision[]>([])
@@ -80,7 +94,11 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
   const [bars, setBars] = useState<SimBarsResponse | null>(null)
   const [overseas, setOverseas] = useState<SimOverseasBars | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [warn, setWarn] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const refreshGenRef = useRef(0)
+  const refreshInFlightRef = useRef(false)
+  const repairedRef = useRef(false)
   const [starting, setStarting] = useState(false)
   const [replayAt, setReplayAt] = useState<string | null>(null)
   const [replay, setReplay] = useState<SimReplay | null>(null)
@@ -88,9 +106,19 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
   const selectInstance = useCallback(
     (id: string) => {
       setInstanceId(id)
+      try {
+        localStorage.setItem(LS_INSTANCE, id)
+      } catch {
+        /* ignore */
+      }
       const launcher = catalog?.launchers?.find((l) => l.instance_id === id)
       if (launcher) {
         setSymbolId(launcher.symbol_id)
+        try {
+          localStorage.setItem(LS_SYMBOL, launcher.symbol_id)
+        } catch {
+          /* ignore */
+        }
         setStrategyId(launcher.strategy_id)
         setFramework(launcher.framework)
       }
@@ -98,9 +126,23 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
     [catalog],
   )
 
+  const selectSymbol = useCallback((id: string) => {
+    setSymbolId(id)
+    try {
+      localStorage.setItem(LS_SYMBOL, id)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
   const refresh = useCallback(async () => {
+    if (refreshInFlightRef.current) return
+    refreshInFlightRef.current = true
+    const gen = ++refreshGenRef.current
+    const stale = () => gen !== refreshGenRef.current
     try {
       const [cat, sess] = await Promise.all([fetchSimCatalog(), fetchSimSessions()])
+      if (stale()) return
       setCatalog(cat)
       setSessions(sess.sessions || [])
 
@@ -110,9 +152,15 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
         return
       }
 
+      if (!repairedRef.current) {
+        repairedRef.current = true
+        void repairSimFills(id).catch(() => undefined)
+      }
+
       if (replayAt) {
         try {
           const rp = await fetchSimReplay(id, replayAt)
+          if (stale()) return
           setReplay(rp)
           const barEnd = rp.at
           const [dec, intentRes, fillRes, barRes] = await Promise.all([
@@ -169,10 +217,11 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
             }))
           }
           setError(null)
+          setWarn(null)
         } catch (e) {
-          setError(e instanceof Error ? e.message : String(e))
+          if (!stale()) setError(e instanceof Error ? e.message : String(e))
         }
-        setLoading(false)
+        if (!stale()) setLoading(false)
         return
       }
 
@@ -191,12 +240,14 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       ])
 
       const [sumR, metR, decR, intentR, fillR, barR, marketR, overseasR] = settled
+      if (stale()) return
+
+      const partial: string[] = []
 
       if (sumR.status === 'fulfilled') {
         setSummary(sumR.value)
         setError(null)
       } else {
-        setSummary(null)
         const msg = sumR.reason instanceof Error ? sumR.reason.message : String(sumR.reason)
         setError(
           msg.includes('404') || msg.includes('not found')
@@ -206,16 +257,18 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       }
 
       if (metR.status === 'fulfilled') setMetrics(metR.value)
-      else setMetrics(null)
+      else partial.push('绩效指标')
 
       if (decR.status === 'fulfilled') setDecisions(decR.value.decisions || [])
-      else setDecisions([])
+      else partial.push('决策链')
 
       if (intentR.status === 'fulfilled') setIntents(intentR.value.intents || [])
-      else setIntents([])
+      else partial.push('订单意图')
 
       if (fillR.status === 'fulfilled') setFills(fillR.value.fills || [])
-      else setFills([])
+      else partial.push('成交记录')
+
+      setWarn(partial.length ? `部分数据加载失败：${partial.join('、')}（已保留上次成功数据）` : null)
 
       if (overseasR.status === 'fulfilled' && overseasR.value) {
         const next = overseasR.value
@@ -325,9 +378,10 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
 
       setReplay(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      if (!stale()) setError(e instanceof Error ? e.message : String(e))
     } finally {
-      setLoading(false)
+      refreshInFlightRef.current = false
+      if (!stale()) setLoading(false)
     }
   }, [instanceId, replayAt, symbolId])
 
@@ -375,7 +429,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       strategyId,
       setStrategyId,
       symbolId,
-      setSymbolId,
+      setSymbolId: selectSymbol,
       summary,
       metrics,
       decisions,
@@ -384,6 +438,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       bars,
       overseas,
       error,
+      warn,
       loading,
       starting,
       setStarting,
@@ -400,6 +455,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       framework,
       strategyId,
       symbolId,
+      selectSymbol,
       summary,
       metrics,
       decisions,
@@ -408,6 +464,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       bars,
       overseas,
       error,
+      warn,
       loading,
       starting,
       replayAt,

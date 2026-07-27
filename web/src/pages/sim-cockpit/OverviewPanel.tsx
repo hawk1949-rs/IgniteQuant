@@ -143,6 +143,7 @@ export function OverviewPanel() {
     bars,
     overseas,
     error,
+    warn,
     loading,
     refresh,
     replayAt,
@@ -354,30 +355,32 @@ export function OverviewPanel() {
         </div>
         <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
           <Field label="框架">
-            <Select
-              size="small"
-              className="min-w-[9.5rem]"
-              value={framework}
-              onChange={setFramework}
-              options={(catalog?.frameworks || []).map((f) => ({
-                value: f.id,
-                label: f.enabled ? f.name : `${f.name}（即将支持）`,
-                disabled: !f.enabled,
-              }))}
-            />
+            <Tooltip title="跟随运行会话配置，暂不可单独修改">
+              <Select
+                size="small"
+                className="min-w-[9.5rem]"
+                value={framework}
+                disabled
+                options={(catalog?.frameworks || []).map((f) => ({
+                  value: f.id,
+                  label: f.enabled ? f.name : `${f.name}（即将支持）`,
+                }))}
+              />
+            </Tooltip>
           </Field>
           <Field label="策略">
-            <Select
-              size="small"
-              className="min-w-[8.5rem]"
-              value={strategyId}
-              onChange={setStrategyId}
-              options={(catalog?.strategies || []).map((s) => ({
-                value: s.id,
-                label: s.ready ? s.name : `${s.name}（占位）`,
-                disabled: !s.ready,
-              }))}
-            />
+            <Tooltip title="跟随运行会话配置，回测/启动均使用 launcher 绑定策略">
+              <Select
+                size="small"
+                className="min-w-[8.5rem]"
+                value={strategyId}
+                disabled
+                options={(catalog?.strategies || []).map((s) => ({
+                  value: s.id,
+                  label: s.ready ? s.name : `${s.name}（占位）`,
+                }))}
+              />
+            </Tooltip>
           </Field>
           <Field label="运行会话">
             <Select
@@ -434,6 +437,9 @@ export function OverviewPanel() {
             banner
             message={error}
           />
+        ) : null}
+        {warn ? (
+          <Alert className="mt-2" type="warning" showIcon banner message={warn} />
         ) : null}
         {positionNote ? (
           <Alert

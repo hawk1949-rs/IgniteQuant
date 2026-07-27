@@ -11,6 +11,7 @@ from ignitequant.persistence.schema import (
     V2_ADD_COLUMNS,
     V2_NEW_TABLES_DDL,
     V3_NEW_TABLES_DDL,
+    V4_ADD_COLUMNS,
 )
 
 
@@ -61,6 +62,11 @@ def _apply_v3(conn: sqlite3.Connection) -> None:
     conn.executescript(V3_NEW_TABLES_DDL)
 
 
+def _apply_v4(conn: sqlite3.Connection) -> None:
+    for table, cols in V4_ADD_COLUMNS.items():
+        _add_missing_columns(conn, table, cols)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     """Apply BASE_DDL then any pending versioned upgrades."""
     conn.executescript(BASE_DDL)
@@ -89,6 +95,14 @@ def migrate(conn: sqlite3.Connection) -> None:
             "VALUES (3, datetime('now'))"
         )
         current = 3
+
+    if current < 4:
+        _apply_v4(conn)
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+            "VALUES (4, datetime('now'))"
+        )
+        current = 4
 
     if current < SCHEMA_VERSION:
         conn.execute(
