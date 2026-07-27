@@ -38,7 +38,19 @@ PYTHONPATH=src python3 tools/sync_outbox_to_supabase.py --db data/runtime/falcon
 - `/research` → `strategy_publication` + `backtest_*` + `ref_*`
 - `/cockpit` → `sim_instance` +（登录后）inbox/私有投影；细节仍可回源本地 API
 
-## 应用迁移
+## 历史 K 线归档
+
+本地 `data/market_cache/**/300.csv` → Supabase `market_bar_archive`：
+
+```bash
+# 查看本地是否有缓存
+PYTHONPATH=src python3 tools/upload_market_cache_to_supabase.py --status
+
+# 上传 au/ag/rb/fg
+PYTHONPATH=src python3 tools/upload_market_cache_to_supabase.py --ids au,ag,rb,fg
+```
+
+若缓存缺失，先用天勤下载再建档。
 
 ```bash
 python3 tools/apply_supabase_schema.py
