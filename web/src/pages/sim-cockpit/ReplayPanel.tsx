@@ -44,7 +44,33 @@ export function ReplayPanel() {
       <section className="rounded-xl border border-line bg-panel/90 p-3.5">
         <h2 className="mb-2 text-[13px] font-semibold text-ink">复盘时间轴</h2>
         {timeline.length === 0 ? (
-          <Alert type="info" showIcon banner message="暂无决策/成交时间点，无法复盘。"             />
+          <Alert type="info" showIcon banner message="暂无决策/成交时间点，无法复盘。" />
+        ) : (
+          <>
+            <p className="mb-2 text-xs text-muted">
+              拖动滑块选择历史时刻；进入后总览数据切到该截面（暂停实时轮询）。
+            </p>
+            <Slider
+              min={0}
+              max={Math.max(timeline.length - 1, 0)}
+              value={Math.min(idx, Math.max(timeline.length - 1, 0))}
+              onChange={(v) => {
+                const next = Number(v)
+                setIdx(next)
+                if (debounceRef.current) window.clearTimeout(debounceRef.current)
+                debounceRef.current = window.setTimeout(() => enterReplay(next), 320)
+              }}
+              onChangeComplete={(v) => {
+                if (debounceRef.current) window.clearTimeout(debounceRef.current)
+                enterReplay(Number(v))
+              }}
+              tooltip={{
+                formatter: (v) => {
+                  const t = timeline[Number(v ?? 0)]
+                  return t ? dayjs(t).format('YYYY-MM-DD HH:mm:ss') : ''
+                },
+              }}
+            />
             <Space className="mt-1" wrap>
               <Button type="primary" size="small" onClick={() => enterReplay(idx)} disabled={!timeline.length}>
                 进入复盘
@@ -111,29 +137,3 @@ export function ReplayPanel() {
     </div>
   )
 }
-        ) : (
-          <>
-            <p className="mb-2 text-xs text-muted">
-              拖动滑块选择历史时刻；进入后总览数据切到该截面（暂停实时轮询）。
-            </p>
-            <Slider
-              min={0}
-              max={Math.max(timeline.length - 1, 0)}
-              value={Math.min(idx, Math.max(timeline.length - 1, 0))}
-              onChange={(v) => {
-                const next = Number(v)
-                setIdx(next)
-                if (debounceRef.current) window.clearTimeout(debounceRef.current)
-                debounceRef.current = window.setTimeout(() => enterReplay(next), 320)
-              }}
-              onChangeComplete={(v) => {
-                if (debounceRef.current) window.clearTimeout(debounceRef.current)
-                enterReplay(Number(v))
-              }}
-              tooltip={{
-                formatter: (v) => {
-                  const t = timeline[Number(v ?? 0)]
-                  return t ? dayjs(t).format('YYYY-MM-DD HH:mm:ss') : ''
-                },
-              }}
-            />
