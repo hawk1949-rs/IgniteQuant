@@ -5,6 +5,7 @@
 决策核：ignitequant.engine.FalconDecisionPipeline（与回测 / 看板共用）。
 执行层：TargetPositionExecutor + RiskEngine（Phase 3）。
 持久化：SQLite WAL + 启动对账（Phase 4，见 ENABLE_PERSISTENCE）。
+云同步：心跳/收盘自动把 sync_outbox 推到 Supabase（ENABLE_CLOUD_SYNC，需 DATABASE_URL）。
 - 账户：TqKq；无期末强制平仓
 - Web UI：http://127.0.0.1:9876
 - Ctrl+C 退出（可选先平仓，见 FLAT_ON_EXIT）
@@ -65,9 +66,43 @@ WEB_GUI = ":9876"
 FLAT_ON_EXIT = True
 HEARTBEAT_SECONDS = 60
 ENABLE_PERSISTENCE = True
+ENABLE_CLOUD_SYNC = os.environ.get("ENABLE_CLOUD_SYNC", "1").strip() not in {
+    "0",
+    "false",
+    "False",
+    "no",
+}
 INSTANCE_ID = "falcon_au_sim"
 PERSIST_DB = ROOT / "data" / "runtime" / "falcon_au_sim.sqlite"
 RECON_EVERY_BARS = 12  # ~1 hour on 5m bars
+
+
+def _cloud_sync_outbox(persist: PersistenceSession | None) -> None:
+    """Best-effort push of local outbox → Supabase. Never raises."""
+    if not ENABLE_CLOUD_SYNC or persist is None:
+        return
+    try:
+        from ignitequant.persistence.cloud_sync import try_push_outbox
+
+        conn = getattr(persist.repo, "_conn", None)
+        result = try_push_outbox(
+            conn,
+            root=ROOT,
+            db_hint=str(PERSIST_DB),
+            limit=200,
+            instance_key=INSTANCE_ID,
+        )
+        synced = int(result.get("synced") or 0)
+        failed = int(result.get("failed") or 0)
+        skipped = result.get("skipped")
+        if skipped and skipped != "no_database_url":
+            print(f"[云同步] 跳过: {skipped}", flush=True)
+        elif skipped == "no_database_url":
+            print("[云同步] 未配置 DATABASE_URL，跳过推送", flush=True)
+        elif synced or failed:
+            print(f"[云同步] synced={synced} failed={failed}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[云同步] 失败（忽略）: {exc}", flush=True)
 
 
 def _persist_state(
@@ -338,6 +373,7 @@ def main() -> None:
                         margin_ratio=float(getattr(account, "risk_ratio", 0) or 0),
                     )
                 )
+                _cloud_sync_outbox(persist)
                 # Retry flatten if a prior STOP/pending-0 left broker lots open.
                 pending0 = payload.get("pending_desired")
                 net_boot = int(position.pos)
@@ -627,6 +663,7 @@ def main() -> None:
                             session_open=True,
                             payload={"trade_symbol": trade_symbol},
                         )
+                        _cloud_sync_outbox(persist)
                     if trade_symbol:
                         _capture_live_klines(
                             klines,
@@ -694,6 +731,7 @@ def main() -> None:
             annotate_klines(klines, result)
             if persist is not None:
                 persist.record_decision(result)
+                _cloud_sync_outbox(persist)
             dt = datetime.datetime.fromtimestamp(
                 int(klines.iloc[-1]["datetime"]) // 1_000_000_000
             )

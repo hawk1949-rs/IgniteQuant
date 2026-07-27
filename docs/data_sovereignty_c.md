@@ -23,7 +23,10 @@ Migration: [`supabase/migrations/20260727010000_product_tenant_outbox.sql`](../s
 
 - 表：`sync_outbox`（SCHEMA_VERSION ≥ 3）
 - 写入：`PersistenceSession` 在 decision / intent / fill / heartbeat 后 best-effort 入队
-- 推送：
+- **自动推送**：`falcon_au_sim` 在启动对账后、每次心跳、每根 K 线收盘后调用 `try_push_outbox`
+  - 需 `.env` 配置 `DATABASE_URL`（推荐 Session pooler）
+  - 可用 `ENABLE_CLOUD_SYNC=0` 关闭
+- 手动补推 / 调试：
 
 ```bash
 export DATABASE_URL='postgresql://…pooler…'
