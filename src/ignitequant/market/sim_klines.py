@@ -43,16 +43,32 @@ def dump_tq_klines_snapshot(
     duration_seconds: int = 300,
     runtime_dir: Path | None = None,
     limit: int = 400,
+    last_price: float | None = None,
+    include_forming: bool = True,
 ) -> Path | None:
-    """Persist completed Tq kline serial bars for cockpit (excludes forming stub)."""
-    if klines is None or len(klines) < 2:
+    """Persist Tq kline serial for cockpit.
+
+    By default includes the in-progress bar so the chart can tick with quotes
+    between 5m closes. Strategy decision code must still use completed bars only.
+    """
+    if klines is None or len(klines) < 1:
         return None
     underlying = str(trade_symbol or "")
-    # iloc[-1] is the in-progress bar; dump only completed bars.
-    completed = klines.iloc[:-1].tail(limit)
-    bars = [_row_to_bar(completed.iloc[i], underlying) for i in range(len(completed))]
+    if include_forming:
+        window = klines.iloc[-limit:] if len(klines) > limit else klines
+    else:
+        if len(klines) < 2:
+            return None
+        window = klines.iloc[:-1].tail(limit)
+    bars = [_row_to_bar(window.iloc[i], underlying) for i in range(len(window))]
     if not bars:
         return None
+    if last_price is not None and last_price > 0:
+        tip = dict(bars[-1])
+        tip["close"] = float(last_price)
+        tip["high"] = max(float(tip["high"]), float(last_price))
+        tip["low"] = min(float(tip["low"]), float(last_price))
+        bars[-1] = tip
     payload = {
         "instance_id": instance_id,
         "signal_symbol": signal_symbol,
@@ -60,8 +76,9 @@ def dump_tq_klines_snapshot(
         "duration_seconds": int(duration_seconds),
         "source": "tqsdk_sim_live",
         "updated_at": datetime.now(timezone.utc).isoformat(),
-        "last_price": float(bars[-1]["close"]),
+        "last_price": float(last_price) if last_price and last_price > 0 else float(bars[-1]["close"]),
         "bars": bars,
+        "include_forming": bool(include_forming),
     }
     path = klines_snapshot_path(instance_id, runtime_dir=runtime_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,5 +125,4 @@ def find_snapshot_for_symbol(
             snap = load_klines_snapshot(iid, runtime_dir=runtime_dir, limit=limit)
             if snap is not None:
                 return snap
-    # Fallback: any snapshot whose signal matches instrument mapping is handled by caller.
     return None

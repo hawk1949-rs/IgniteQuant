@@ -107,6 +107,37 @@ class PersistenceSession:
             self.healthy = False
             raise
 
+    def record_ops_decision(
+        self,
+        *,
+        decision_id: str,
+        symbol: str,
+        applied_action: str,
+        target_before: int,
+        target_after: int,
+        legacy_signal: int = 0,
+        payload: dict[str, Any] | None = None,
+        created_at: str | None = None,
+    ) -> bool:
+        """Persist boot/resync actions so thinking-chain shows real 1→0 closes."""
+        try:
+            ok = self.repo.append_ops_decision(
+                self.instance_id,
+                decision_id=decision_id,
+                symbol=symbol,
+                applied_action=applied_action,
+                target_before=target_before,
+                target_after=target_after,
+                legacy_signal=legacy_signal,
+                payload=payload,
+                created_at=created_at,
+            )
+            self.healthy = True
+            return ok
+        except Exception:
+            self.healthy = False
+            raise
+
     def record_risk(self, decision_id: str, decision: RiskDecision) -> None:
         try:
             self.repo.append_risk_decision(self.instance_id, decision_id, decision)

@@ -366,6 +366,9 @@ export type SimBarsResponse = {
     qty?: number
   }[]
   last_price?: number | null
+  last_price_source?: string | null
+  last_price_as_of?: string | null
+  updated_at?: string | null
   hint?: string | null
   chart_context?: SimChartContext | null
   market_session?: {

@@ -104,7 +104,12 @@ def _persist_state(
     )
 
 
-def _capture_live_klines(klines, *, trade_symbol: str) -> None:
+def _capture_live_klines(
+    klines,
+    *,
+    trade_symbol: str,
+    last_price: float | None = None,
+) -> None:
     """Dump Tq sim kline window for Sim Cockpit (not market_cache)."""
     try:
         from ignitequant.market.sim_klines import dump_tq_klines_snapshot
@@ -116,6 +121,8 @@ def _capture_live_klines(klines, *, trade_symbol: str) -> None:
             trade_symbol=trade_symbol,
             duration_seconds=KLINE_SECONDS,
             runtime_dir=PERSIST_DB.parent,
+            last_price=last_price,
+            include_forming=True,
         )
     except Exception as exc:  # noqa: BLE001 — must not stop trading
         print(f"[K线快照] 写入失败（忽略）: {exc}", flush=True)
@@ -144,6 +151,13 @@ def _try_confirm_fill(
         return None
     if persist is not None:
         persist.record_fill(fill)
+        try:
+            persist.snapshot_position(
+                PositionSnapshot(symbol=str(fill.symbol), net_position=net),
+                source="broker_fill",
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[持仓快照] 成交后写入失败（忽略）: {exc}", flush=True)
     print(
         f"  成交确认 {fill.side} {fill.qty}@{fill.price:.2f} "
         f"intent={fill.intent_id} net={net}",
@@ -232,6 +246,7 @@ def main() -> None:
     pipeline = FalconDecisionPipeline(cfg)
     trade_symbol = ""
     last_saved_bar_id = ""
+    last_seen_kline_ns = 0
     last_fill_atr = 1.0
     last_fill_signal = 0
     executor: TargetPositionExecutor | None = None
@@ -244,6 +259,11 @@ def main() -> None:
         klines = api.get_kline_serial(SIGNAL_SYMBOL, KLINE_SECONDS, data_length=400)
         last_progress_day = None
         last_heartbeat = 0.0
+        last_kline_dump = 0.0
+        try:
+            last_seen_kline_ns = int(klines.iloc[-1]["datetime"])
+        except Exception:
+            last_seen_kline_ns = 0
 
         api.wait_update(deadline=time.time() + 30)
         print(
@@ -261,7 +281,11 @@ def main() -> None:
             executor = TargetPositionExecutor(api, trade_symbol)
             position = api.get_position(trade_symbol)
             print(f"交易合约切换为 {trade_symbol}", flush=True)
-            _capture_live_klines(klines, trade_symbol=trade_symbol)
+            _capture_live_klines(
+                klines,
+                trade_symbol=trade_symbol,
+                last_price=float(getattr(main_quote, "last_price", 0) or 0) or None,
+            )
 
             if persist is not None:
                 recovery = persist.recover(
@@ -318,9 +342,26 @@ def main() -> None:
                         flush=True,
                     )
                     pipeline.force_flat()
+                    decision_flat = f"boot-flat:{trade_symbol}:{net_boot}"
+                    # Thinking-chain must show 1→0 启动补平 (NOT the later HOLD 0→0).
+                    persist.record_ops_decision(
+                        decision_id=decision_flat,
+                        symbol=trade_symbol,
+                        applied_action="BOOT_FLATTEN",
+                        target_before=net_boot,
+                        target_after=0,
+                        legacy_signal=0,
+                        payload={
+                            "applied_action": "BOOT_FLATTEN",
+                            "reason_codes": ["BOOT_FLATTEN_PENDING"],
+                            "note": "策略目标已为0但券商仍有仓，启动时对齐平仓（非止盈/止损）",
+                            "pending_desired": pending0,
+                            "restored_target": 0,
+                        },
+                    )
                     intent_flat = executor.set_target(
                         0,
-                        decision_id="boot-flat",
+                        decision_id=decision_flat,
                         current_net=net_boot,
                         urgency="HIGH",
                         reason_codes=("BOOT_FLATTEN_PENDING",),
@@ -465,7 +506,9 @@ def main() -> None:
                         last_saved_bar_id = result0.bar_id
 
         while True:
-            api.wait_update()
+            # Deadline keeps heartbeats / kline dumps alive during session breaks
+            # when Tq may not push quote updates for a long time.
+            api.wait_update(deadline=time.time() + 2.0)
             now = time.time()
 
             # Confirm async TargetPosTask fills between bars.
@@ -483,7 +526,18 @@ def main() -> None:
                     signal=last_fill_signal,
                 )
 
-            if not api.is_changing(klines.iloc[-1], "datetime"):
+            try:
+                cur_kline_ns = int(klines.iloc[-1]["datetime"])
+            except Exception:
+                cur_kline_ns = 0
+            # Require a *new* bar timestamp — deadline timeouts can leave stale
+            # is_changing flags and would otherwise re-run the same close forever.
+            new_bar = (
+                cur_kline_ns > 0
+                and cur_kline_ns != last_seen_kline_ns
+                and api.is_changing(klines.iloc[-1], "datetime")
+            )
+            if not new_bar:
                 if now - last_heartbeat >= HEARTBEAT_SECONDS:
                     last_heartbeat = now
                     net = int(position.pos) if position is not None else 0
@@ -498,6 +552,33 @@ def main() -> None:
                         f"{'' if pending is None else f' pending={pending}'}",
                         flush=True,
                     )
+                    # Retry aligning broker to strategy target between bars.
+                    if (
+                        executor is not None
+                        and trade_symbol
+                        and int(pipeline.current_target) != net
+                        and (
+                            executor.active_intent is None
+                            or int(executor.active_intent.desired_position)
+                            != int(pipeline.current_target)
+                        )
+                    ):
+                        want = int(pipeline.current_target)
+                        print(
+                            f"[心跳] 仓位脱节补齐 target={want} net={net}",
+                            flush=True,
+                        )
+                        intent_hb = executor.set_target(
+                            want,
+                            decision_id=f"hb-resync:{int(now)}",
+                            current_net=net,
+                            urgency="HIGH",
+                            reason_codes=("TARGET_NET_RESYNC", "HEARTBEAT"),
+                            idempotency_key=f"hb-resync:{trade_symbol}:{want}:{net}",
+                        )
+                        if intent_hb and persist is not None:
+                            persist.record_intent(intent_hb)
+                        pending = want
                     if persist is not None and trade_symbol:
                         _persist_state(
                             persist,
@@ -509,16 +590,51 @@ def main() -> None:
                             config_hash=cfg.config_hash(),
                             last_price=q_px if q_px > 0 else None,
                         )
+                        # Keep cockpit equity / margin / net fresh outside bar closes.
+                        persist.snapshot_position(
+                            PositionSnapshot(symbol=trade_symbol, net_position=net),
+                            source="broker_heartbeat",
+                        )
+                        persist.snapshot_account(
+                            AccountSnapshot(
+                                account_id="tq_kq",
+                                equity=float(account.balance),
+                                available=float(account.available),
+                                margin=float(account.margin),
+                                margin_ratio=float(
+                                    getattr(account, "risk_ratio", 0) or 0
+                                ),
+                            )
+                        )
                     if trade_symbol:
-                        _capture_live_klines(klines, trade_symbol=trade_symbol)
+                        _capture_live_klines(
+                            klines,
+                            trade_symbol=trade_symbol,
+                            last_price=q_px if q_px > 0 else None,
+                        )
+                        last_kline_dump = now
+                elif trade_symbol and q_px > 0 and now - last_kline_dump >= 5:
+                    # Light quote tick for cockpit forming candle between heartbeats.
+                    _capture_live_klines(
+                        klines,
+                        trade_symbol=trade_symbol,
+                        last_price=q_px,
+                    )
+                    last_kline_dump = now
                 continue
 
+            last_seen_kline_ns = cur_kline_ns
             last_heartbeat = now
             underlying = str(getattr(main_quote, "underlying_symbol", "") or "")
             if not underlying:
                 continue
 
-            _capture_live_klines(klines, trade_symbol=underlying)
+            _capture_live_klines(
+                klines,
+                trade_symbol=underlying,
+                last_price=q_px if q_px > 0 else None,
+            )
+            last_kline_dump = now
 
             if underlying != trade_symbol:
                 if executor is not None and (
@@ -611,7 +727,14 @@ def main() -> None:
 
             runtime = persist.runtime if persist is not None else healthy_runtime()
 
-            if result.applied_action not in {"STOP_LOSS", "TAKE_PROFIT", "TARGET"}:
+            # HOLD/COOLDOWN usually skip orders — but if strategy target ≠ broker net
+            # (failed open, missed fill, etc.), keep retrying alignment each bar.
+            hold_like = result.applied_action not in {
+                "STOP_LOSS",
+                "TAKE_PROFIT",
+                "TARGET",
+            }
+            if hold_like and int(pipeline.current_target) == net_pos:
                 _persist_state(
                     persist,
                     pipeline,
@@ -624,6 +747,12 @@ def main() -> None:
                 )
                 last_saved_bar_id = result.bar_id
                 continue
+            if hold_like:
+                print(
+                    f"{dt} 仓位脱节补齐 | target={pipeline.current_target} net={net_pos} "
+                    f"action={result.applied_action}",
+                    flush=True,
+                )
 
             pretrade = apply_pretrade(
                 result,
@@ -649,7 +778,11 @@ def main() -> None:
                         0
                         if result.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}
                         and net_pos != 0
-                        else None
+                        else (
+                            int(pipeline.current_target)
+                            if hold_like and int(pipeline.current_target) != net_pos
+                            else None
+                        )
                     ),
                     last_bar_id=result.bar_id,
                     config_hash=cfg.config_hash(),
@@ -661,7 +794,11 @@ def main() -> None:
             desired = (
                 0
                 if result.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}
-                else int(pretrade.approved_position)
+                else (
+                    int(pipeline.current_target)
+                    if hold_like
+                    else int(pretrade.approved_position)
+                )
             )
             if result.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}:
                 print(
@@ -679,13 +816,20 @@ def main() -> None:
                     flush=True,
                 )
 
-            key = f"{result.bar_id}:{desired}:{result.applied_action}"
+            key = (
+                f"{result.bar_id}:{desired}:"
+                f"{'RESYNC' if hold_like else result.applied_action}"
+            )
             intent = executor.set_target(
                 desired,
                 decision_id=result.bar_id,
                 current_net=net_pos,
-                urgency="HIGH" if result.applied_action != "TARGET" else "NORMAL",
-                reason_codes=pretrade.rule_hits,
+                urgency="HIGH" if result.applied_action != "TARGET" or hold_like else "NORMAL",
+                reason_codes=(
+                    (*pretrade.rule_hits, "TARGET_NET_RESYNC")
+                    if hold_like
+                    else pretrade.rule_hits
+                ),
                 idempotency_key=key,
             )
             if intent is None:

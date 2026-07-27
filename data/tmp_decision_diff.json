@@ -1,0 +1,702 @@
+{
+  "local_decisions": [
+    {
+      "bar_id": "KQ.m@SHFE.au:1735785300000000000",
+      "day": "2025-01-02",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 622.16
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735785900000000000",
+      "day": "2025-01-02",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": 1,
+      "close": 621.66
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735824600000000000",
+      "day": "2025-01-02",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 624.44
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735828500000000000",
+      "day": "2025-01-02",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "close": 625.46
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735830600000000000",
+      "day": "2025-01-02",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 625.52
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735832400000000000",
+      "day": "2025-01-02",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "close": 626.08
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735834200000000000",
+      "day": "2025-01-03",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 626.2
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735834800000000000",
+      "day": "2025-01-03",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "close": 626.7
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736143800000000000",
+      "day": "2025-01-06",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": -1,
+      "net_before": 0,
+      "close": 625.64
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736144700000000000",
+      "day": "2025-01-06",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": -1,
+      "close": 624.92
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736168700000000000",
+      "day": "2025-01-06",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": -1,
+      "net_before": 0,
+      "close": 626.04
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736169000000000000",
+      "day": "2025-01-06",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": -1,
+      "close": 626.68
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736173200000000000",
+      "day": "2025-01-06",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": -1,
+      "net_before": 0,
+      "close": 619.88
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736173500000000000",
+      "day": "2025-01-06",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": -1,
+      "close": 620.8
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736257500000000000",
+      "day": "2025-01-07",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 628.02
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736259600000000000",
+      "day": "2025-01-07",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": 1,
+      "close": 627.38
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736341200000000000",
+      "day": "2025-01-08",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 628.38
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736341500000000000",
+      "day": "2025-01-08",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "close": 628.78
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736343600000000000",
+      "day": "2025-01-08",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 628.4
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736345100000000000",
+      "day": "2025-01-08",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "close": 629.82
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736349600000000000",
+      "day": "2025-01-08",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 630.24
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736351700000000000",
+      "day": "2025-01-08",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": 1,
+      "close": 629.82
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736433600000000000",
+      "day": "2025-01-09",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 633.5
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736434800000000000",
+      "day": "2025-01-09",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": 1,
+      "close": 633.16
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736436300000000000",
+      "day": "2025-01-09",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 632.98
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736438100000000000",
+      "day": "2025-01-09",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": 1,
+      "close": 632.5
+    }
+  ],
+  "tq_decisions": [
+    {
+      "bar_id": "KQ.m@SHFE.au:1735785000000000000",
+      "day": "2025-01-02",
+      "time": "2025-01-02 10:30:00",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "net_after": 0,
+      "close": 622.4,
+      "legacy_signal": 1
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735822800000000000",
+      "day": "2025-01-02",
+      "time": "2025-01-02 21:00:00",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "net_after": 1,
+      "close": 625.48,
+      "legacy_signal": 2
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735824600000000000",
+      "day": "2025-01-02",
+      "time": "2025-01-02 21:30:00",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "net_after": 0,
+      "close": 624.44,
+      "legacy_signal": 1
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735832100000000000",
+      "day": "2025-01-02",
+      "time": "2025-01-02 23:35:00",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "net_after": 1,
+      "close": 625.96,
+      "legacy_signal": 0
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735840500000000000",
+      "day": "2025-01-03",
+      "time": "2025-01-03 01:55:00",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "net_after": 0,
+      "close": 626.98,
+      "legacy_signal": 1
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735866000000000000",
+      "day": "2025-01-03",
+      "time": "2025-01-03 09:00:00",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "net_after": 1,
+      "close": 627.86,
+      "legacy_signal": 2
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736144700000000000",
+      "day": "2025-01-06",
+      "time": "2025-01-06 14:25:00",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": -1,
+      "net_before": 0,
+      "net_after": 0,
+      "close": 624.92,
+      "legacy_signal": -1
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736168400000000000",
+      "day": "2025-01-06",
+      "time": "2025-01-06 21:00:00",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": -1,
+      "net_after": -1,
+      "close": 626.52,
+      "legacy_signal": 0
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736176800000000000",
+      "day": "2025-01-06",
+      "time": "2025-01-06 23:20:00",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": -1,
+      "net_before": 0,
+      "net_after": 0,
+      "close": 623.12,
+      "legacy_signal": -1
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736177100000000000",
+      "day": "2025-01-06",
+      "time": "2025-01-06 23:25:00",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": -1,
+      "net_after": -1,
+      "close": 624.14,
+      "legacy_signal": 0
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736254800000000000",
+      "day": "2025-01-07",
+      "time": "2025-01-07 21:00:00",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "net_after": 0,
+      "close": 627.18,
+      "legacy_signal": 1
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736256000000000000",
+      "day": "2025-01-07",
+      "time": "2025-01-07 21:20:00",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "net_after": 1,
+      "close": 628.22,
+      "legacy_signal": 0
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736258100000000000",
+      "day": "2025-01-07",
+      "time": "2025-01-07 21:55:00",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "net_after": 0,
+      "close": 628.38,
+      "legacy_signal": 1
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736259600000000000",
+      "day": "2025-01-07",
+      "time": "2025-01-07 22:20:00",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": 1,
+      "net_after": 1,
+      "close": 627.38,
+      "legacy_signal": 0
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736341200000000000",
+      "day": "2025-01-08",
+      "time": "2025-01-08 21:00:00",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "net_after": 0,
+      "close": 628.38,
+      "legacy_signal": 2
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736341800000000000",
+      "day": "2025-01-08",
+      "time": "2025-01-08 21:10:00",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "net_after": 1,
+      "close": 629.08,
+      "legacy_signal": 0
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736349600000000000",
+      "day": "2025-01-08",
+      "time": "2025-01-08 23:20:00",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "net_after": 0,
+      "close": 630.24,
+      "legacy_signal": 1
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736357700000000000",
+      "day": "2025-01-09",
+      "time": "2025-01-09 01:35:00",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": 1,
+      "net_after": 1,
+      "close": 629.2,
+      "legacy_signal": 0
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736360400000000000",
+      "day": "2025-01-09",
+      "time": "2025-01-09 02:20:00",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": -1,
+      "net_before": 0,
+      "net_after": 0,
+      "close": 627.84,
+      "legacy_signal": -2
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736384400000000000",
+      "day": "2025-01-09",
+      "time": "2025-01-09 09:00:00",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": -1,
+      "net_after": -1,
+      "close": 629.0,
+      "legacy_signal": 0
+    }
+  ],
+  "local_metrics": {
+    "init_balance": 1000000,
+    "trade_count": 26,
+    "ror": -9.999999999941792e-05,
+    "annual_yield": -0.004555445634259692,
+    "max_drawdown": 0.0017176982842988066,
+    "sharpe": -2.2416918361162526,
+    "winning_rate": 0.46153846153846156,
+    "profit_loss_ratio": 1.2109004739338325,
+    "final_balance": 999900.0000000006,
+    "realized_pnl": 160.0000000006503,
+    "fees_paid": 260.0,
+    "gross_pnl_attr": 160.0000000006503,
+    "fees_attr": 260.0,
+    "net_pnl_attr": -619.9999999988768,
+    "slippage_attr": -519.9999999995271
+  },
+  "tq_metrics": {
+    "init_balance": 1000000,
+    "trade_count": 20,
+    "ror": 0.000700000000000589,
+    "annual_yield": 0.025306153240866047,
+    "max_drawdown": 0.0049122946581278085,
+    "sharpe": 0.027324659911968332,
+    "winning_rate": 0.5,
+    "profit_loss_ratio": 1.1456310679612782,
+    "final_balance": 1000700.0000000006
+  },
+  "only_local": [
+    [
+      "KQ.m@SHFE.au:1735785300000000000",
+      "TARGET",
+      1
+    ],
+    [
+      "KQ.m@SHFE.au:1735785900000000000",
+      "STOP_LOSS",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1735828500000000000",
+      "TAKE_PROFIT",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1735830600000000000",
+      "TARGET",
+      1
+    ],
+    [
+      "KQ.m@SHFE.au:1735832400000000000",
+      "TAKE_PROFIT",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1735834200000000000",
+      "TARGET",
+      1
+    ],
+    [
+      "KQ.m@SHFE.au:1735834800000000000",
+      "TAKE_PROFIT",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736143800000000000",
+      "TARGET",
+      -1
+    ],
+    [
+      "KQ.m@SHFE.au:1736144700000000000",
+      "TAKE_PROFIT",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736168700000000000",
+      "TARGET",
+      -1
+    ],
+    [
+      "KQ.m@SHFE.au:1736169000000000000",
+      "STOP_LOSS",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736173200000000000",
+      "TARGET",
+      -1
+    ],
+    [
+      "KQ.m@SHFE.au:1736173500000000000",
+      "STOP_LOSS",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736257500000000000",
+      "TARGET",
+      1
+    ],
+    [
+      "KQ.m@SHFE.au:1736341500000000000",
+      "TAKE_PROFIT",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736343600000000000",
+      "TARGET",
+      1
+    ],
+    [
+      "KQ.m@SHFE.au:1736345100000000000",
+      "TAKE_PROFIT",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736351700000000000",
+      "STOP_LOSS",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736433600000000000",
+      "TARGET",
+      1
+    ],
+    [
+      "KQ.m@SHFE.au:1736434800000000000",
+      "STOP_LOSS",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736436300000000000",
+      "TARGET",
+      1
+    ],
+    [
+      "KQ.m@SHFE.au:1736438100000000000",
+      "STOP_LOSS",
+      0
+    ]
+  ],
+  "only_tq": [
+    [
+      "KQ.m@SHFE.au:1735785000000000000",
+      "TARGET",
+      1
+    ],
+    [
+      "KQ.m@SHFE.au:1735822800000000000",
+      "TAKE_PROFIT",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1735832100000000000",
+      "TAKE_PROFIT",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1735840500000000000",
+      "TARGET",
+      1
+    ],
+    [
+      "KQ.m@SHFE.au:1735866000000000000",
+      "TAKE_PROFIT",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736144700000000000",
+      "TARGET",
+      -1
+    ],
+    [
+      "KQ.m@SHFE.au:1736168400000000000",
+      "STOP_LOSS",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736176800000000000",
+      "TARGET",
+      -1
+    ],
+    [
+      "KQ.m@SHFE.au:1736177100000000000",
+      "STOP_LOSS",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736254800000000000",
+      "TARGET",
+      1
+    ],
+    [
+      "KQ.m@SHFE.au:1736256000000000000",
+      "TAKE_PROFIT",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736258100000000000",
+      "TARGET",
+      1
+    ],
+    [
+      "KQ.m@SHFE.au:1736341800000000000",
+      "TAKE_PROFIT",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736357700000000000",
+      "STOP_LOSS",
+      0
+    ],
+    [
+      "KQ.m@SHFE.au:1736360400000000000",
+      "TARGET",
+      -1
+    ],
+    [
+      "KQ.m@SHFE.au:1736384400000000000",
+      "STOP_LOSS",
+      0
+    ]
+  ]
+}

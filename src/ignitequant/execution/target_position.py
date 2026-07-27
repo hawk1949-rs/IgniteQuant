@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import itertools
 import math
 import uuid
 from dataclasses import dataclass, field
@@ -49,7 +48,6 @@ class TargetPositionExecutor:
     align_tq_kline: bool = True
     price_tick: float = 0.02
     _task: Any = None
-    _id_seq: itertools.count = field(default_factory=lambda: itertools.count(1))
     _seen_keys: set[str] = field(default_factory=set)
     _pinned_last: float | None = None
 
@@ -129,8 +127,10 @@ class TargetPositionExecutor:
             self.events.append(ExecutorEvent("duplicate_suppressed", {"key": key}))
             return self.active_intent
 
+        # UUID avoids UNIQUE(instance_id, intent_id) collisions after process restart
+        # (sequential intent-1/2 reused and silently dropped by INSERT OR IGNORE).
         intent = OrderIntent(
-            intent_id=f"intent-{next(self._id_seq)}",
+            intent_id=f"intent-{uuid.uuid4().hex[:12]}",
             decision_id=decision_id,
             symbol=self.symbol,
             current_position=current_net,

@@ -20,10 +20,11 @@ export const SHORT_BIAS_LABEL: Record<string, string> = {
 }
 
 export const ACTION_LABEL: Record<string, string> = {
-  HOLD: '持有观望',
+  HOLD: '维持目标',
   TARGET: '调仓',
   STOP_LOSS: '止损',
   TAKE_PROFIT: '止盈',
+  BOOT_FLATTEN: '启动补平',
   COOLDOWN_HOLD: '冷却观望',
   NONE: '无动作',
 }

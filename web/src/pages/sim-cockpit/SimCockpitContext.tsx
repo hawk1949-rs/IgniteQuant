@@ -61,14 +61,9 @@ type Ctx = {
 
 const SimCockpitContext = createContext<Ctx | null>(null)
 
-/** Align refresh to next 5-minute K-line boundary (plus small buffer). */
-const BOOTSTRAP_POLL_MS = 15_000
-
-function msUntilNextFiveMinuteBoundary(now = Date.now()): number {
-  const period = 5 * 60 * 1000
-  const next = Math.ceil((now + 1000) / period) * period
-  return Math.max(5_000, next - now + 2_000)
-}
+/** Align live cockpit refresh; decisions still only appear on 5m bar close. */
+const BOOTSTRAP_POLL_MS = 5_000
+const LIVE_POLL_MS = 5_000
 
 export function SimCockpitProvider({ children }: { children: ReactNode }) {
   const [catalog, setCatalog] = useState<SimCatalog | null>(null)
@@ -182,8 +177,6 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       }
 
       const marketBarsPromise = fetchSimMarketBars(symbolId, 400).catch(() => null)
-      // Clear previous overseas immediately so remount gets fresh fetch (no stale rb→au blank).
-      setOverseas(null)
       const overseasPromise = fetchSimOverseasBars(symbolId, 400).catch(() => null)
 
       const settled = await Promise.allSettled([
@@ -225,15 +218,32 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       else setFills([])
 
       if (overseasR.status === 'fulfilled' && overseasR.value) {
-        setOverseas(overseasR.value)
-      } else {
-        setOverseas({
-          symbol_id: symbolId,
-          supported: false,
-          bars: [],
-          last_price: null,
-          hint: '外盘对照暂不可用',
+        const next = overseasR.value
+        setOverseas((prev) => {
+          if (
+            prev &&
+            prev.symbol_id === next.symbol_id &&
+            prev.bars.length === next.bars.length &&
+            prev.last_price === next.last_price &&
+            prev.bars[prev.bars.length - 1]?.time === next.bars[next.bars.length - 1]?.time &&
+            prev.bars[prev.bars.length - 1]?.close === next.bars[next.bars.length - 1]?.close
+          ) {
+            return prev
+          }
+          return next
         })
+      } else {
+        setOverseas((prev) =>
+          prev?.symbol_id === symbolId
+            ? prev
+            : {
+                symbol_id: symbolId,
+                supported: false,
+                bars: [],
+                last_price: null,
+                hint: '外盘对照暂不可用',
+              },
+        )
       }
 
       const market =
@@ -241,40 +251,76 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       const sessionBars = barR.status === 'fulfilled' ? barR.value : null
       const livePrice =
         sumR.status === 'fulfilled' ? sumR.value.last_price ?? null : null
+      const launcherSymbolId =
+        cat?.launchers?.find((l) => l.instance_id === id)?.symbol_id ?? null
+      // Session klines belong to the running sim (e.g. au). Never paint them for rb/ag/…
+      const sessionMatchesSymbol = launcherSymbolId != null && launcherSymbolId === symbolId
 
-      // Prefer Tq live session snapshot (with markers); never fall back to stale cache.
-      if (sessionBars?.bars?.length) {
-        setBars({
-          ...sessionBars,
-          last_price: livePrice ?? sessionBars.last_price,
-        })
-      } else if (market?.bars?.length) {
+      const withLiveTip = <T extends { bars: { time: number; open: number; high: number; low: number; close: number }[]; last_price?: number | null }>(
+        src: T,
+        price: number | null,
+      ): T => {
+        if (price == null || !src.bars.length) {
+          return { ...src, last_price: price ?? src.last_price }
+        }
+        const bars = src.bars.slice()
+        const tip = { ...bars[bars.length - 1] }
+        tip.close = price
+        tip.high = Math.max(tip.high, price)
+        tip.low = Math.min(tip.low, price)
+        bars[bars.length - 1] = tip
+        return { ...src, bars, last_price: price }
+      }
+
+      if (sessionMatchesSymbol && sessionBars?.bars?.length) {
+        setBars(withLiveTip(sessionBars, livePrice))
+      } else if (market?.bars?.length && market.symbol_id === symbolId) {
         setBars({
           instance_id: id,
           signal_symbol: market.signal_symbol,
           trade_symbol: market.trade_symbol,
           bars: market.bars,
           markers: [],
-          last_price: livePrice ?? market.last_price,
-          hint: market.hint,
+          last_price: market.last_price,
+          updated_at: market.updated_at,
+          hint:
+            market.hint ||
+            (sessionMatchesSymbol
+              ? undefined
+              : `当前运行会话是 ${launcherSymbolId ?? '其他品种'}；以下为 ${symbolId} 的行情快照（非本会话成交标记）。`),
+          chart_context: market.chart_context,
+          market_session: market.market_session,
         })
-      } else if (sessionBars) {
-        setBars({
-          ...sessionBars,
-          last_price: livePrice ?? sessionBars.last_price,
-        })
-      } else if (market) {
+      } else if (market && market.symbol_id === symbolId) {
         setBars({
           instance_id: id,
           signal_symbol: market.signal_symbol,
           trade_symbol: market.trade_symbol,
           bars: [],
           markers: [],
-          last_price: livePrice ?? market.last_price,
-          hint: market.hint,
+          last_price: market.last_price,
+          updated_at: market.updated_at,
+          hint:
+            market.hint ||
+            `暂无 ${symbolId} 的天勤模拟 K 线。当前可启动会话仅覆盖 ${launcherSymbolId ?? '已配置品种'}。`,
+          chart_context: market.chart_context,
+          market_session: market.market_session,
+        })
+      } else if (sessionMatchesSymbol && sessionBars) {
+        setBars({
+          ...sessionBars,
+          last_price: livePrice ?? sessionBars.last_price,
         })
       } else {
-        setBars(null)
+        setBars({
+          instance_id: id,
+          signal_symbol: '',
+          trade_symbol: '',
+          bars: [],
+          markers: [],
+          last_price: null,
+          hint: `暂无 ${symbolId} 内盘 K 线。模拟盘会话「${id}」对应品种为 ${launcherSymbolId ?? '未知'}，切换品种不会自动换成该会话行情。`,
+        })
       }
 
       setReplay(null)
@@ -284,6 +330,12 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       setLoading(false)
     }
   }, [instanceId, replayAt, symbolId])
+
+  useEffect(() => {
+    // Clear charts immediately on symbol switch to avoid showing the previous product.
+    setOverseas(null)
+    setBars(null)
+  }, [symbolId])
 
   useEffect(() => {
     void refresh()
@@ -298,12 +350,12 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       timeoutId = window.setTimeout(() => {
         if (cancelled) return
         void refresh().finally(() => {
-          if (!cancelled) schedule(msUntilNextFiveMinuteBoundary())
+          if (!cancelled) schedule(LIVE_POLL_MS)
         })
       }, delay)
     }
 
-    // First auto refresh after bootstrap window, then on 5m boundaries.
+    // Keep account/position/fills fresh; bar decisions still arrive on 5m closes.
     schedule(BOOTSTRAP_POLL_MS)
 
     return () => {

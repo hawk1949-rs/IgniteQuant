@@ -320,13 +320,13 @@ def test_sim_live_klines_snapshot(client: TestClient, runtime_db: Path) -> None:
     )
 
     market = client.get("/api/sim/market/bars", params={"symbol_id": "au"}).json()
-    assert len(market["bars"]) == 3  # forming stub excluded
-    assert market["last_price"] == pytest.approx(880.25)
+    assert len(market["bars"]) == 4  # includes forming stub for cockpit
+    assert market["last_price"] == pytest.approx(880.35)
     assert market["source"] == "tqsdk_sim_live"
     assert market["trade_symbol"] == "SHFE.au2608"
 
     session = client.get("/api/sim/sessions/falcon_au_sim/bars").json()
-    assert len(session["bars"]) == 3
+    assert len(session["bars"]) == 4
     assert session["source"] == "tqsdk_sim_live"
     # Prefer decision/sim live quote (fixture close=880) over snapshot tip.
     assert session["last_price"] == pytest.approx(880.0)

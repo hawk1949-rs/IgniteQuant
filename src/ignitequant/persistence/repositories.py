@@ -73,6 +73,20 @@ class TradingRepository(Protocol):
 
     def append_decision(self, instance_id: str, result: PipelineResult) -> None: ...
 
+    def append_ops_decision(
+        self,
+        instance_id: str,
+        *,
+        decision_id: str,
+        symbol: str,
+        applied_action: str,
+        target_before: int,
+        target_after: int,
+        legacy_signal: int = 0,
+        payload: Mapping[str, Any] | None = None,
+        created_at: str | None = None,
+    ) -> bool: ...
+
     def append_risk_decision(
         self, instance_id: str, decision_id: str, decision: RiskDecision
     ) -> None: ...
@@ -209,6 +223,43 @@ class SqliteTradingRepository:
             ),
         )
         self._conn.commit()
+
+    def append_ops_decision(
+        self,
+        instance_id: str,
+        *,
+        decision_id: str,
+        symbol: str,
+        applied_action: str,
+        target_before: int,
+        target_after: int,
+        legacy_signal: int = 0,
+        payload: Mapping[str, Any] | None = None,
+        created_at: str | None = None,
+    ) -> bool:
+        """Record an operational decision (boot flatten / resync) for cockpit audit."""
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO decision_event(
+                instance_id, decision_id, bar_id, symbol, applied_action,
+                target_before, target_after, legacy_signal, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                instance_id,
+                decision_id,
+                decision_id,
+                symbol,
+                applied_action,
+                int(target_before),
+                int(target_after),
+                int(legacy_signal),
+                _dumps(dict(payload or {})),
+                created_at or _utc_now(),
+            ),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
 
     def append_risk_decision(
         self, instance_id: str, decision_id: str, decision: RiskDecision

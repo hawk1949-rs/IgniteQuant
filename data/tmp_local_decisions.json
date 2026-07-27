@@ -1,0 +1,855 @@
+{
+  "strategy_id": "falcon_v2",
+  "engine": "local",
+  "signal_symbol": "KQ.m@SHFE.au",
+  "trade_symbol": "SHFE.au2502",
+  "start": "2025-01-02",
+  "end": "2025-01-10",
+  "init_balance": 1000000,
+  "elapsed_sec": 2.86,
+  "metrics": {
+    "init_balance": 1000000,
+    "trade_count": 26,
+    "ror": -9.999999999941792e-05,
+    "annual_yield": -0.004555445634259692,
+    "max_drawdown": 0.0017176982842988066,
+    "sharpe": -2.2416918361162526,
+    "winning_rate": 0.46153846153846156,
+    "profit_loss_ratio": 1.2109004739338325,
+    "final_balance": 999900.0000000006,
+    "realized_pnl": 160.0000000006503,
+    "fees_paid": 260.0,
+    "gross_pnl_attr": 160.0000000006503,
+    "fees_attr": 260.0,
+    "net_pnl_attr": -619.9999999988768,
+    "slippage_attr": -519.9999999995271
+  },
+  "config_version": "falcon_legacy_v1",
+  "config_hash": "a3ae88b23279f15793671770fb91515d2eb0a71779191de227e9392352f38087",
+  "entry_mode": "fill_confirmed",
+  "code_version": "0.1.0",
+  "cost_model": {
+    "version": "falcon_cost_v1_tq_kline",
+    "multiplier": 1000.0,
+    "open_fee_per_lot": 10.0,
+    "close_fee_per_lot": 10.0,
+    "close_today_fee_per_lot": 10.0,
+    "slippage_ticks": 1.0,
+    "tick_size": 0.02,
+    "roll_slippage_ticks": 1.0,
+    "latency_bars": 0,
+    "partial_fill_ratio": 1.0,
+    "align_mode": "tq_kline",
+    "config_hash": "873db3593b548ff0"
+  },
+  "attribution": {
+    "gross_pnl": 160.0,
+    "fees": 260.0,
+    "slippage_pnl": -520.0,
+    "roll_pnl": 0.0,
+    "execution_pnl": -520.0,
+    "alpha_pnl": -100.0,
+    "net_pnl": -620.0,
+    "trade_count": 26,
+    "long_pnl": 1120.0,
+    "short_pnl": -960.0,
+    "by_regime": {
+      "TREND_UP": 1920.0,
+      "TREND_DOWN": -330.0,
+      "RANGE": -1690.0
+    },
+    "by_month": {
+      "2025-01": -100.0
+    },
+    "cost_model_version": "falcon_cost_v1_tq_kline",
+    "cost_model_hash": "873db3593b548ff0",
+    "notes": [
+      "FIFO inventory; model fees when broker fee is 0"
+    ]
+  },
+  "stress": {
+    "rows": [
+      {
+        "scenario": {
+          "name": "base",
+          "fee_mult": 1.0,
+          "slip_mult": 1.0
+        },
+        "cost_model": {
+          "version": "falcon_cost_v1_tq_kline_stress",
+          "multiplier": 1000.0,
+          "open_fee_per_lot": 10.0,
+          "close_fee_per_lot": 10.0,
+          "close_today_fee_per_lot": 10.0,
+          "slippage_ticks": 1.0,
+          "tick_size": 0.02,
+          "roll_slippage_ticks": 1.0,
+          "latency_bars": 0,
+          "partial_fill_ratio": 1.0,
+          "align_mode": "tq_kline",
+          "config_hash": "7878d50e8ccc7eef"
+        },
+        "attribution": {
+          "gross_pnl": 160.0,
+          "fees": 260.0,
+          "slippage_pnl": -520.0,
+          "roll_pnl": 0.0,
+          "execution_pnl": -520.0,
+          "alpha_pnl": -100.0,
+          "net_pnl": -620.0,
+          "trade_count": 26,
+          "long_pnl": 1120.0,
+          "short_pnl": -960.0,
+          "by_regime": {
+            "TREND_UP": 1920.0,
+            "TREND_DOWN": -330.0,
+            "RANGE": -1690.0
+          },
+          "by_month": {
+            "2025-01": -100.0
+          },
+          "cost_model_version": "falcon_cost_v1_tq_kline_stress",
+          "cost_model_hash": "7878d50e8ccc7eef",
+          "notes": [
+            "FIFO inventory; model fees when broker fee is 0"
+          ]
+        },
+        "net_pnl": -619.9999999988768,
+        "survives": false
+      },
+      {
+        "scenario": {
+          "name": "fee_x2",
+          "fee_mult": 2.0,
+          "slip_mult": 1.0
+        },
+        "cost_model": {
+          "version": "falcon_cost_v1_tq_kline_stress",
+          "multiplier": 1000.0,
+          "open_fee_per_lot": 20.0,
+          "close_fee_per_lot": 20.0,
+          "close_today_fee_per_lot": 20.0,
+          "slippage_ticks": 1.0,
+          "tick_size": 0.02,
+          "roll_slippage_ticks": 1.0,
+          "latency_bars": 0,
+          "partial_fill_ratio": 1.0,
+          "align_mode": "tq_kline",
+          "config_hash": "550adb1c9e1e84ed"
+        },
+        "attribution": {
+          "gross_pnl": 160.0,
+          "fees": 260.0,
+          "slippage_pnl": -520.0,
+          "roll_pnl": 0.0,
+          "execution_pnl": -520.0,
+          "alpha_pnl": -100.0,
+          "net_pnl": -620.0,
+          "trade_count": 26,
+          "long_pnl": 1120.0,
+          "short_pnl": -960.0,
+          "by_regime": {
+            "TREND_UP": 1920.0,
+            "TREND_DOWN": -330.0,
+            "RANGE": -1690.0
+          },
+          "by_month": {
+            "2025-01": -100.0
+          },
+          "cost_model_version": "falcon_cost_v1_tq_kline_stress",
+          "cost_model_hash": "550adb1c9e1e84ed",
+          "notes": [
+            "FIFO inventory; model fees when broker fee is 0"
+          ]
+        },
+        "net_pnl": -619.9999999988768,
+        "survives": false
+      },
+      {
+        "scenario": {
+          "name": "slip_x2",
+          "fee_mult": 1.0,
+          "slip_mult": 2.0
+        },
+        "cost_model": {
+          "version": "falcon_cost_v1_tq_kline_stress",
+          "multiplier": 1000.0,
+          "open_fee_per_lot": 10.0,
+          "close_fee_per_lot": 10.0,
+          "close_today_fee_per_lot": 10.0,
+          "slippage_ticks": 2.0,
+          "tick_size": 0.02,
+          "roll_slippage_ticks": 2.0,
+          "latency_bars": 0,
+          "partial_fill_ratio": 1.0,
+          "align_mode": "tq_kline",
+          "config_hash": "8eea0e5b10202519"
+        },
+        "attribution": {
+          "gross_pnl": 160.0,
+          "fees": 260.0,
+          "slippage_pnl": -520.0,
+          "roll_pnl": 0.0,
+          "execution_pnl": -520.0,
+          "alpha_pnl": -100.0,
+          "net_pnl": -620.0,
+          "trade_count": 26,
+          "long_pnl": 1120.0,
+          "short_pnl": -960.0,
+          "by_regime": {
+            "TREND_UP": 1920.0,
+            "TREND_DOWN": -330.0,
+            "RANGE": -1690.0
+          },
+          "by_month": {
+            "2025-01": -100.0
+          },
+          "cost_model_version": "falcon_cost_v1_tq_kline_stress",
+          "cost_model_hash": "8eea0e5b10202519",
+          "notes": [
+            "FIFO inventory; model fees when broker fee is 0"
+          ]
+        },
+        "net_pnl": -619.9999999988768,
+        "survives": false
+      },
+      {
+        "scenario": {
+          "name": "fee_slip_x2",
+          "fee_mult": 2.0,
+          "slip_mult": 2.0
+        },
+        "cost_model": {
+          "version": "falcon_cost_v1_tq_kline_stress",
+          "multiplier": 1000.0,
+          "open_fee_per_lot": 20.0,
+          "close_fee_per_lot": 20.0,
+          "close_today_fee_per_lot": 20.0,
+          "slippage_ticks": 2.0,
+          "tick_size": 0.02,
+          "roll_slippage_ticks": 2.0,
+          "latency_bars": 0,
+          "partial_fill_ratio": 1.0,
+          "align_mode": "tq_kline",
+          "config_hash": "ce1f4620d7996499"
+        },
+        "attribution": {
+          "gross_pnl": 160.0,
+          "fees": 260.0,
+          "slippage_pnl": -520.0,
+          "roll_pnl": 0.0,
+          "execution_pnl": -520.0,
+          "alpha_pnl": -100.0,
+          "net_pnl": -620.0,
+          "trade_count": 26,
+          "long_pnl": 1120.0,
+          "short_pnl": -960.0,
+          "by_regime": {
+            "TREND_UP": 1920.0,
+            "TREND_DOWN": -330.0,
+            "RANGE": -1690.0
+          },
+          "by_month": {
+            "2025-01": -100.0
+          },
+          "cost_model_version": "falcon_cost_v1_tq_kline_stress",
+          "cost_model_hash": "ce1f4620d7996499",
+          "notes": [
+            "FIFO inventory; model fees when broker fee is 0"
+          ]
+        },
+        "net_pnl": -619.9999999988768,
+        "survives": false
+      },
+      {
+        "scenario": {
+          "name": "fee_x3_slip_x3",
+          "fee_mult": 3.0,
+          "slip_mult": 3.0
+        },
+        "cost_model": {
+          "version": "falcon_cost_v1_tq_kline_stress",
+          "multiplier": 1000.0,
+          "open_fee_per_lot": 30.0,
+          "close_fee_per_lot": 30.0,
+          "close_today_fee_per_lot": 30.0,
+          "slippage_ticks": 3.0,
+          "tick_size": 0.02,
+          "roll_slippage_ticks": 3.0,
+          "latency_bars": 0,
+          "partial_fill_ratio": 1.0,
+          "align_mode": "tq_kline",
+          "config_hash": "02ff29cf9c9856db"
+        },
+        "attribution": {
+          "gross_pnl": 160.0,
+          "fees": 260.0,
+          "slippage_pnl": -520.0,
+          "roll_pnl": 0.0,
+          "execution_pnl": -520.0,
+          "alpha_pnl": -100.0,
+          "net_pnl": -620.0,
+          "trade_count": 26,
+          "long_pnl": 1120.0,
+          "short_pnl": -960.0,
+          "by_regime": {
+            "TREND_UP": 1920.0,
+            "TREND_DOWN": -330.0,
+            "RANGE": -1690.0
+          },
+          "by_month": {
+            "2025-01": -100.0
+          },
+          "cost_model_version": "falcon_cost_v1_tq_kline_stress",
+          "cost_model_hash": "02ff29cf9c9856db",
+          "notes": [
+            "FIFO inventory; model fees when broker fee is 0"
+          ]
+        },
+        "net_pnl": -619.9999999988768,
+        "survives": false
+      }
+    ],
+    "summary": {
+      "scenarios": 5,
+      "all_survive": false,
+      "worst_net": -619.9999999988768,
+      "best_net": -619.9999999988768,
+      "base_net": -619.9999999988768
+    }
+  },
+  "reproducibility": {
+    "config_hash": "a3ae88b23279f15793671770fb91515d2eb0a71779191de227e9392352f38087",
+    "cost_model_hash": "873db3593b548ff0",
+    "kline_seconds": 300,
+    "data_length": 400,
+    "entry_mode": "fill_confirmed",
+    "engine": "local",
+    "align_mode": "tq_kline",
+    "bars": 1147
+  },
+  "decisions": [
+    {
+      "bar_id": "KQ.m@SHFE.au:1735785300000000000",
+      "day": "2025-01-02",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 622.16
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735785900000000000",
+      "day": "2025-01-02",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": 1,
+      "close": 621.66
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735824600000000000",
+      "day": "2025-01-02",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 624.44
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735828500000000000",
+      "day": "2025-01-02",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "close": 625.46
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735830600000000000",
+      "day": "2025-01-02",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 625.52
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735832400000000000",
+      "day": "2025-01-02",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "close": 626.08
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735834200000000000",
+      "day": "2025-01-03",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 626.2
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1735834800000000000",
+      "day": "2025-01-03",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "close": 626.7
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736143800000000000",
+      "day": "2025-01-06",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": -1,
+      "net_before": 0,
+      "close": 625.64
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736144700000000000",
+      "day": "2025-01-06",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": -1,
+      "close": 624.92
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736168700000000000",
+      "day": "2025-01-06",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": -1,
+      "net_before": 0,
+      "close": 626.04
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736169000000000000",
+      "day": "2025-01-06",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": -1,
+      "close": 626.68
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736173200000000000",
+      "day": "2025-01-06",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": -1,
+      "net_before": 0,
+      "close": 619.88
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736173500000000000",
+      "day": "2025-01-06",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": -1,
+      "close": 620.8
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736257500000000000",
+      "day": "2025-01-07",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 628.02
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736259600000000000",
+      "day": "2025-01-07",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": 1,
+      "close": 627.38
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736341200000000000",
+      "day": "2025-01-08",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 628.38
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736341500000000000",
+      "day": "2025-01-08",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "close": 628.78
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736343600000000000",
+      "day": "2025-01-08",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 628.4
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736345100000000000",
+      "day": "2025-01-08",
+      "symbol": "SHFE.au2502",
+      "action": "TAKE_PROFIT",
+      "desired": 0,
+      "net_before": 1,
+      "close": 629.82
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736349600000000000",
+      "day": "2025-01-08",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 630.24
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736351700000000000",
+      "day": "2025-01-08",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": 1,
+      "close": 629.82
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736433600000000000",
+      "day": "2025-01-09",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 633.5
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736434800000000000",
+      "day": "2025-01-09",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": 1,
+      "close": 633.16
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736436300000000000",
+      "day": "2025-01-09",
+      "symbol": "SHFE.au2502",
+      "action": "TARGET",
+      "desired": 1,
+      "net_before": 0,
+      "close": 632.98
+    },
+    {
+      "bar_id": "KQ.m@SHFE.au:1736438100000000000",
+      "day": "2025-01-09",
+      "symbol": "SHFE.au2502",
+      "action": "STOP_LOSS",
+      "desired": 0,
+      "net_before": 1,
+      "close": 632.5
+    }
+  ],
+  "fills": [
+    {
+      "trade_id": "L1",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "OPEN",
+      "price": 622.18,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 622.16,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L2",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "CLOSE",
+      "price": 621.64,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 621.66,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L3",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "OPEN",
+      "price": 624.46,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 624.44,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L4",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "CLOSE",
+      "price": 625.44,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 625.46,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L5",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "OPEN",
+      "price": 625.54,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 625.52,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L6",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "CLOSE",
+      "price": 626.0600000000001,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 626.08,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L7",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "OPEN",
+      "price": 626.22,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 626.2,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L8",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "CLOSE",
+      "price": 626.6800000000001,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 626.7,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L9",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "OPEN",
+      "price": 625.62,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 625.64,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L10",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "CLOSE",
+      "price": 624.9399999999999,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 624.92,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L11",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "OPEN",
+      "price": 626.02,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 626.04,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L12",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "CLOSE",
+      "price": 626.6999999999999,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 626.68,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L13",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "OPEN",
+      "price": 619.86,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 619.88,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L14",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "CLOSE",
+      "price": 620.8199999999999,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 620.8,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L15",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "OPEN",
+      "price": 628.04,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 628.02,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L16",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "CLOSE",
+      "price": 627.36,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 627.38,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L17",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "OPEN",
+      "price": 628.4,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 628.38,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L18",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "CLOSE",
+      "price": 628.76,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 628.78,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L19",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "OPEN",
+      "price": 628.42,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 628.4,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L20",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "CLOSE",
+      "price": 629.8000000000001,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 629.82,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L21",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "OPEN",
+      "price": 630.26,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 630.24,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L22",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "CLOSE",
+      "price": 629.8000000000001,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 629.82,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L23",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "OPEN",
+      "price": 633.52,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 633.5,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L24",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "CLOSE",
+      "price": 633.14,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 633.16,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L25",
+      "symbol": "SHFE.au2502",
+      "side": "BUY",
+      "offset": "OPEN",
+      "price": 633.0,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 632.98,
+      "is_roll": false
+    },
+    {
+      "trade_id": "L26",
+      "symbol": "SHFE.au2502",
+      "side": "SELL",
+      "offset": "CLOSE",
+      "price": 632.48,
+      "qty": 1,
+      "fee": 10.0,
+      "signal_price": 632.5,
+      "is_roll": false
+    }
+  ]
+}

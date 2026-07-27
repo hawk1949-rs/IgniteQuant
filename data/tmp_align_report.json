@@ -1,0 +1,117 @@
+{
+  "symbol": "KQ.m@SHFE.au",
+  "start": "2025-01-02",
+  "end": "2025-01-10",
+  "local_metrics": {
+    "init_balance": 1000000,
+    "trade_count": 20,
+    "ror": 0.000800000000000582,
+    "annual_yield": 0.03718508839167889,
+    "max_drawdown": 0.0044762757385850335,
+    "sharpe": 0.025157782867683942,
+    "winning_rate": 0.5,
+    "profit_loss_ratio": 1.1661129568107325,
+    "final_balance": 1000800.0000000006,
+    "realized_pnl": 1000.0000000005684,
+    "fees_paid": 200.0,
+    "gross_pnl_attr": 1000.0000000005684,
+    "fees_attr": 200.0,
+    "net_pnl_attr": 400.00000000093223,
+    "slippage_attr": -399.9999999996362
+  },
+  "tq_metrics": {
+    "init_balance": 1000000,
+    "trade_count": 20,
+    "ror": 0.000700000000000589,
+    "annual_yield": 0.025306153240866047,
+    "max_drawdown": 0.0049122946581278085,
+    "sharpe": 0.027324659911968332,
+    "winning_rate": 0.5,
+    "profit_loss_ratio": 1.1456310679612782,
+    "final_balance": 1000700.0000000006,
+    "gross_pnl_attr": 0.0,
+    "fees_attr": 0.0,
+    "net_pnl_attr": 0.0,
+    "slippage_attr": 0.0
+  },
+  "delta": {
+    "ror": {
+      "local": 0.000800000000000582,
+      "tq": 0.000700000000000589,
+      "abs_diff": 9.9999999999993e-05,
+      "rel_diff": 0.14285714285701265
+    },
+    "annual_yield": {
+      "local": 0.03718508839167889,
+      "tq": 0.025306153240866047,
+      "abs_diff": 0.011878935150812842,
+      "rel_diff": 0.46940896301971147
+    },
+    "max_drawdown": {
+      "local": 0.0044762757385850335,
+      "tq": 0.0049122946581278085,
+      "abs_diff": 0.0004360189195427751,
+      "rel_diff": 0.08876074215567357
+    },
+    "sharpe": {
+      "local": 0.025157782867683942,
+      "tq": 0.027324659911968332,
+      "abs_diff": 0.0021668770442843897,
+      "rel_diff": 0.0793011532903027
+    },
+    "final_balance": {
+      "local": 1000800.0000000006,
+      "tq": 1000700.0000000006,
+      "abs_diff": 100.0,
+      "rel_diff": 9.993004896572393e-05
+    },
+    "trade_count": {
+      "local": 20,
+      "tq": 20,
+      "abs_diff": 0.0,
+      "rel_diff": 0.0
+    },
+    "winning_rate": {
+      "local": 0.5,
+      "tq": 0.5,
+      "abs_diff": 0.0,
+      "rel_diff": 0.0
+    },
+    "profit_loss_ratio": {
+      "local": 1.1661129568107325,
+      "tq": 1.1456310679612782,
+      "abs_diff": 0.020481888849454233,
+      "rel_diff": 0.01787825891096252
+    }
+  },
+  "within_tolerances": true,
+  "failures": [],
+  "local_cost": {
+    "version": "falcon_cost_v1_tq_kline",
+    "multiplier": 1000.0,
+    "open_fee_per_lot": 10.0,
+    "close_fee_per_lot": 10.0,
+    "close_today_fee_per_lot": 10.0,
+    "slippage_ticks": 1.0,
+    "tick_size": 0.02,
+    "roll_slippage_ticks": 1.0,
+    "latency_bars": 0,
+    "partial_fill_ratio": 1.0,
+    "align_mode": "tq_kline",
+    "config_hash": "873db3593b548ff0"
+  },
+  "tq_cost": {
+    "version": "falcon_cost_v1_tq_kline",
+    "multiplier": 1000.0,
+    "open_fee_per_lot": 10.0,
+    "close_fee_per_lot": 10.0,
+    "close_today_fee_per_lot": 10.0,
+    "slippage_ticks": 1.0,
+    "tick_size": 0.02,
+    "roll_slippage_ticks": 1.0,
+    "latency_bars": 0,
+    "partial_fill_ratio": 1.0,
+    "align_mode": "tq_kline",
+    "config_hash": "873db3593b548ff0"
+  }
+}

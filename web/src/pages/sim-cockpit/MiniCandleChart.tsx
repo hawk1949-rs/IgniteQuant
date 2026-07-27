@@ -48,26 +48,40 @@ function timeToLocal(unixSec: number): number {
   )
 }
 
-function applyChartData(
-  series: ISeriesApi<'Candlestick'>,
-  chart: IChartApi,
-  markersApi: ISeriesMarkersPluginApi<Time>,
-  bars: MiniBar[],
-  markers: MiniMarker[],
-) {
-  if (!bars.length) {
-    series.setData([])
-    markersApi.setMarkers([])
-    return
-  }
-  const data: CandlestickData<Time>[] = bars.map((b) => ({
+function toCandle(b: MiniBar): CandlestickData<Time> {
+  return {
     time: timeToLocal(b.time) as Time,
     open: b.open,
     high: b.high,
     low: b.low,
     close: b.close,
-  }))
-  series.setData(data)
+  }
+}
+
+function markersEqual(a: MiniMarker[], b: MiniMarker[]): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]
+    const y = b[i]
+    if (
+      x.time !== y.time ||
+      x.color !== y.color ||
+      x.text !== y.text ||
+      x.position !== y.position ||
+      x.shape !== y.shape
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+function applyMarkers(
+  markersApi: ISeriesMarkersPluginApi<Time>,
+  data: CandlestickData<Time>[],
+  markers: MiniMarker[],
+) {
   const barTimes = new Set(data.map((d) => d.time))
   const snapped = markers
     .map((m) => {
@@ -99,7 +113,26 @@ function applyChartData(
     text: string
   }[]
   markersApi.setMarkers(snapped)
-  chart.timeScale().fitContent()
+}
+
+type AppliedSnapshot = {
+  len: number
+  firstTime: number
+  lastTime: number
+  lastClose: number
+  lastHigh: number
+  lastLow: number
+  lastOpen: number
+}
+
+function sameLastBar(prev: AppliedSnapshot, last: MiniBar): boolean {
+  return (
+    prev.lastTime === last.time &&
+    prev.lastClose === last.close &&
+    prev.lastHigh === last.high &&
+    prev.lastLow === last.low &&
+    prev.lastOpen === last.open
+  )
 }
 
 export function MiniCandleChart({ bars, markers = [], height = 280 }: Props) {
@@ -107,6 +140,9 @@ export function MiniCandleChart({ bars, markers = [], height = 280 }: Props) {
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null)
+  const appliedRef = useRef<AppliedSnapshot | null>(null)
+  const markersCacheRef = useRef<MiniMarker[]>([])
+  const fittedRef = useRef(false)
   const [chartReady, setChartReady] = useState(0)
 
   useEffect(() => {
@@ -143,6 +179,8 @@ export function MiniCandleChart({ bars, markers = [], height = 280 }: Props) {
     chartRef.current = chart
     seriesRef.current = series
     markersRef.current = createSeriesMarkers(series, [])
+    appliedRef.current = null
+    fittedRef.current = false
     setChartReady((n) => n + 1)
     const onResize = () => {
       if (containerRef.current && chartRef.current) {
@@ -156,6 +194,8 @@ export function MiniCandleChart({ bars, markers = [], height = 280 }: Props) {
       chartRef.current = null
       seriesRef.current = null
       markersRef.current = null
+      appliedRef.current = null
+      fittedRef.current = false
     }
   }, [height])
 
@@ -164,7 +204,63 @@ export function MiniCandleChart({ bars, markers = [], height = 280 }: Props) {
     const chart = chartRef.current
     const markersApi = markersRef.current
     if (!series || !chart || !markersApi || chartReady === 0) return
-    applyChartData(series, chart, markersApi, bars, markers)
+
+    if (!bars.length) {
+      series.setData([])
+      markersApi.setMarkers([])
+      appliedRef.current = null
+      fittedRef.current = false
+      return
+    }
+
+    const data = bars.map(toCandle)
+    const first = bars[0]
+    const last = bars[bars.length - 1]
+    const prev = appliedRef.current
+    const remember = (): AppliedSnapshot => ({
+      len: bars.length,
+      firstTime: first.time,
+      lastTime: last.time,
+      lastClose: last.close,
+      lastHigh: last.high,
+      lastLow: last.low,
+      lastOpen: last.open,
+    })
+
+    const sameTail =
+      prev != null && prev.len === bars.length && prev.lastTime === last.time
+    const appendedOne =
+      prev != null &&
+      bars.length === prev.len + 1 &&
+      bars[bars.length - 2]?.time === prev.lastTime
+    // Rolling window: length unchanged, first bar slid, last bar advanced or refreshed.
+    const slidWindow =
+      prev != null &&
+      prev.len === bars.length &&
+      prev.firstTime !== first.time
+
+    if (sameTail && prev && sameLastBar(prev, last)) {
+      // unchanged OHLC
+    } else if (sameTail || appendedOne) {
+      series.update(toCandle(last))
+      appliedRef.current = remember()
+    } else if (slidWindow) {
+      // Replace data quietly — do NOT fitContent (avoids overseas flicker).
+      series.setData(data)
+      appliedRef.current = remember()
+    } else {
+      series.setData(data)
+      if (!fittedRef.current) {
+        chart.timeScale().fitContent()
+        fittedRef.current = true
+      }
+      appliedRef.current = remember()
+    }
+
+    if (!markersEqual(markersCacheRef.current, markers)) {
+      applyMarkers(markersApi, data, markers)
+      markersCacheRef.current = markers
+    }
   }, [bars, markers, chartReady])
 
   return <div ref={containerRef} className="w-full overflow-hidden rounded-xl" />
