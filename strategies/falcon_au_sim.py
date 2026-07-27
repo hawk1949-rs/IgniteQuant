@@ -109,12 +109,13 @@ def _capture_live_klines(
     *,
     trade_symbol: str,
     last_price: float | None = None,
+    persist: PersistenceSession | None = None,
 ) -> None:
-    """Dump Tq sim kline window for Sim Cockpit (not market_cache)."""
+    """Dump Tq sim kline window for Sim Cockpit (JSON cache + SQLite market_bar)."""
     try:
-        from ignitequant.market.sim_klines import dump_tq_klines_snapshot
+        from ignitequant.market.sim_klines import dump_tq_klines_snapshot, load_klines_snapshot
 
-        dump_tq_klines_snapshot(
+        path = dump_tq_klines_snapshot(
             INSTANCE_ID,
             klines,
             signal_symbol=SIGNAL_SYMBOL,
@@ -124,6 +125,17 @@ def _capture_live_klines(
             last_price=last_price,
             include_forming=True,
         )
+        if persist is not None and path is not None:
+            snap = load_klines_snapshot(
+                INSTANCE_ID, runtime_dir=PERSIST_DB.parent, limit=400
+            )
+            if snap and snap.get("bars"):
+                persist.persist_market_bars(
+                    list(snap["bars"]),
+                    symbol=str(snap.get("signal_symbol") or SIGNAL_SYMBOL),
+                    duration_sec=int(snap.get("duration_seconds") or KLINE_SECONDS),
+                    source="tqsdk_sim_live",
+                )
     except Exception as exc:  # noqa: BLE001 — must not stop trading
         print(f"[K线快照] 写入失败（忽略）: {exc}", flush=True)
 
@@ -285,6 +297,7 @@ def main() -> None:
                 klines,
                 trade_symbol=trade_symbol,
                 last_price=float(getattr(main_quote, "last_price", 0) or 0) or None,
+                persist=persist,
             )
 
             if persist is not None:
@@ -606,11 +619,20 @@ def main() -> None:
                                 ),
                             )
                         )
+                        persist.record_heartbeat(
+                            last_price=q_px if q_px > 0 else None,
+                            confirmed_net=net,
+                            current_target=int(pipeline.current_target),
+                            pending_desired=pending,
+                            session_open=True,
+                            payload={"trade_symbol": trade_symbol},
+                        )
                     if trade_symbol:
                         _capture_live_klines(
                             klines,
                             trade_symbol=trade_symbol,
                             last_price=q_px if q_px > 0 else None,
+                            persist=persist,
                         )
                         last_kline_dump = now
                 elif trade_symbol and q_px > 0 and now - last_kline_dump >= 5:
@@ -619,6 +641,7 @@ def main() -> None:
                         klines,
                         trade_symbol=trade_symbol,
                         last_price=q_px,
+                        persist=persist,
                     )
                     last_kline_dump = now
                 continue
@@ -633,6 +656,7 @@ def main() -> None:
                 klines,
                 trade_symbol=underlying,
                 last_price=q_px if q_px > 0 else None,
+                persist=persist,
             )
             last_kline_dump = now
 

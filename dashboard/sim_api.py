@@ -1380,7 +1380,7 @@ def market_bars(
     symbol_id: str = Query("au"),
     limit: int = Query(400, ge=10, le=2000),
 ) -> dict[str, Any]:
-    """Sim Cockpit bars: Tq live snapshot only (no market_cache)."""
+    """Sim Cockpit bars: Tq live JSON snapshot, then SQLite market_bar fallback."""
     try:
         spec = INSTRUMENTS[symbol_id]
     except KeyError as exc:
@@ -1401,6 +1401,42 @@ def market_bars(
                 continue
             if candidate.get("signal_symbol") == spec.signal_symbol:
                 snap = candidate
+                break
+
+    source = "tqsdk_sim_live"
+    if snap is None:
+        # L2 fallback: read market_bar from the matching launcher DB.
+        from ignitequant.persistence.sqlite import open_sqlite
+
+        for iid, meta in SIM_LAUNCHERS.items():
+            if meta.get("symbol_id") != symbol_id:
+                continue
+            db_path = RUNTIME_DIR / f"{iid}.sqlite"
+            if not db_path.is_file():
+                continue
+            try:
+                conn = open_sqlite(db_path)
+                try:
+                    from ignitequant.persistence.repositories import SqliteTradingRepository
+
+                    repo = SqliteTradingRepository(conn)
+                    bars_db = repo.list_market_bars(
+                        spec.signal_symbol, duration_sec=300, limit=limit
+                    )
+                finally:
+                    conn.close()
+            except Exception:
+                bars_db = []
+            if bars_db:
+                snap = {
+                    "signal_symbol": spec.signal_symbol,
+                    "trade_symbol": bars_db[-1].get("underlying_symbol") or spec.signal_symbol,
+                    "bars": bars_db,
+                    "last_price": float(bars_db[-1]["close"]),
+                    "updated_at": None,
+                    "duration_seconds": 300,
+                }
+                source = "sqlite_market_bar"
                 break
 
     session = _shfe_precious_session_open()
@@ -1436,10 +1472,10 @@ def market_bars(
         "bars": bars,
         "markers": [],
         "last_price": float(last_price) if last_price is not None else None,
-        "last_price_source": "tqsdk_sim_live",
+        "last_price_source": source,
         "updated_at": snap.get("updated_at"),
-        "hint": None,
-        "source": "tqsdk_sim_live",
+        "hint": None if source == "tqsdk_sim_live" else "来自 SQLite market_bar（JSON 快照缺失时的回退）",
+        "source": source,
         "chart_context": _chart_context_from_bars(bars),
         "market_session": session,
     }

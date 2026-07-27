@@ -151,6 +151,29 @@ class PersistenceSession:
             inserted = self.repo.append_order_intent(self.instance_id, intent, status=status)
             if not inserted:
                 return False
+            side = intent.side
+            if not side:
+                delta = int(intent.desired_position) - int(intent.current_position)
+                side = "BUY" if delta > 0 else "SELL" if delta < 0 else "FLAT"
+            qty = (
+                int(intent.qty)
+                if intent.qty is not None
+                else abs(int(intent.desired_position) - int(intent.current_position))
+            )
+            self.repo.append_broker_order_event(
+                self.instance_id,
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                side=side,
+                offset=intent.offset or "",
+                status=status,
+                local_order_id=intent.intent_id,
+                broker_order_id=intent.broker_order_id,
+                remaining_qty=qty,
+                filled_qty=0,
+                message="intent_submitted",
+                payload={"idempotency_key": intent.idempotency_key},
+            )
             self.repo.append_audit(
                 self.instance_id,
                 actor="executor",
@@ -170,6 +193,19 @@ class PersistenceSession:
             self.repo.append_fill(self.instance_id, fill)
             self.repo.update_order_intent_status(
                 self.instance_id, fill.intent_id, OrderStatus.FILLED.value
+            )
+            self.repo.append_broker_order_event(
+                self.instance_id,
+                intent_id=fill.intent_id,
+                symbol=fill.symbol,
+                side=fill.side,
+                status=OrderStatus.FILLED.value,
+                broker_order_id=fill.broker_order_id,
+                filled_qty=fill.qty,
+                remaining_qty=0,
+                avg_price=fill.price,
+                message="fill_confirmed",
+                payload={"fill_id": fill.fill_id, "broker_trade_id": fill.broker_trade_id},
             )
             self.repo.append_audit(
                 self.instance_id,
@@ -236,6 +272,58 @@ class PersistenceSession:
     def snapshot_account(self, snap: AccountSnapshot) -> None:
         self.repo.append_account_snapshot(self.instance_id, snap)
 
+    def record_heartbeat(
+        self,
+        *,
+        last_price: float | None = None,
+        confirmed_net: int | None = None,
+        current_target: int | None = None,
+        pending_desired: int | None = None,
+        quote_as_of: str | None = None,
+        session_open: bool | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            self.repo.append_heartbeat(
+                self.instance_id,
+                quote_as_of=quote_as_of,
+                last_price=last_price,
+                confirmed_net=confirmed_net,
+                current_target=current_target,
+                pending_desired=pending_desired,
+                runtime_state=self.runtime.runtime_state,
+                session_open=session_open,
+                payload=payload,
+            )
+            self.healthy = True
+        except Exception:
+            self.healthy = False
+            raise
+
+    def persist_market_bars(
+        self,
+        bars: list[dict[str, Any]],
+        *,
+        symbol: str,
+        duration_sec: int = 300,
+        source: str = "tqsdk_sim_live",
+        keep_last: int = 2000,
+    ) -> int:
+        try:
+            n = self.repo.upsert_market_bars(
+                bars,
+                symbol=symbol,
+                duration_sec=duration_sec,
+                source=source,
+                instance_id=self.instance_id,
+                keep_last=keep_last,
+            )
+            self.healthy = True
+            return n
+        except Exception:
+            self.healthy = False
+            raise
+
     def reconcile_now(self, local: LocalProjection, broker: BrokerFacts) -> RuntimeSnapshot:
         report = periodic_reconcile(
             self.repo,
@@ -270,6 +358,16 @@ class PersistenceSession:
             roll_in_progress=self.runtime.roll_in_progress,
             as_of=datetime.now(timezone.utc),
         )
+        try:
+            self.repo.upsert_runtime_health(
+                self.instance_id,
+                persistence_healthy=False,
+                runtime_state="DEGRADED",
+                unknown_order_count=self.runtime.unknown_order_count,
+                kill_switch_active=self.runtime.kill_switch_active,
+            )
+        except Exception:
+            pass
 
     def close(self) -> None:
         self.repo.close()

@@ -172,6 +172,10 @@ class OrderIntent(SerializableMixin):
     idempotency_key: str
     created_at: datetime
     reason_codes: tuple[str, ...] = ()
+    side: str = ""
+    offset: str = ""
+    qty: int | None = None
+    broker_order_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -184,6 +188,10 @@ class FillEvent(SerializableMixin):
     fee: float
     side: str
     trade_time: datetime
+    broker_order_id: str | None = None
+    broker_trade_id: str | None = None
+    multiplier: float | None = None
+    realized_pnl: float | None = None
 
 
 @dataclass(frozen=True)
