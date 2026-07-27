@@ -39,7 +39,7 @@ import {
   type SignalSide,
 } from './signal-data'
 
-const { Text, Paragraph, Title } = Typography
+const { Text, Paragraph } = Typography
 
 function FormulaBuilder({
   rule,
@@ -314,43 +314,29 @@ export function SignalPanel() {
   }
 
   return (
-    <Flex vertical gap={16}>
-      <Card>
-        <Text
-          style={{
-            fontSize: 12,
-            fontWeight: 600,
-            letterSpacing: '0.14em',
-            textTransform: 'uppercase',
-            color: '#0A84FF',
-          }}
-        >
-          Signal Generator
-        </Text>
-        <Title level={3} style={{ marginTop: 8, marginBottom: 8, color: '#F5F5F7' }}>
-          信号发生器
-        </Title>
-        <Paragraph type="secondary" style={{ marginBottom: 12, maxWidth: 720 }}>
-          从「因子与特征」已编译因子中选题，自行组成做多 / 做空 / 平仓公式，并可附加确认根数、TTL
-          等门禁。本页只定义规则契约，不在此重算指标。
+    <Flex vertical gap={12}>
+      <Card size="small" styles={{ body: { padding: '10px 12px' } }}>
+        <Paragraph type="secondary" style={{ marginBottom: 10, fontSize: 12, maxWidth: 720 }}>
+          从已编译因子组成做多 / 做空 / 平仓公式，并可附加确认根数、TTL 等门禁；本页只定义规则契约。
         </Paragraph>
-        <Row gutter={[12, 12]}>
+        <Row gutter={[10, 10]}>
           <Col xs={24} md={12}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
               信号配置名称
             </Text>
             <Input
+              size="small"
               value={cfg.name}
               onChange={(e) => setCfg((p) => ({ ...p, name: e.target.value }))}
               placeholder="例如：au_trend_breakout_v1"
             />
           </Col>
           <Col xs={24} md={12}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
-              可用因子（来自因子与特征 · 已启用）
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
+              可用因子（因子与特征 · 已启用）
             </Text>
-            <Space wrap>
-              <Button icon={<ReloadOutlined />} onClick={onRefreshFactors}>
+            <Space wrap size={6}>
+              <Button size="small" icon={<ReloadOutlined />} onClick={onRefreshFactors}>
                 刷新因子
               </Button>
               <Tag color="blue">{compiled.length} 个</Tag>
@@ -366,13 +352,14 @@ export function SignalPanel() {
       </Card>
 
       <Card
+        size="small"
         title="信号公式"
         extra={
-          <Space wrap>
-            <Button icon={<ReloadOutlined />} onClick={onReset}>
+          <Space wrap size={8}>
+            <Button size="small" icon={<ReloadOutlined />} onClick={onReset}>
               重置
             </Button>
-            <Button type="primary" icon={<SaveOutlined />} onClick={onSave}>
+            <Button size="small" type="primary" icon={<SaveOutlined />} onClick={onSave}>
               保存信号
             </Button>
           </Space>
@@ -418,8 +405,8 @@ export function SignalPanel() {
         />
       </Card>
 
-      <Card title="附加条件">
-        <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 16 }}>
+      <Card size="small" title="附加条件">
+        <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
           这些门禁作用于整套信号，不替代公式本身。
         </Paragraph>
         <Row gutter={[16, 16]}>
@@ -489,11 +476,11 @@ export function SignalPanel() {
         </Row>
       </Card>
 
-      <Card title="规则摘要">
-        <Row gutter={[12, 12]}>
+      <Card size="small" title="规则摘要">
+        <Row gutter={[10, 10]}>
           {SIGNAL_SIDE_META.map((meta) => (
             <Col key={meta.id} xs={24} md={8}>
-              <Card size="small" styles={{ body: { padding: 14 } }}>
+              <Card size="small" styles={{ body: { padding: '10px 12px' } }}>
                 <Tag
                   color={
                     meta.id === 'long' ? 'success' : meta.id === 'short' ? 'error' : 'warning'
@@ -503,7 +490,7 @@ export function SignalPanel() {
                 </Tag>
                 <Text
                   type="secondary"
-                  style={{ display: 'block', marginTop: 8, fontSize: 12, lineHeight: 1.5 }}
+                  style={{ display: 'block', marginTop: 6, fontSize: 12, lineHeight: 1.45 }}
                 >
                   {describeRule(cfg.rules[meta.id], compiled)}
                 </Text>

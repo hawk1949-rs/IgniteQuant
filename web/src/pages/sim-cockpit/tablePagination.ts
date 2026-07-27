@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { TablePaginationConfig } from 'antd'
 
 const STORAGE_PREFIX = 'ignitequant.sim-cockpit.pageSize.'
@@ -37,24 +37,29 @@ export function useSimTablePagination(
   )
   const [current, setCurrent] = useState(1)
 
-  const maxPage = Math.max(1, Math.ceil(totalItems / pageSize) || 1)
-  const safeCurrent = Math.min(current, maxPage)
+  const maxPage = Math.max(1, Math.ceil(Math.max(totalItems, 0) / pageSize) || 1)
+
+  useEffect(() => {
+    if (current > maxPage) setCurrent(maxPage)
+  }, [current, maxPage])
 
   const onChange = useCallback((page: number, size?: number) => {
-    const nextSize = size && size !== pageSize ? size : pageSize
-    const nextMax = Math.max(1, Math.ceil(totalItems / nextSize) || 1)
-    setCurrent(Math.min(page, nextMax))
-    if (size && size !== pageSize) {
+    if (size != null && size !== pageSize) {
       setPageSize(size)
       writeStoredPageSize(storageKey, size)
       setCurrent(1)
+      return
     }
+    const nextMax =
+      totalItems > 0 ? Math.max(1, Math.ceil(totalItems / pageSize) || 1) : page
+    setCurrent(Math.max(1, Math.min(page, nextMax)))
   }, [pageSize, storageKey, totalItems])
 
   return useMemo(
     () => ({
-      current: safeCurrent,
+      current: Math.min(current, maxPage),
       pageSize,
+      total: totalItems,
       size: 'small' as const,
       showSizeChanger: true,
       showQuickJumper: true,
@@ -68,6 +73,6 @@ export function useSimTablePagination(
         setCurrent(1)
       },
     }),
-    [safeCurrent, pageSize, onChange, storageKey],
+    [current, maxPage, pageSize, onChange, storageKey, totalItems],
   )
 }

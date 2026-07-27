@@ -665,32 +665,34 @@ export function WorkbenchPanel() {
   ]
 
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <Alert
         type="info"
         showIcon
-        message="回测当前固定使用 Falcon v2 决策核；上方信号/仓位装配为预览，尚未接入回测 API。"
+        banner
+        message="回测当前固定使用 Falcon v2 决策核；信号/仓位装配为预览，尚未接入回测 API。"
       />
       <Card
+        size="small"
         title="策略档案"
         extra={
-          <Space wrap>
-            <Button icon={<FileAddOutlined />} onClick={onNewDraft}>
+          <Space wrap size={8}>
+            <Button size="small" icon={<FileAddOutlined />} onClick={onNewDraft}>
               新建草稿
             </Button>
-            <Button icon={<CopyOutlined />} onClick={onSaveAsStrategy}>
+            <Button size="small" icon={<CopyOutlined />} onClick={onSaveAsStrategy}>
               另存为
             </Button>
-            <Button type="primary" icon={<SaveOutlined />} onClick={onSaveStrategy}>
+            <Button size="small" type="primary" icon={<SaveOutlined />} onClick={onSaveStrategy}>
               {activeStrategyId ? '更新策略' : '保存策略'}
             </Button>
           </Space>
         }
       >
-        <Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
-          默认是草稿：点「保存策略」会新增一条。从下拉选中已有策略后，「更新策略」只改当前条；要保留原策略请用「另存为」。
+        <Text type="secondary" style={{ display: 'block', marginBottom: 10, fontSize: 12 }}>
+          默认是草稿：点「保存策略」会新增一条。选中已有策略后「更新策略」只改当前条；保留原策略请用「另存为」。
         </Text>
-        <Row gutter={[16, 16]}>
+        <Row gutter={[12, 12]}>
           <Col xs={24} md={12}>
             <Text type="secondary" style={{ fontSize: 12 }}>
               已保存策略（共 {strategies.length} 条）
@@ -722,10 +724,12 @@ export function WorkbenchPanel() {
       </Card>
 
       <Card
+        size="small"
         title="策略装配区"
         extra={
-          <Space wrap>
+          <Space wrap size={8}>
             <Select
+              size="small"
               style={{ minWidth: 180 }}
               placeholder="加载装配组合…"
               value={selectedAssemblyId}
@@ -733,16 +737,16 @@ export function WorkbenchPanel() {
               onChange={onLoadAssembly}
               allowClear
             />
-            <Button icon={<SaveOutlined />} onClick={onSaveAssembly}>
+            <Button size="small" icon={<SaveOutlined />} onClick={onSaveAssembly}>
               保存当前装配
             </Button>
           </Space>
         }
       >
-        <Text type="secondary" style={{ display: 'block', marginBottom: 16, fontSize: 12 }}>
+        <Text type="secondary" style={{ display: 'block', marginBottom: 10, fontSize: 12 }}>
           装配信号发生器与仓位控制。因子在「因子与特征」页独立编译挖掘，不在此选择。
         </Text>
-        <Row gutter={[12, 12]}>
+        <Row gutter={[10, 10]}>
           {PIPELINE_STEPS.map((step, i) => {
             const options = PIPELINE_OPTIONS[step.key].map((o) => ({
               value: o.id,
@@ -752,7 +756,7 @@ export function WorkbenchPanel() {
             const selected = options.find((o) => o.value === nodes[step.key])
             return (
               <Col key={step.key} xs={24} sm={12} lg={12}>
-                <Card size="small" styles={{ body: { padding: 14 } }}>
+                <Card size="small" styles={{ body: { padding: '10px 12px' } }}>
                   <Flex justify="space-between" align="center">
                     <Text type="secondary" style={{ fontSize: 11 }}>
                       节点 {i + 1}
@@ -782,7 +786,7 @@ export function WorkbenchPanel() {
         </Row>
       </Card>
 
-      <Card title="测试账号配置">
+      <Card size="small" title="测试账号配置">
         <Row gutter={[16, 20]}>
           <Col span={24}>
             <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
@@ -971,10 +975,12 @@ export function WorkbenchPanel() {
       </Card>
 
       <Card
+        size="small"
         title="收益时间折线图"
         extra={
-          <Space wrap>
+          <Space wrap size={8}>
             <Select
+              size="small"
               value={chartMetric}
               onChange={(v) => setChartMetric(v as ChartMetric)}
               style={{ width: 140 }}
@@ -985,6 +991,7 @@ export function WorkbenchPanel() {
               popupMatchSelectWidth={false}
             />
             <Segmented
+              size="small"
               value={chartPeriod}
               onChange={(v) => setChartPeriod(v as ChartPeriod)}
               options={CHART_PERIOD_OPTIONS.map((o) => ({
@@ -998,13 +1005,13 @@ export function WorkbenchPanel() {
         <MetricChart series={chartSeries} metric={chartMetric} />
       </Card>
 
-      <Card title="绩效指标">
+      <Card size="small" title="绩效指标">
         <KpiGrid kpis={kpis} />
       </Card>
 
-      <Card title="交易明细">
+      <Card size="small" title="交易明细">
         <Table
-          size="middle"
+          size="small"
           rowKey="id"
           columns={tradeColumns}
           dataSource={trades}

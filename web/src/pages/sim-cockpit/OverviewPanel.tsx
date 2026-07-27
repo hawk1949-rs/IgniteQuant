@@ -185,9 +185,9 @@ export function OverviewPanel() {
   const regimeConflict = Boolean(chartCtx?.conflict)
   const session = summary?.market_session || bars?.market_session
   const positionNote = summary?.position_note
-  const decisionsPagination = useSimTablePagination('decisions', 10)
-  const intentsPagination = useSimTablePagination('intents', 10)
-  const fillsPagination = useSimTablePagination('fills', 10)
+  const decisionsPagination = useSimTablePagination('decisions', 10, decisions.length)
+  const intentsPagination = useSimTablePagination('intents', 10, intents.length)
+  const fillsPagination = useSimTablePagination('fills', 10, fills.length)
   const [chartTf, setChartTf] = useState<ChartTimeframe>('5m')
 
   const domesticChart = useMemo(() => {

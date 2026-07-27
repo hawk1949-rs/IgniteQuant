@@ -38,7 +38,7 @@ import {
   type TimeframeId,
 } from './factor-data'
 
-const { Text, Paragraph, Title } = Typography
+const { Text, Paragraph } = Typography
 
 function ModuleEditor({
   mod,
@@ -229,31 +229,17 @@ export function FactorPanel() {
   }, [cfg.modules])
 
   return (
-    <Flex vertical gap={16}>
-      <Card>
-        <Text
-          style={{
-            fontSize: 12,
-            fontWeight: 600,
-            letterSpacing: '0.14em',
-            textTransform: 'uppercase',
-            color: '#0A84FF',
-          }}
-        >
-          Factor Mining
-        </Text>
-        <Title level={3} style={{ marginTop: 8, marginBottom: 8, color: '#F5F5F7' }}>
-          因子与特征
-        </Title>
-        <Paragraph type="secondary" style={{ marginBottom: 12, maxWidth: 680 }}>
-          专注因子编译与挖掘：写你自己的 <Text code>compute</Text>，用归类管理大量因子，方便筛选。
+    <Flex vertical gap={12}>
+      <Card size="small" styles={{ body: { padding: '10px 12px' } }}>
+        <Paragraph type="secondary" style={{ marginBottom: 8, fontSize: 12, maxWidth: 720 }}>
+          写自己的 <Text code>compute</Text>，按归类管理因子；非预装指标陈列。
         </Paragraph>
-        <Row gutter={[12, 12]}>
+        <Row gutter={[8, 8]}>
           {BOUNDARY_RULES.map((r) => (
             <Col key={r.title} xs={24} md={8}>
-              <Card size="small" styles={{ body: { padding: 14 } }}>
+              <Card size="small" styles={{ body: { padding: '8px 10px' } }}>
                 <Tag color="blue">{r.title}</Tag>
-                <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
+                <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 11 }}>
                   {r.body}
                 </Text>
               </Card>
@@ -263,23 +249,24 @@ export function FactorPanel() {
       </Card>
 
       <Card
+        size="small"
         title="因子编译与挖掘"
         extra={
-          <Space wrap>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCategoryModal}>
+          <Space wrap size={8}>
+            <Button size="small" type="primary" icon={<PlusOutlined />} onClick={openCategoryModal}>
               新建分类
             </Button>
-            <Button icon={<PlusOutlined />} onClick={onAddModule}>
+            <Button size="small" icon={<PlusOutlined />} onClick={onAddModule}>
               添加因子
             </Button>
-            <Button icon={<SaveOutlined />} onClick={onSaveDraft}>
+            <Button size="small" icon={<SaveOutlined />} onClick={onSaveDraft}>
               保存草稿
             </Button>
           </Space>
         }
       >
-        <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
-          先选或新建分类，再用「添加因子」在当前筛选分类下编译。每个因子：启用、命名、触发周期、Python 源码。
+        <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 10 }}>
+          先选或新建分类，再用「添加因子」编译。每个因子：启用、命名、触发周期、Python 源码。
         </Paragraph>
 
         <Flex wrap="wrap" gap={8} align="center" style={{ marginBottom: 14 }}>
@@ -398,6 +385,7 @@ export function FactorPanel() {
       </Modal>
 
       <Card
+        size="small"
         title="Feature Dict 预览"
         extra={
           <Button size="small" icon={<CopyOutlined />} onClick={onCopyContract}>
@@ -405,7 +393,7 @@ export function FactorPanel() {
           </Button>
         }
       >
-        <Row gutter={[16, 16]}>
+        <Row gutter={[12, 12]}>
           <Col xs={24} lg={12}>
             <Text strong style={{ display: 'block', marginBottom: 8 }}>
               当前启用输出（契约形状）

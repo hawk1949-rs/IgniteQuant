@@ -1,37 +1,21 @@
-import { Card, Typography } from 'antd'
-
-const { Title, Paragraph, Text } = Typography
-
 type Props = {
   title: string
   english: string
   summary: string
 }
 
-/** 侧栏新模块占位页，后续在此替换为真实面板。 */
+/** 分区占位页，风格对齐模拟盘座舱 Section。 */
 export function ComingSoonPanel({ title, english, summary }: Props) {
   return (
-    <Card>
-      <Text
-        style={{
-          fontSize: 12,
-          fontWeight: 600,
-          letterSpacing: '0.14em',
-          textTransform: 'uppercase',
-          color: '#0A84FF',
-        }}
-      >
-        {english}
-      </Text>
-      <Title level={3} style={{ marginTop: 8, marginBottom: 8, color: '#F5F5F7' }}>
-        {title}
-      </Title>
-      <Paragraph type="secondary" style={{ marginBottom: 0, maxWidth: 520 }}>
-        {summary}
-      </Paragraph>
-      <Paragraph type="secondary" style={{ marginTop: 16, marginBottom: 0, fontSize: 12 }}>
-        模块骨架已就绪，功能将在后续迭代接入。
-      </Paragraph>
-    </Card>
+    <section className="rounded-xl border border-line bg-panel/90">
+      <div className="flex items-center justify-between gap-3 border-b border-line/70 px-3.5 py-2">
+        <h2 className="text-[13px] font-semibold tracking-wide text-ink">{title}</h2>
+        <span className="text-[11px] uppercase tracking-wide text-faint">{english}</span>
+      </div>
+      <div className="space-y-2 p-3.5">
+        <p className="max-w-xl text-sm text-muted">{summary}</p>
+        <p className="text-[11px] text-faint">模块骨架已就绪，功能将在后续迭代接入。</p>
+      </div>
+    </section>
   )
 }
