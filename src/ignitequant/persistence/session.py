@@ -47,6 +47,36 @@ class PersistenceSession:
     recovery: RecoveryResult | None = None
     healthy: bool = True
     _db_path: str | None = None
+    sync_outbox_enabled: bool = True
+
+    def _enqueue(
+        self,
+        *,
+        event_type: str,
+        aggregate_type: str,
+        aggregate_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Best-effort outbox write; never fails the trading path."""
+        if not self.sync_outbox_enabled:
+            return
+        conn = getattr(self.repo, "_conn", None)
+        if conn is None:
+            return
+        try:
+            from ignitequant.persistence.outbox import enqueue_outbox
+
+            enqueue_outbox(
+                conn,
+                instance_id=self.instance_id,
+                event_type=event_type,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                payload=payload,
+            )
+        except Exception:
+            # Outbox must not stop orders / decisions.
+            pass
 
     @classmethod
     def open(
@@ -102,6 +132,19 @@ class PersistenceSession:
     def record_decision(self, result: PipelineResult) -> None:
         try:
             self.repo.append_decision(self.instance_id, result)
+            self._enqueue(
+                event_type="decision.appended",
+                aggregate_type="decision",
+                aggregate_id=result.bar_id,
+                payload={
+                    "strategy_id": self.strategy_id,
+                    "symbol": result.target.symbol,
+                    "applied_action": result.applied_action,
+                    "target_before": result.target_before,
+                    "target_after": result.target_after,
+                    "legacy_signal": result.signal.legacy_signal,
+                },
+            )
             self.healthy = True
         except Exception:
             self.healthy = False
@@ -183,6 +226,21 @@ class PersistenceSession:
                 after={"desired": intent.desired_position, "key": intent.idempotency_key},
                 reason="submit",
             )
+            self._enqueue(
+                event_type="intent.submitted",
+                aggregate_type="order_intent",
+                aggregate_id=intent.intent_id,
+                payload={
+                    "decision_id": intent.decision_id,
+                    "symbol": intent.symbol,
+                    "current_position": intent.current_position,
+                    "desired_position": intent.desired_position,
+                    "idempotency_key": intent.idempotency_key,
+                    "status": status,
+                    "side": side,
+                    "qty": qty,
+                },
+            )
             return True
         except Exception:
             self.healthy = False
@@ -215,6 +273,12 @@ class PersistenceSession:
                 before={},
                 after=fill.to_dict(),
                 reason="confirmed",
+            )
+            self._enqueue(
+                event_type="fill.confirmed",
+                aggregate_type="trade_fill",
+                aggregate_id=fill.fill_id,
+                payload=fill.to_dict(),
             )
         except Exception:
             self.healthy = False
@@ -294,6 +358,21 @@ class PersistenceSession:
                 runtime_state=self.runtime.runtime_state,
                 session_open=session_open,
                 payload=payload,
+            )
+            self._enqueue(
+                event_type="heartbeat.tick",
+                aggregate_type="runtime_health",
+                aggregate_id=self.instance_id,
+                payload={
+                    "last_price": last_price,
+                    "confirmed_net": confirmed_net,
+                    "current_target": current_target,
+                    "pending_desired": pending_desired,
+                    "runtime_state": self.runtime.runtime_state,
+                    "session_open": session_open,
+                    "strategy_id": self.strategy_id,
+                    "symbol": self.symbol,
+                },
             )
             self.healthy = True
         except Exception:

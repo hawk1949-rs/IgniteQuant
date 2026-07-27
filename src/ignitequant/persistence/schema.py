@@ -7,7 +7,7 @@ via ``migrate()`` in sqlite.py (including safe ADD COLUMN helpers).
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # Base DDL — full latest shape for new databases
@@ -434,6 +434,21 @@ CREATE TABLE IF NOT EXISTS factor_definition (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sync_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    aggregate_type TEXT NOT NULL,
+    aggregate_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    sync_status TEXT NOT NULL DEFAULT 'pending',
+    synced_at TEXT,
+    sync_error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_decision_instance ON decision_event(instance_id, seq);
 CREATE INDEX IF NOT EXISTS idx_intent_instance ON order_intent_event(instance_id, seq);
 CREATE INDEX IF NOT EXISTS idx_fill_instance ON trade_fill_event(instance_id, seq);
@@ -446,6 +461,7 @@ CREATE INDEX IF NOT EXISTS idx_signal_factor ON signal_event(instance_id, factor
 CREATE INDEX IF NOT EXISTS idx_target_signal ON target_position_event(instance_id, signal_id);
 CREATE INDEX IF NOT EXISTS idx_market_bar_symbol ON market_bar(symbol, duration_sec, bar_end);
 CREATE INDEX IF NOT EXISTS idx_market_quote_symbol ON market_quote_l1(symbol, as_of);
+CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending ON sync_outbox(sync_status, id);
 """
 
 # Back-compat alias used by older imports / docs
@@ -756,4 +772,24 @@ CREATE INDEX IF NOT EXISTS idx_signal_factor ON signal_event(instance_id, factor
 CREATE INDEX IF NOT EXISTS idx_target_signal ON target_position_event(instance_id, signal_id);
 CREATE INDEX IF NOT EXISTS idx_market_bar_symbol ON market_bar(symbol, duration_sec, bar_end);
 CREATE INDEX IF NOT EXISTS idx_market_quote_symbol ON market_quote_l1(symbol, as_of);
+"""
+
+# New tables introduced at version 3 (local → cloud sync outbox)
+V3_NEW_TABLES_DDL = """
+CREATE TABLE IF NOT EXISTS sync_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    aggregate_type TEXT NOT NULL,
+    aggregate_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    sync_status TEXT NOT NULL DEFAULT 'pending',
+    synced_at TEXT,
+    sync_error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending ON sync_outbox(sync_status, id);
 """

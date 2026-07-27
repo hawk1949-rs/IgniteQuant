@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Apply Supabase L3–L4 schema + seed from local migration SQL.
+"""Apply all SQL files under supabase/migrations/ in name order.
 
-Requires DATABASE_URL in environment or .env (never commit secrets).
+Requires DATABASE_URL in environment or .env.
 Usage:
   python tools/apply_supabase_schema.py
   python tools/apply_supabase_schema.py --dry-run
@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = ROOT / "supabase" / "migrations" / "20260727000000_ref_and_research.sql"
+MIGRATIONS_DIR = ROOT / "supabase" / "migrations"
 
 
 def load_dotenv(path: Path) -> None:
@@ -32,22 +32,29 @@ def load_dotenv(path: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--only",
+        default="",
+        help="Substring filter, e.g. product_tenant_outbox",
+    )
     args = parser.parse_args()
 
     load_dotenv(ROOT / ".env")
-    if not MIGRATION.is_file():
-        print(f"ERROR: migration not found: {MIGRATION}", flush=True)
+    files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    if args.only:
+        files = [f for f in files if args.only in f.name]
+    if not files:
+        print(f"ERROR: no migrations in {MIGRATIONS_DIR}", flush=True)
         return 1
 
-    sql = MIGRATION.read_text(encoding="utf-8")
     if args.dry_run:
-        print(f"DRY-RUN: would apply {MIGRATION} ({len(sql)} bytes)", flush=True)
+        for f in files:
+            print(f"DRY-RUN: {f.name} ({f.stat().st_size} bytes)", flush=True)
         return 0
 
     url = os.environ.get("DATABASE_URL", "").strip()
     if not url:
         print("ERROR: DATABASE_URL missing. Set it in .env then retry.", flush=True)
-        print(f"Migration file ready at: {MIGRATION}", flush=True)
         return 1
 
     try:
@@ -56,22 +63,32 @@ def main() -> int:
         print("ERROR: psycopg2 not installed. pip install psycopg2-binary", flush=True)
         return 1
 
-    print(f"Applying {MIGRATION.name} …", flush=True)
+    print(f"Connecting and applying {len(files)} migration(s)…", flush=True)
     try:
         conn = psycopg2.connect(url, connect_timeout=20)
         conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute(sql)
+            for path in files:
+                sql = path.read_text(encoding="utf-8")
+                print(f"  apply {path.name} …", flush=True)
+                cur.execute(sql)
             cur.execute(
-                "SELECT product_id, name FROM ref_instrument ORDER BY product_id"
+                """
+                select table_name from information_schema.tables
+                where table_schema='public'
+                order by table_name
+                """
             )
-            rows = cur.fetchall()
+            tables = [r[0] for r in cur.fetchall()]
         conn.close()
     except Exception as exc:  # noqa: BLE001
         print(f"FAIL: {type(exc).__name__}: {exc}", flush=True)
         return 2
 
-    print(f"OK: seeded {len(rows)} instruments: {', '.join(r[0] for r in rows)}", flush=True)
+    print(f"OK: public_tables={len(tables)}", flush=True)
+    for name in ("profiles", "strategy_publication", "sim_instance", "trading_event_inbox"):
+        mark = "yes" if name in tables else "MISSING"
+        print(f"  {name}: {mark}", flush=True)
     return 0
 
 

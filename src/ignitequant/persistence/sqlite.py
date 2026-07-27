@@ -10,6 +10,7 @@ from ignitequant.persistence.schema import (
     SCHEMA_VERSION,
     V2_ADD_COLUMNS,
     V2_NEW_TABLES_DDL,
+    V3_NEW_TABLES_DDL,
 )
 
 
@@ -56,16 +57,17 @@ def _apply_v2(conn: sqlite3.Connection) -> None:
         _add_missing_columns(conn, table, cols)
 
 
+def _apply_v3(conn: sqlite3.Connection) -> None:
+    conn.executescript(V3_NEW_TABLES_DDL)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     """Apply BASE_DDL then any pending versioned upgrades."""
     conn.executescript(BASE_DDL)
     row = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
     current = int(row["v"] or 0) if row is not None else 0
 
-    # Databases created before versioned migrations may already have BASE_DDL tables
-    # but no schema_migrations row — treat missing as 0 and stamp through upgrades.
     if current < 1:
-        # Ensure v1 baseline exists (legacy DBs created with CREATE IF NOT EXISTS only).
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
             "VALUES (1, datetime('now'))"
@@ -79,6 +81,14 @@ def migrate(conn: sqlite3.Connection) -> None:
             "VALUES (2, datetime('now'))"
         )
         current = 2
+
+    if current < 3:
+        _apply_v3(conn)
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+            "VALUES (3, datetime('now'))"
+        )
+        current = 3
 
     if current < SCHEMA_VERSION:
         conn.execute(
