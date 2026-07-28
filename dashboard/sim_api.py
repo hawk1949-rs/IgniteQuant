@@ -1195,8 +1195,10 @@ def sim_catalog() -> dict[str, Any]:
         "refresh_hint": "页面按 5 分钟 K 线节奏自动刷新",
         "symbol_catalog_note": "品种来自 IgniteQuant 本地目录（au/ag/rb/fg），映射天勤主力连续合约；K 线优先读 data/market_cache。",
         "data_source": sim_cloud_read.data_source(),
+        "read_only": sim_cloud_read.is_cloud(),
         "read_only_hint": (
-            "当前为云端只读；启动模拟盘请在交易机运行。"
+            "当前为云端只读座舱：会话/决策/意图/成交来自 Supabase 投影；"
+            "启动与补跑请在交易机执行。本页可常驻打开，不依赖本机 sqlite。"
             if sim_cloud_read.is_cloud()
             else None
         ),

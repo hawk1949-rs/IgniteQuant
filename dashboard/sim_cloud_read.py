@@ -21,16 +21,43 @@ STATUS_LABELS = {
 }
 
 
-def data_source() -> str:
+def _ensure_dotenv(*, root=None) -> None:
+    """Load project .env; override SIM_DATA_SOURCE/DATABASE_URL so reloads stick."""
+    try:
+        from pathlib import Path
+
+        base = Path(root) if root is not None else Path(__file__).resolve().parents[1]
+        path = base / ".env"
+        if not path.is_file():
+            return
+        for raw in path.read_text(encoding="utf-8-sig").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key in {"SIM_DATA_SOURCE", "DATABASE_URL", "SUPABASE_OWNER_ID"}:
+                os.environ[key] = value
+            else:
+                os.environ.setdefault(key, value)
+    except Exception:
+        pass
+
+
+def data_source(*, root=None) -> str:
+    _ensure_dotenv(root=root)
     raw = os.environ.get("SIM_DATA_SOURCE", "cloud").strip().lower()
     return "local" if raw == "local" else "cloud"
 
 
-def is_cloud() -> bool:
-    return data_source() == "cloud"
+def is_cloud(*, root=None) -> bool:
+    return data_source(root=root) == "cloud"
 
 
 def require_pg_url(*, root=None) -> str:
+    # Prefer loading .env through data_source path so SIM_DATA_SOURCE/DATABASE_URL stay in sync.
+    _ensure_dotenv(root=root)
     url = _database_url(root=root)
     if not url:
         raise HTTPException(
@@ -40,14 +67,34 @@ def require_pg_url(*, root=None) -> str:
                 "本机调试可设 SIM_DATA_SOURCE=local 读 data/runtime/*.sqlite。"
             ),
         )
+    if "db." in url and ".supabase.co" in url and "pooler.supabase.com" not in url:
+        # Soft warning via header-friendly detail only when connect fails; allow attempt.
+        pass
     return url
 
 
 def _connect(url: str):
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-
-    conn = psycopg2.connect(url, connect_timeout=10)
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "云端读取需要 psycopg2（pip install psycopg2-binary）。"
+                "本机调试可设 SIM_DATA_SOURCE=local。"
+            ),
+        ) from exc
+    try:
+        conn = psycopg2.connect(url, connect_timeout=10)
+    except Exception as exc:  # noqa: BLE001 — surface as API 503
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"无法连接 DATABASE_URL：{exc}。"
+                "请使用 Supabase Session pooler（IPv4），或设 SIM_DATA_SOURCE=local。"
+            ),
+        ) from exc
     conn.autocommit = True
     return conn, RealDictCursor
 
@@ -168,7 +215,7 @@ def list_sessions_cloud(
             "sessions": sessions,
             "count": len(sessions),
             "data_source": "cloud",
-            "read_only_hint": "当前为云端只读；启动模拟盘请在交易机运行。",
+            "read_only_hint": "当前为云端只读座舱：数据来自 Supabase 投影；启动请在交易机运行。",
         }
     finally:
         conn.close()
@@ -313,7 +360,7 @@ def session_summary_cloud(
             "cli_hint": "python strategies/falcon_au_sim.py（请在交易机运行）",
             "data_source": "cloud",
             "read_only": True,
-            "read_only_hint": "当前为云端只读；启动模拟盘请在交易机运行。",
+            "read_only_hint": "当前为云端只读座舱：数据来自 Supabase 投影；启动请在交易机运行。",
             **proc,
         }
     finally:

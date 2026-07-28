@@ -16,6 +16,8 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +51,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(sim_router)
+
+WEB_DIST = ROOT / "web" / "dist"
 
 
 class BacktestRequest(BaseModel):
@@ -170,7 +174,13 @@ def _startup() -> None:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "phase": "6-local"}
+    from dashboard import sim_cloud_read
+
+    return {
+        "status": "ok",
+        "phase": "6-local",
+        "sim_data_source": sim_cloud_read.data_source(),
+    }
 
 
 @app.get("/api/catalog")
@@ -339,3 +349,37 @@ def remove_run(run_id: str) -> dict[str, bool]:
     if not delete_run(run_id):
         raise HTTPException(404, "run not found")
     return {"ok": True}
+
+
+def _mount_spa() -> None:
+    if not WEB_DIST.is_dir():
+        return
+    assets_dir = WEB_DIST / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="web-assets")
+
+    @app.get("/", include_in_schema=False)
+    def spa_index() -> FileResponse:
+        index = WEB_DIST / "index.html"
+        if not index.is_file():
+            raise HTTPException(
+                404,
+                "web/dist 未构建。本地开发请用 Vite；托管镜像请先 npm run build。",
+            )
+        return FileResponse(index)
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str) -> FileResponse:
+        """Serve SPA shell for non-API routes (hash router still needs index.html)."""
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(404, "not found")
+        candidate = WEB_DIST / full_path
+        if candidate.is_file():
+            return FileResponse(candidate)
+        index = WEB_DIST / "index.html"
+        if not index.is_file():
+            raise HTTPException(404, "web/dist missing")
+        return FileResponse(index)
+
+
+_mount_spa()

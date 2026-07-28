@@ -1,0 +1,27 @@
+# IgniteQuant cloud cockpit — Fly.io example (optional)
+# fly launch --dockerfile Dockerfile --name ignitequant-cockpit
+# fly secrets set DATABASE_URL="postgresql://postgres.PROJECT:PASS@aws-0-REGION.pooler.supabase.com:6543/postgres?sslmode=require"
+# fly secrets set SIM_DATA_SOURCE=cloud
+# fly deploy
+
+app = "ignitequant-cockpit"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  SIM_DATA_SOURCE = "cloud"
+  PYTHONPATH = "/app:/app/src"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

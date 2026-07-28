@@ -130,9 +130,7 @@ export function OverviewPanel() {
     instanceId,
     setInstanceId,
     framework,
-    setFramework,
     strategyId,
-    setStrategyId,
     symbolId,
     setSymbolId,
     summary,
@@ -157,9 +155,15 @@ export function OverviewPanel() {
   const statusText = summary?.status_label || statusLabel(status)
   const processRunning = Boolean(summary?.process_running)
   const cloudReadOnly = Boolean(
-    (summary as { read_only?: boolean } | null)?.read_only ||
-      (summary as { data_source?: string } | null)?.data_source === 'cloud',
+    catalog?.read_only ||
+      catalog?.data_source === 'cloud' ||
+      summary?.read_only ||
+      summary?.data_source === 'cloud',
   )
+  const readOnlyHint =
+    catalog?.read_only_hint ||
+    summary?.read_only_hint ||
+    '当前为云端只读座舱：决策/意图/成交来自 Supabase 投影；请在交易机运行模拟盘推送。'
   const [catchingUp, setCatchingUp] = useState(false)
   const selectedSymbol = catalog?.symbols?.find((s) => s.id === symbolId)
   const launcherSymbolId =
@@ -420,12 +424,12 @@ export function OverviewPanel() {
               loading={starting}
               disabled={processRunning || cloudReadOnly}
             >
-              {processRunning ? '已在运行' : '启动'}
+              {processRunning ? '已在运行' : cloudReadOnly ? '仅交易机可启动' : '启动'}
             </Button>
             <Tooltip
               title={
                 cloudReadOnly
-                  ? '当前 API 为云端读路径：若本机有 sqlite 仍可补写决策；纯家里环境请到交易机点此按钮'
+                  ? '云端只读：补跑会改交易机本地决策链，请在交易机执行'
                   : '从 last_bar_id 补跑漏掉的已完成 5 分钟 K 线决策（中间 K 只记决策；对齐下单请重启/启动模拟盘）'
               }
             >
@@ -433,6 +437,7 @@ export function OverviewPanel() {
                 size="small"
                 onClick={() => void onCatchUp()}
                 loading={catchingUp}
+                disabled={cloudReadOnly}
               >
                 补跑漏 K
               </Button>
@@ -440,6 +445,11 @@ export function OverviewPanel() {
             <Button size="small" onClick={() => void refresh()} loading={loading}>
               刷新
             </Button>
+            {cloudReadOnly ? (
+              <Tag color="blue" className="m-0">
+                云端只读
+              </Tag>
+            ) : null}
             <Tooltip title="品种切换只改图表对照；内盘实时 K 线与成交标记来自当前「运行会话」对应品种的天勤快照。会话是沪金时，选螺纹钢不会继续画沪金图。">
               <span className="cursor-help text-[11px] text-faint underline decoration-dotted">
                 说明
@@ -447,6 +457,15 @@ export function OverviewPanel() {
             </Tooltip>
           </div>
         </div>
+        {cloudReadOnly ? (
+          <Alert
+            className="mt-2"
+            type="info"
+            showIcon
+            banner
+            message={readOnlyHint}
+          />
+        ) : null}
         {symbolMismatch ? (
           <Alert
             className="mt-2"

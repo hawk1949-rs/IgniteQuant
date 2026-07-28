@@ -82,12 +82,50 @@ python3 tools/apply_supabase_schema.py --only product_tenant
 
 ## 手工验证（座舱云端读）
 
-1. 交易机：`.env` 配好 `DATABASE_URL`；`python tools/apply_supabase_schema.py --only sim_cockpit_projections`
-2. 交易机跑 `falcon_au_sim` → 确认 outbox 推送后云表 `sim_decision_projection` / `sim_intent_projection` / `sim_fill_projection` / `sim_instance` 有行
-3. （可选）历史回填：`PYTHONPATH=src python tools/backfill_sim_projections_to_supabase.py --db data/runtime/falcon_au_sim.sqlite`
-4. 家里电脑：只起 API+前端，`.env` 含 `DATABASE_URL` 与默认 `SIM_DATA_SOURCE=cloud`，**无需** `data/runtime/*.sqlite`
-5. 打开 `#/sim`：应能看到会话、决策、意图、成交与账户摘要；K 线可能为空并提示「仅交易机有实时 K 线」
-6. 本机调试旧行为：`SIM_DATA_SOURCE=local`
+1. 交易机：`.env` 配好 **Session pooler** `DATABASE_URL`（`postgres.PROJECT_REF@aws-0-REGION.pooler.supabase.com:6543`）；`python tools/verify_supabase.py` 应 OK
+2. `python tools/apply_supabase_schema.py --only sim_cockpit_projections`
+3. 交易机跑 `falcon_au_sim` → outbox 自动推送；或手动：`PYTHONPATH=src python tools/sync_outbox_to_supabase.py --db data/runtime/falcon_au_sim.sqlite`
+4. 确认云表 `sim_instance` / `sim_decision_projection` / `sim_intent_projection` / `sim_fill_projection` 有行
+5. （可选）历史回填：`PYTHONPATH=src python tools/backfill_sim_projections_to_supabase.py --db data/runtime/falcon_au_sim.sqlite`
+6. 观看端（本机或托管）：`.env` 含同一 `DATABASE_URL` 与 `SIM_DATA_SOURCE=cloud`，**无需** `data/runtime/*.sqlite`
+7. 打开 `#/sim`：应能看到会话、决策、意图、成交与账户摘要；页面标注「云端只读」；启动/补跑按钮禁用；K 线可能为空并提示「仅交易机有实时 K 线」
+8. 本机调试旧行为：`SIM_DATA_SOURCE=local`
+
+## 常驻托管只读座舱（不依赖笔记本开着）
+
+目标：浏览器随时打开座舱；**交易仍在交易机**，观看端只读 Supabase 投影。
+
+```bash
+# 构建一体镜像（API + 前端静态资源）
+docker build -t ignitequant-cockpit .
+
+docker run --rm -p 8787:8787 \
+  -e SIM_DATA_SOURCE=cloud \
+  -e DATABASE_URL='postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?sslmode=require' \
+  ignitequant-cockpit
+
+# 浏览器：http://HOST:8787/#/sim
+```
+
+可选 Fly.io：见仓库根目录 `fly.toml`（`fly secrets set DATABASE_URL=...` 后 `fly deploy`）。
+
+免费外网访问（不买域名）：用公网 IP，见 [`deploy/cockpit/README.md`](../deploy/cockpit/README.md)。示例：`http://公网IP/#/sim`（路由器转发 80→本机）。
+
+职责划分：
+
+| 角色 | 需要什么 | 做什么 |
+| --- | --- | --- |
+| 交易机 | `TQ_*` + sqlite + pooler `DATABASE_URL` | 跑 `falcon_au_sim`，写本地，outbox 推云 |
+| 托管观看端 | 仅 pooler `DATABASE_URL` + `SIM_DATA_SOURCE=cloud` | 提供常驻网页/API，**不下单** |
+| 禁止 | 云→本地回拉意图/成交进 sqlite | 避免双写；观看直读投影即可 |
+
+### 托管验收（关本机后仍可用）
+
+1. 交易机照常跑模拟并推云；确认投影表有行（见上文步骤 4）。
+2. 在**另一台常开机器/容器**部署观看端（仅 `DATABASE_URL` + `SIM_DATA_SOURCE=cloud`，**不挂** `TQ_*`、不挂 `data/runtime/*.sqlite`）。
+3. **关掉**笔记本上的 Vite（5173）、本机 uvicorn、甚至本机模拟进程后，浏览器只访问托管 URL 的 `#/sim`。
+4. 预期：页面可开；`GET /api/health` 含 `"sim_data_source":"cloud"`；会话/决策可见；有真实委托则意图/成交非空，否则明确空列表而非 500；UI 显示「云端只读」，启动/补跑禁用。
+5. 无 Docker 时可先本机验证读路径：`npm run build`（`web/`）后由同一 uvicorn 挂载 `web/dist`，用 `SIM_DATA_SOURCE=cloud` 访问 `http://127.0.0.1:8787/#/sim`（仍不依赖 Vite）。
 
 ## 换机迁移清单
 

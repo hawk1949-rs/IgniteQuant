@@ -152,7 +152,8 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
         return
       }
 
-      if (!repairedRef.current) {
+      const cloudMode = cat.read_only || cat.data_source === 'cloud'
+      if (!cloudMode && !repairedRef.current) {
         repairedRef.current = true
         void repairSimFills(id).catch(() => undefined)
       }

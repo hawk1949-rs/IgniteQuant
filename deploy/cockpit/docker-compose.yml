@@ -1,0 +1,35 @@
+services:
+  cockpit:
+    image: ignitequant-cockpit:latest
+    container_name: ignitequant-cockpit
+    restart: unless-stopped
+    environment:
+      SIM_DATA_SOURCE: cloud
+      DATABASE_URL: ${DATABASE_URL}
+      PYTHONPATH: /app:/app/src
+    ports:
+      - "8787:8787"
+    networks:
+      - cockpit_net
+
+  caddy:
+    image: caddy:2.10-alpine
+    container_name: ignitequant-caddy
+    restart: unless-stopped
+    depends_on:
+      - cockpit
+    ports:
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - cockpit_net
+
+networks:
+  cockpit_net:
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -26,7 +26,15 @@ def _load_dotenv(path: Path) -> None:
 def database_url(*, root: Path | None = None) -> str:
     if root is not None:
         _load_dotenv(root / ".env")
-    return os.environ.get("DATABASE_URL", "").strip()
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if url and "db." in url and ".supabase.co" in url and "pooler.supabase.com" not in url:
+        # Direct db host is often IPv6-only; Session pooler is required on many networks.
+        print(
+            "[cloud_sync] WARN: DATABASE_URL 使用 db.*.supabase.co 直连，"
+            "若连不上请改用 Session pooler（postgres.PROJECT_REF@aws-0-REGION.pooler.supabase.com:6543）",
+            flush=True,
+        )
+    return url
 
 
 def owner_id(*, root: Path | None = None) -> str | None:
