@@ -153,6 +153,116 @@ def _persist_state(
     )
 
 
+def _tq_position_snapshot(
+    symbol: str,
+    position,
+    *,
+    last_price: float | None = None,
+) -> PositionSnapshot:
+    """Build PositionSnapshot from a tqsdk Position object."""
+    from ignitequant.market.margin_rates import estimate_margin_for_symbol
+
+    net = int(getattr(position, "pos", 0) or 0)
+    long_today = int(getattr(position, "pos_long_today", 0) or 0)
+    long_his = int(getattr(position, "pos_long_his", 0) or 0)
+    short_today = int(getattr(position, "pos_short_today", 0) or 0)
+    short_his = int(getattr(position, "pos_short_his", 0) or 0)
+    # Fallback volume_* names used by some SDK builds
+    if long_today == 0 and long_his == 0:
+        long_today = int(getattr(position, "volume_long_today", 0) or 0)
+        long_his = int(getattr(position, "volume_long_his", 0) or 0)
+    if short_today == 0 and short_his == 0:
+        short_today = int(getattr(position, "volume_short_today", 0) or 0)
+        short_his = int(getattr(position, "volume_short_his", 0) or 0)
+
+    avg: float | None = None
+    if net > 0:
+        raw = getattr(position, "open_price_long", None)
+        try:
+            avg = float(raw) if raw not in (None, 0, 0.0) else None
+        except (TypeError, ValueError):
+            avg = None
+    elif net < 0:
+        raw = getattr(position, "open_price_short", None)
+        try:
+            avg = float(raw) if raw not in (None, 0, 0.0) else None
+        except (TypeError, ValueError):
+            avg = None
+
+    try:
+        upnl = float(getattr(position, "float_profit", 0) or 0)
+    except (TypeError, ValueError):
+        upnl = 0.0
+    try:
+        margin = float(getattr(position, "margin", 0) or 0)
+    except (TypeError, ValueError):
+        margin = 0.0
+
+    px = last_price
+    if px is None or px <= 0:
+        px = avg
+    if px is not None and float(px) > 0 and net != 0:
+        est, _rate, _mult = estimate_margin_for_symbol(
+            symbol, price=float(px), lots=net
+        )
+        if est is not None:
+            margin = float(est)
+
+    return PositionSnapshot(
+        symbol=symbol,
+        net_position=net,
+        long_today=long_today,
+        long_yesterday=long_his,
+        short_today=short_today,
+        short_yesterday=short_his,
+        average_entry_price=avg,
+        unrealized_pnl=upnl,
+        margin=margin,
+    )
+
+
+def _tq_account_snapshot(
+    account,
+    *,
+    symbol: str = "",
+    net_position: int = 0,
+    last_price: float | None = None,
+) -> AccountSnapshot:
+    from ignitequant.market.margin_rates import apply_ref_margin_to_account
+
+    try:
+        upnl = float(getattr(account, "float_profit", 0) or 0)
+    except (TypeError, ValueError):
+        upnl = 0.0
+    try:
+        rpnl = float(getattr(account, "close_profit", 0) or 0)
+    except (TypeError, ValueError):
+        rpnl = 0.0
+    equity = float(account.balance)
+    margin = float(account.margin)
+    margin_ratio = float(getattr(account, "risk_ratio", 0) or 0)
+    # Prefer ref_product_margin % × price × multiplier over TqSim risk_ratio.
+    if symbol:
+        ref = apply_ref_margin_to_account(
+            equity=equity,
+            symbol=symbol,
+            net_position=int(net_position),
+            last_price=last_price,
+        )
+        if ref.get("margin") is not None and ref.get("margin_ratio") is not None:
+            margin = float(ref["margin"])
+            margin_ratio = float(ref["margin_ratio"])
+    return AccountSnapshot(
+        account_id="tq_kq",
+        equity=equity,
+        available=float(account.available),
+        margin=margin,
+        margin_ratio=margin_ratio,
+        realized_pnl_today=rpnl,
+        unrealized_pnl=upnl,
+    )
+
+
 def _capture_live_klines(
     klines,
     *,
@@ -214,7 +324,7 @@ def _try_confirm_fill(
         persist.record_fill(fill)
         try:
             persist.snapshot_position(
-                PositionSnapshot(symbol=str(fill.symbol), net_position=net),
+                _tq_position_snapshot(str(fill.symbol), position, last_price=last_price),
                 source="broker_fill",
             )
         except Exception as exc:  # noqa: BLE001
@@ -376,16 +486,19 @@ def main() -> None:
                     flush=True,
                 )
                 persist.snapshot_position(
-                    PositionSnapshot(symbol=trade_symbol, net_position=int(position.pos)),
+                    _tq_position_snapshot(
+                        trade_symbol,
+                        position,
+                        last_price=float(getattr(main_quote, "last_price", 0) or 0) or None,
+                    ),
                     source="broker_startup",
                 )
                 persist.snapshot_account(
-                    AccountSnapshot(
-                        account_id="tq_kq",
-                        equity=float(account.balance),
-                        available=float(account.available),
-                        margin=float(account.margin),
-                        margin_ratio=float(getattr(account, "risk_ratio", 0) or 0),
+                    _tq_account_snapshot(
+                        account,
+                        symbol=trade_symbol,
+                        net_position=int(position.pos),
+                        last_price=float(getattr(main_quote, "last_price", 0) or 0) or None,
                     )
                 )
                 _cloud_sync_outbox(persist)
@@ -452,11 +565,71 @@ def main() -> None:
                             signal=0,
                         )
                     persist.snapshot_position(
-                        PositionSnapshot(
-                            symbol=trade_symbol, net_position=int(position.pos)
+                        _tq_position_snapshot(
+                            trade_symbol,
+                            position,
+                            last_price=float(getattr(main_quote, "last_price", 0) or 0) or None,
                         ),
                         source="broker_boot_flatten",
                     )
+
+            # 启动补跑：把 last_bar_id 之后漏掉的已完成 5m K 写入决策链，并推进内存目标。
+            if persist is not None and len(klines) >= 2:
+                try:
+                    from ignitequant.engine.catch_up import catch_up_missed_bars
+
+                    completed = klines.iloc[:-1]
+                    last_id = str(payload.get("last_bar_id") or "") if payload else ""
+                    cu = catch_up_missed_bars(
+                        session=persist,
+                        pipeline=pipeline,
+                        bars=completed,
+                        last_bar_id=last_id or None,
+                        confirmed_net=int(position.pos),
+                        source="tq_startup_klines",
+                    )
+                    if cu.missed:
+                        print(
+                            f"启动补跑K线 | {cu.message} source={cu.source}",
+                            flush=True,
+                        )
+                        last_saved_bar_id = cu.last_bar_id_after or last_saved_bar_id
+                        # 仅对最终目标做一次对齐下单（中间漏 K 只记决策）
+                        want = int(pipeline.current_target)
+                        net_cu = int(position.pos)
+                        if want != net_cu and executor is not None:
+                            rt_cu = persist.runtime
+                            increasing = abs(want) > abs(net_cu)
+                            if increasing and (
+                                not rt_cu.reconciliation_matched
+                                or rt_cu.kill_switch_active
+                                or rt_cu.unknown_order_count > 0
+                            ):
+                                print(
+                                    f"启动补跑跳过下单 | target={want} net={net_cu} "
+                                    f"rt={rt_cu.runtime_state}",
+                                    flush=True,
+                                )
+                            else:
+                                intent_cu = executor.set_target(
+                                    want,
+                                    decision_id=f"catchup:{cu.final_bar_id or 'boot'}",
+                                    current_net=net_cu,
+                                    urgency="HIGH",
+                                    reason_codes=("CATCH_UP_ALIGN",),
+                                    idempotency_key=(
+                                        f"catchup:{trade_symbol}:{want}:{net_cu}:"
+                                        f"{cu.final_bar_id or ''}"
+                                    ),
+                                )
+                                if intent_cu is not None:
+                                    persist.record_intent(intent_cu)
+                                    print(
+                                        f"启动补跑对齐下单 | {net_cu}->{want}",
+                                        flush=True,
+                                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"启动补跑跳过: {exc}", flush=True)
 
             result0 = pipeline.on_bar_close(klines, trade=True)
             annotate_klines(klines, result0)
@@ -652,21 +825,35 @@ def main() -> None:
                         )
                     ):
                         want = int(pipeline.current_target)
-                        print(
-                            f"[心跳] 仓位脱节补齐 target={want} net={net}",
-                            flush=True,
-                        )
-                        intent_hb = executor.set_target(
-                            want,
-                            decision_id=f"hb-resync:{int(now)}",
-                            current_net=net,
-                            urgency="HIGH",
-                            reason_codes=("TARGET_NET_RESYNC", "HEARTBEAT"),
-                            idempotency_key=f"hb-resync:{trade_symbol}:{want}:{net}",
-                        )
-                        if intent_hb and persist is not None:
-                            persist.record_intent(intent_hb)
-                        pending = want
+                        increasing = abs(want) > abs(net)
+                        rt_hb = persist.runtime if persist is not None else healthy_runtime()
+                        # DEGRADED / kill-switch 时禁止心跳旁路加仓（减仓仍允许对齐）。
+                        if increasing and (
+                            not rt_hb.reconciliation_matched
+                            or rt_hb.kill_switch_active
+                            or rt_hb.unknown_order_count > 0
+                        ):
+                            print(
+                                f"[心跳] 跳过加仓补齐 target={want} net={net} "
+                                f"rt={rt_hb.runtime_state} matched={rt_hb.reconciliation_matched}",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"[心跳] 仓位脱节补齐 target={want} net={net}",
+                                flush=True,
+                            )
+                            intent_hb = executor.set_target(
+                                want,
+                                decision_id=f"hb-resync:{int(now)}",
+                                current_net=net,
+                                urgency="HIGH",
+                                reason_codes=("TARGET_NET_RESYNC", "HEARTBEAT"),
+                                idempotency_key=f"hb-resync:{trade_symbol}:{want}:{net}",
+                            )
+                            if intent_hb and persist is not None:
+                                persist.record_intent(intent_hb)
+                            pending = want
                     if persist is not None and trade_symbol:
                         _persist_state(
                             persist,
@@ -680,18 +867,19 @@ def main() -> None:
                         )
                         # Keep cockpit equity / margin / net fresh outside bar closes.
                         persist.snapshot_position(
-                            PositionSnapshot(symbol=trade_symbol, net_position=net),
+                            _tq_position_snapshot(
+                                trade_symbol,
+                                position,
+                                last_price=q_px if q_px > 0 else None,
+                            ),
                             source="broker_heartbeat",
                         )
                         persist.snapshot_account(
-                            AccountSnapshot(
-                                account_id="tq_kq",
-                                equity=float(account.balance),
-                                available=float(account.available),
-                                margin=float(account.margin),
-                                margin_ratio=float(
-                                    getattr(account, "risk_ratio", 0) or 0
-                                ),
+                            _tq_account_snapshot(
+                                account,
+                                symbol=trade_symbol,
+                                net_position=net,
+                                last_price=q_px if q_px > 0 else None,
                             )
                         )
                         persist.record_heartbeat(
@@ -838,6 +1026,35 @@ def main() -> None:
                     print(f"{dt} 周期对账不一致 → DEGRADED", flush=True)
 
             runtime = persist.runtime if persist is not None else healthy_runtime()
+            # 换月后若仅因旧 DEGRADED 粘住，净仓已对齐则立即自愈（不必等整点周期对账）。
+            if (
+                persist is not None
+                and trade_symbol
+                and not runtime.reconciliation_matched
+                and int(pipeline.current_target) == net_pos
+                and runtime.unknown_order_count == 0
+                and not runtime.kill_switch_active
+            ):
+                runtime = persist.reconcile_now(
+                    LocalProjection(
+                        symbol=trade_symbol,
+                        expected_net=net_pos,
+                        current_target=pipeline.current_target,
+                        pending_desired=None,
+                        cooldown_left=int(pipeline.risk.state.cooldown_left),
+                        entry_price=pipeline.risk.state.entry_price,
+                        runtime_state=persist.runtime.runtime_state,
+                    ),
+                    BrokerFacts(
+                        symbol=trade_symbol,
+                        net_position=net_pos,
+                        equity=float(account.balance),
+                        available=float(account.available),
+                        margin=float(account.margin),
+                    ),
+                )
+                if runtime.reconciliation_matched:
+                    print(f"{dt} 对账自愈 → {runtime.runtime_state}", flush=True)
 
             # HOLD/COOLDOWN usually skip orders — but if strategy target ≠ broker net
             # (failed open, missed fill, etc.), keep retrying alignment each bar.
@@ -881,6 +1098,25 @@ def main() -> None:
                     f"{dt} 事前风控{pretrade.action.value} | hits={pretrade.rule_hits}",
                     flush=True,
                 )
+                # TARGET 路径会先乐观改 current_target；被拒必须回滚，否则心跳会绕过风控成交。
+                if result.applied_action == "TARGET":
+                    before = int(result.target_before)
+                    if before == 0:
+                        pipeline.force_flat()
+                    else:
+                        pipeline.restore_runtime(
+                            current_target=before,
+                            cooldown_left=int(pipeline.risk.state.cooldown_left),
+                            entry_price=pipeline.risk.state.entry_price,
+                            stop_price=pipeline.risk.state.stop_price,
+                            take_price=pipeline.risk.state.take_price,
+                            entry_signal=pipeline.risk.state.entry_signal,
+                        )
+                    print(
+                        f"{dt} 目标回滚 {result.target_after}->{before} "
+                        f"(事前风控未批准下单)",
+                        flush=True,
+                    )
                 _persist_state(
                     persist,
                     pipeline,

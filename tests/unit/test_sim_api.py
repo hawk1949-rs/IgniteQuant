@@ -21,6 +21,8 @@ def runtime_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     db_path = runtime / "falcon_au_sim.sqlite"
     conn = sqlite3.connect(str(db_path))
     conn.executescript(DDL)
+    monkeypatch.setenv("SIM_DATA_SOURCE", "local")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """
@@ -41,6 +43,9 @@ def runtime_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                     "confirmed_net": 1,
                     "cooldown_left": 0,
                     "config_hash": "abc",
+                    "entry_price": 870.0,
+                    "stop_price": 860.0,
+                    "take_price": 900.0,
                 }
             ),
             1,
@@ -59,10 +64,11 @@ def runtime_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     conn.execute(
         """
         INSERT INTO position_snapshot_event(
-            instance_id, symbol, net_position, source, as_of, payload_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            instance_id, symbol, net_position, source, as_of, payload_json, created_at,
+            avg_entry_price, unrealized_pnl, margin
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        ("falcon_au_sim", "SHFE.au2608", 1, "broker", now, "{}", now),
+        ("falcon_au_sim", "SHFE.au2608", 1, "broker", now, "{}", now, 870.0, 10_000.0, 40_000.0),
     )
     payload = {
         "factors": {
@@ -186,6 +192,31 @@ def test_sim_catalog(client: TestClient) -> None:
     assert any(l["instance_id"] == "falcon_au_sim" for l in body["launchers"])
 
 
+def test_catch_up_bars_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ignitequant.engine.catch_up import CatchUpResult
+
+    def _fake(*args, **kwargs):
+        return CatchUpResult(
+            missed=2,
+            recorded=2,
+            message="补跑完成：漏 2 根",
+            source="test",
+            final_target=0,
+            confirmed_net=0,
+        )
+
+    monkeypatch.setattr(
+        "ignitequant.engine.catch_up.catch_up_session_db",
+        _fake,
+    )
+    res = client.post("/api/sim/sessions/falcon_au_sim/catch-up-bars")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["missed"] == 2
+    assert body["recorded"] == 2
+    assert "instance_id" in body
+
+
 def test_sim_sessions_and_summary(client: TestClient) -> None:
     res = client.get("/api/sim/sessions")
     assert res.status_code == 200
@@ -203,6 +234,55 @@ def test_sim_sessions_and_summary(client: TestClient) -> None:
     assert body["framework_label"] == "天勤模拟盘"
     assert body["last_price"] == pytest.approx(880.0)
     assert body["last_price_source"] == "decision_close"
+    assert len(body["open_positions"]) == 1
+    op = body["open_positions"][0]
+    assert op["symbol"] == "SHFE.au2608"
+    assert op["side"] == "LONG"
+    assert op["lots"] == 1
+    assert op["average_entry_price"] == pytest.approx(870.0)
+    assert op["unrealized_pnl"] == pytest.approx(10_000.0)
+    # ref margin: 880 * 1000 * 1 * 16% (not the seeded broker margin 40k)
+    assert op["margin"] == pytest.approx(140_800.0)
+    assert op["margin_rate_pct"] == pytest.approx(16.0)
+    assert op["stop_price"] == pytest.approx(860.0)
+    assert body["account"]["margin"] == pytest.approx(140_800.0)
+    assert body["account"]["margin_ratio"] == pytest.approx(140_800.0 / 1_001_200.0)
+    assert body["account"]["margin_source"] == "ref_product_margin"
+
+
+def test_open_positions_view_unit() -> None:
+    from dashboard.open_positions import open_positions_view
+
+    assert open_positions_view(position=None, account=None, state_payload={}, last_price=1) == []
+    flat = open_positions_view(
+        position={"symbol": "SHFE.au2608", "net_position": 0},
+        account=None,
+        state_payload={},
+        last_price=880,
+    )
+    assert flat == []
+    rows = open_positions_view(
+        position={
+            "symbol": "SHFE.au2610",
+            "net_position": -2,
+            "average_entry_price": 900.0,
+            "unrealized_pnl": 0,
+            "margin": 0,
+        },
+        account={"margin": 80_000.0},
+        state_payload={"entry_price": 901.0},
+        last_price=890.0,
+    )
+    assert len(rows) == 1
+    assert rows[0]["side"] == "SHORT"
+    assert rows[0]["lots"] == 2
+    # (890-900)*2*1000*(-1 for short? wait direction=-1 for short)
+    # direction = -1 when net < 0
+    # upnl = (890-900)*2*1000*(-1) = (-10)*2*1000*(-1) = 20000
+    assert rows[0]["unrealized_pnl"] == pytest.approx(20_000.0)
+    # SHFE.au → 16%: 890 * 1000 * 2 * 0.16
+    assert rows[0]["margin"] == pytest.approx(284_800.0)
+    assert rows[0]["margin_rate_pct"] == pytest.approx(16.0)
 
 
 def test_sim_metrics_and_decisions(client: TestClient) -> None:

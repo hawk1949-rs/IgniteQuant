@@ -20,6 +20,8 @@ from fastapi import APIRouter, HTTPException, Query
 
 from dashboard.safe_path import resolve_runtime_db
 from dashboard.catalog import STRATEGIES, SYMBOLS
+from dashboard import sim_cloud_read
+from dashboard.open_positions import open_positions_view as _open_positions_view
 from ignitequant.market.sim_klines import (
     find_snapshot_for_symbol,
     load_klines_snapshot,
@@ -855,8 +857,7 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 def _latest_account(conn: sqlite3.Connection, instance_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT equity, available, margin, margin_ratio, as_of, created_at, payload_json
-        FROM account_snapshot_event
+        SELECT * FROM account_snapshot_event
         WHERE instance_id = ?
         ORDER BY seq DESC LIMIT 1
         """,
@@ -864,22 +865,33 @@ def _latest_account(conn: sqlite3.Connection, instance_id: str) -> dict[str, Any
     ).fetchone()
     if row is None:
         return None
+    keys = set(row.keys())
+
+    def _f(name: str, default: float = 0.0) -> float:
+        if name not in keys or row[name] is None:
+            return default
+        try:
+            return float(row[name])
+        except (TypeError, ValueError):
+            return default
+
     return {
-        "equity": float(row["equity"]),
-        "available": float(row["available"]),
-        "margin": float(row["margin"]),
-        "margin_ratio": float(row["margin_ratio"]),
-        "as_of": row["as_of"],
-        "created_at": row["created_at"],
-        "payload": _loads(row["payload_json"]),
+        "equity": _f("equity"),
+        "available": _f("available"),
+        "margin": _f("margin"),
+        "margin_ratio": _f("margin_ratio"),
+        "realized_pnl_today": _f("realized_pnl_today"),
+        "unrealized_pnl": _f("unrealized_pnl"),
+        "as_of": row["as_of"] if "as_of" in keys else None,
+        "created_at": row["created_at"] if "created_at" in keys else None,
+        "payload": _loads(row["payload_json"]) if "payload_json" in keys else {},
     }
 
 
 def _latest_position(conn: sqlite3.Connection, instance_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT symbol, net_position, source, as_of, created_at, payload_json
-        FROM position_snapshot_event
+        SELECT * FROM position_snapshot_event
         WHERE instance_id = ?
         ORDER BY seq DESC LIMIT 1
         """,
@@ -887,13 +899,51 @@ def _latest_position(conn: sqlite3.Connection, instance_id: str) -> dict[str, An
     ).fetchone()
     if row is None:
         return None
+    keys = set(row.keys())
+    payload = _loads(row["payload_json"]) if "payload_json" in keys else {}
+
+    def _i(name: str, default: int = 0) -> int:
+        if name not in keys or row[name] is None:
+            return default
+        try:
+            return int(row[name])
+        except (TypeError, ValueError):
+            return default
+
+    def _f(name: str, default: float | None = None) -> float | None:
+        if name not in keys or row[name] is None:
+            return default
+        try:
+            return float(row[name])
+        except (TypeError, ValueError):
+            return default
+
+    avg = _f("avg_entry_price")
+    if avg is None and isinstance(payload, dict):
+        try:
+            raw = payload.get("average_entry_price")
+            avg = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            avg = None
+
     return {
         "symbol": row["symbol"],
-        "net_position": int(row["net_position"]),
-        "source": row["source"],
-        "as_of": row["as_of"],
-        "created_at": row["created_at"],
-        "payload": _loads(row["payload_json"]),
+        "net_position": _i("net_position"),
+        "source": row["source"] if "source" in keys else None,
+        "as_of": row["as_of"] if "as_of" in keys else None,
+        "created_at": row["created_at"] if "created_at" in keys else None,
+        "long_today": _i("long_today"),
+        "long_yesterday": _i("long_yesterday"),
+        "short_today": _i("short_today"),
+        "short_yesterday": _i("short_yesterday"),
+        "average_entry_price": avg,
+        "unrealized_pnl": float(_f("unrealized_pnl", 0.0) or 0.0),
+        "margin": float(
+            _f("margin", 0.0)
+            or (payload.get("margin") if isinstance(payload, dict) else 0)
+            or 0
+        ),
+        "payload": payload,
     }
 
 
@@ -1144,11 +1194,23 @@ def sim_catalog() -> dict[str, Any]:
         "runtime_dir": str(RUNTIME_DIR),
         "refresh_hint": "页面按 5 分钟 K 线节奏自动刷新",
         "symbol_catalog_note": "品种来自 IgniteQuant 本地目录（au/ag/rb/fg），映射天勤主力连续合约；K 线优先读 data/market_cache。",
+        "data_source": sim_cloud_read.data_source(),
+        "read_only_hint": (
+            "当前为云端只读；启动模拟盘请在交易机运行。"
+            if sim_cloud_read.is_cloud()
+            else None
+        ),
     }
 
 
 @router.get("/sessions")
 def list_sessions() -> dict[str, Any]:
+    if sim_cloud_read.is_cloud():
+        return sim_cloud_read.list_sessions_cloud(
+            root=ROOT,
+            process_status=_process_status,
+            launchers=SIM_LAUNCHERS,
+        )
     sessions: list[dict[str, Any]] = []
     for path in _discover_dbs():
         instance_id = _instance_id_from_path(path)
@@ -1233,6 +1295,14 @@ def list_sessions() -> dict[str, Any]:
 
 @router.get("/sessions/{instance_id}/summary")
 def session_summary(instance_id: str) -> dict[str, Any]:
+    if sim_cloud_read.is_cloud():
+        return sim_cloud_read.session_summary_cloud(
+            instance_id,
+            root=ROOT,
+            process_status=_process_status,
+            launchers=SIM_LAUNCHERS,
+            market_session=_shfe_precious_session_open(),
+        )
     path = _resolve_db(instance_id)
     conn = _open_ro(path)
     try:
@@ -1254,6 +1324,8 @@ def session_summary(instance_id: str) -> dict[str, Any]:
             status = "STALE"
         live = _live_quote(conn, instance_id)
         position = _latest_position(conn, instance_id)
+        account = _latest_account(conn, instance_id)
+        state_payload = _loads(state["payload_json"])
         session = _shfe_precious_session_open()
         net = int(position["net_position"]) if position else 0
         position_note = None
@@ -1263,6 +1335,38 @@ def session_summary(instance_id: str) -> dict[str, Any]:
                 f"{(position or {}).get('source') or 'broker'}），"
                 "不是前端误显示；周末休市不会自动平仓。"
             )
+        open_positions = _open_positions_view(
+            position=position,
+            account=account,
+            state_payload=state_payload,
+            last_price=live.get("last_price"),
+        )
+        # Override account margin/ratio from ref_product_margin (TqSim risk_ratio is wrong).
+        if account and (position or state["symbol"]):
+            from ignitequant.market.margin_rates import apply_ref_margin_to_account
+
+            sym = (position or {}).get("symbol") or state["symbol"]
+            confirmed = state_payload.get("confirmed_net")
+            try:
+                net_for_m = int(confirmed) if confirmed is not None else net
+            except (TypeError, ValueError):
+                net_for_m = net
+            ref_m = apply_ref_margin_to_account(
+                equity=float(account.get("equity") or 0),
+                symbol=str(sym),
+                net_position=net_for_m,
+                last_price=live.get("last_price"),
+                conn=conn,
+            )
+            if ref_m.get("margin") is not None and ref_m.get("margin_ratio") is not None:
+                account = {
+                    **account,
+                    "margin": float(ref_m["margin"]),
+                    "margin_ratio": float(ref_m["margin_ratio"]),
+                    "margin_rate": ref_m.get("margin_rate"),
+                    "margin_rate_pct": ref_m.get("margin_rate_pct"),
+                    "margin_source": ref_m.get("margin_source"),
+                }
         return {
             "instance_id": instance_id,
             "framework": "tq",
@@ -1275,9 +1379,10 @@ def session_summary(instance_id: str) -> dict[str, Any]:
             "status_label": _status_label(status),
             "label": SIM_LAUNCHERS.get(instance_id, {}).get("label") or instance_id,
             "updated_at": updated,
-            "payload": _loads(state["payload_json"]),
-            "account": _latest_account(conn, instance_id),
+            "payload": state_payload,
+            "account": account,
             "position": position,
+            "open_positions": open_positions,
             "position_note": position_note,
             "market_session": session,
             "last_decision_at": _latest_decision_at(conn, instance_id),
@@ -1362,6 +1467,62 @@ def session_repair_fills(instance_id: str) -> dict[str, Any]:
     path = _resolve_db(instance_id)
     repaired = repair_missing_fills(path, instance_id)
     return {"instance_id": instance_id, "repaired": repaired}
+
+
+@router.post("/sessions/{instance_id}/catch-up-bars")
+def session_catch_up_bars(instance_id: str) -> dict[str, Any]:
+    """Replay missed completed 5m bars into decision chain (local sqlite only).
+
+    Does not place live broker orders from the API. If the sim process is running,
+    prefer restarting it (startup catch-up can align orders). This endpoint still
+    backfills decision history for the cockpit.
+    """
+    from dashboard.safe_path import validate_safe_id
+    from ignitequant.engine.catch_up import catch_up_session_db
+
+    validate_safe_id(instance_id, field="instance_id")
+    if sim_cloud_read.is_cloud():
+        # Allow if local sqlite exists (trade PC with cloud default); else 503-ish.
+        try:
+            path = _resolve_db(instance_id)
+        except HTTPException:
+            raise HTTPException(
+                503,
+                "云端只读模式且无本地 sqlite：请在交易机执行补跑（或设 SIM_DATA_SOURCE=local）。",
+            ) from None
+    else:
+        path = _resolve_db(instance_id)
+
+    proc = _process_status(instance_id)
+    meta = SIM_LAUNCHERS.get(instance_id) or {}
+    signal_symbol = "KQ.m@SHFE.au"
+    sid = meta.get("symbol_id") or "au"
+    if sid in INSTRUMENTS:
+        signal_symbol = INSTRUMENTS[sid].signal_symbol
+
+    result = catch_up_session_db(
+        path,
+        instance_id,
+        runtime_dir=RUNTIME_DIR,
+        root=ROOT,
+        signal_symbol=signal_symbol,
+    )
+    body = result.to_dict()
+    body["instance_id"] = instance_id
+    body["process_running"] = bool(proc.get("process_running"))
+    if proc.get("process_running"):
+        body["hint"] = (
+            "决策链已尽量补写。模拟盘进程仍在内存中运行时，下单状态可能未同步；"
+            "建议重启模拟盘以做启动补跑对齐。"
+        )
+    elif result.final_target != result.confirmed_net and result.missed:
+        body["hint"] = (
+            f"补跑后策略目标={result.final_target}，净仓={result.confirmed_net}；"
+            "请启动模拟盘以对齐下单。"
+        )
+    else:
+        body["hint"] = None
+    return body
 
 
 @router.get("/overseas/bars")
@@ -1504,6 +1665,8 @@ def market_bars(
 
 @router.get("/sessions/{instance_id}/metrics")
 def session_metrics(instance_id: str) -> dict[str, Any]:
+    if sim_cloud_read.is_cloud():
+        return sim_cloud_read.session_metrics_cloud(instance_id, root=ROOT)
     path = _resolve_db(instance_id)
     conn = _open_ro(path)
     try:
@@ -1519,6 +1682,10 @@ def session_decisions(
     limit: int = Query(50, ge=1, le=500),
     before: str | None = None,
 ) -> dict[str, Any]:
+    if sim_cloud_read.is_cloud():
+        return sim_cloud_read.session_decisions_cloud(
+            instance_id, limit=limit, before=before, root=ROOT
+        )
     path = _resolve_db(instance_id)
     conn = _open_ro(path)
     try:
@@ -1551,6 +1718,8 @@ def session_intents(
     instance_id: str,
     limit: int = Query(100, ge=1, le=500),
 ) -> dict[str, Any]:
+    if sim_cloud_read.is_cloud():
+        return sim_cloud_read.session_intents_cloud(instance_id, limit=limit, root=ROOT)
     path = _resolve_db(instance_id)
     conn = _open_ro(path)
     try:
@@ -1590,6 +1759,8 @@ def session_fills(
     instance_id: str,
     limit: int = Query(100, ge=1, le=500),
 ) -> dict[str, Any]:
+    if sim_cloud_read.is_cloud():
+        return sim_cloud_read.session_fills_cloud(instance_id, limit=limit, root=ROOT)
     path = _resolve_db(instance_id)
     conn = _open_ro(path)
     try:
@@ -1631,6 +1802,69 @@ def session_bars(
     limit: int = Query(400, ge=10, le=2000),
 ) -> dict[str, Any]:
     """Bars for cockpit: Tq sim live snapshot only (no market_cache)."""
+    if sim_cloud_read.is_cloud():
+        trade_symbol = symbol or "KQ.m@SHFE.au"
+        last_price = None
+        try:
+            summary = sim_cloud_read.session_summary_cloud(
+                instance_id,
+                root=ROOT,
+                process_status=_process_status,
+                launchers=SIM_LAUNCHERS,
+                market_session=_shfe_precious_session_open(),
+            )
+            trade_symbol = symbol or summary.get("symbol") or trade_symbol
+            last_price = summary.get("last_price")
+        except HTTPException:
+            pass
+        signal_symbol = _signal_symbol_for_trade(str(trade_symbol))
+        snap = load_klines_snapshot(instance_id, runtime_dir=RUNTIME_DIR, limit=limit)
+        bars: list[dict[str, Any]] = list((snap or {}).get("bars") or [])
+        if end and bars:
+            end_ts = _parse_ts(end)
+            if end_ts is not None:
+                end_sec = int(end_ts.timestamp())
+                bars = [b for b in bars if int(b.get("time") or 0) <= end_sec]
+        markers: list[dict[str, Any]] = []
+        try:
+            fills = sim_cloud_read.session_fills_cloud(instance_id, limit=200, root=ROOT)
+            for f in fills.get("fills") or []:
+                ts = _parse_ts(f.get("trade_time")) or _parse_ts(f.get("created_at"))
+                if ts is None:
+                    continue
+                side = str(f.get("side") or "").upper()
+                is_buy = side in {"BUY", "LONG"} or "BUY" in side
+                markers.append(
+                    {
+                        "time": int(ts.timestamp()),
+                        "position": "belowBar" if is_buy else "aboveBar",
+                        "color": "#30d158" if is_buy else "#ff453a",
+                        "shape": "arrowUp" if is_buy else "arrowDown",
+                        "text": f"{'B' if is_buy else 'S'}{abs(int(f.get('qty') or 0))}@{float(f.get('price') or 0):.2f}",
+                        "side": "BUY" if is_buy else "SELL",
+                        "price": float(f.get("price") or 0),
+                        "qty": int(f.get("qty") or 0),
+                    }
+                )
+        except HTTPException:
+            pass
+        return {
+            "instance_id": instance_id,
+            "signal_symbol": signal_symbol,
+            "trade_symbol": trade_symbol,
+            "bars": bars,
+            "markers": markers,
+            "last_price": last_price,
+            "last_price_source": "cloud_payload" if last_price else None,
+            "last_price_as_of": None,
+            "hint": (
+                None
+                if bars
+                else "云端只读模式：实时 K 线仅在交易机写入本地快照。可用 market_cache 归档，或在交易机打开座舱查看热 K 线。"
+            ),
+            "source": "cloud_readonly",
+            "data_source": "cloud",
+        }
     path = _resolve_db(instance_id)
     conn = _open_ro(path)
     try:

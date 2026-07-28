@@ -20,7 +20,7 @@ import {
   shortBiasLabel,
   statusLabel,
 } from './labels'
-import { startSimSession } from '@/lib/api'
+import { catchUpSimBars, startSimSession } from '@/lib/api'
 import { formatLocalDateTime } from './time'
 import { useSimTablePagination } from './tablePagination'
 import { HeartbeatBoard } from './HeartbeatBoard'
@@ -156,6 +156,11 @@ export function OverviewPanel() {
   const status = summary?.status || 'IDLE'
   const statusText = summary?.status_label || statusLabel(status)
   const processRunning = Boolean(summary?.process_running)
+  const cloudReadOnly = Boolean(
+    (summary as { read_only?: boolean } | null)?.read_only ||
+      (summary as { data_source?: string } | null)?.data_source === 'cloud',
+  )
+  const [catchingUp, setCatchingUp] = useState(false)
   const selectedSymbol = catalog?.symbols?.find((s) => s.id === symbolId)
   const launcherSymbolId =
     catalog?.launchers?.find((l) => l.instance_id === instanceId)?.symbol_id ?? null
@@ -185,6 +190,7 @@ export function OverviewPanel() {
   const regimeConflict = Boolean(chartCtx?.conflict)
   const session = summary?.market_session || bars?.market_session
   const positionNote = summary?.position_note
+  const openPositions = summary?.open_positions ?? []
   const decisionsPagination = useSimTablePagination('decisions', 10, decisions.length)
   const intentsPagination = useSimTablePagination('intents', 10, intents.length)
   const fillsPagination = useSimTablePagination('fills', 10, fills.length)
@@ -227,6 +233,21 @@ export function OverviewPanel() {
       message.error(e instanceof Error ? e.message : String(e))
     } finally {
       setStarting(false)
+    }
+  }
+
+  const onCatchUp = async () => {
+    setCatchingUp(true)
+    try {
+      const res = await catchUpSimBars(instanceId)
+      const base = res.message || '补跑完成'
+      if (res.hint) message.warning(`${base}；${res.hint}`)
+      else message.success(base)
+      await refresh()
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCatchingUp(false)
     }
   }
 
@@ -397,10 +418,25 @@ export function OverviewPanel() {
               size="small"
               onClick={() => void onStart()}
               loading={starting}
-              disabled={processRunning}
+              disabled={processRunning || cloudReadOnly}
             >
               {processRunning ? '已在运行' : '启动'}
             </Button>
+            <Tooltip
+              title={
+                cloudReadOnly
+                  ? '当前 API 为云端读路径：若本机有 sqlite 仍可补写决策；纯家里环境请到交易机点此按钮'
+                  : '从 last_bar_id 补跑漏掉的已完成 5 分钟 K 线决策（中间 K 只记决策；对齐下单请重启/启动模拟盘）'
+              }
+            >
+              <Button
+                size="small"
+                onClick={() => void onCatchUp()}
+                loading={catchingUp}
+              >
+                补跑漏 K
+              </Button>
+            </Tooltip>
             <Button size="small" onClick={() => void refresh()} loading={loading}>
               刷新
             </Button>
@@ -507,13 +543,13 @@ export function OverviewPanel() {
             key="mg"
             label="保证金"
             value={margin > 0 ? `¥${money(margin)}` : '—'}
-            tip="天勤 account.margin；模拟盘保证金率可能低于交易所实盘"
+            tip="按 Supabase/本地 ref_product_margin 品种保证金比例估算：价格×乘数×手数×比例（不采信天勤模拟保证金）"
           />,
           <Metric
             key="mr"
             label="风险度"
             value={marginRatio > 0 ? pct(marginRatio) : '—'}
-            tip="天勤 account.risk_ratio（占用保证金/权益），不是交易所官方保证金率"
+            tip="占用保证金/权益；比例来自品种保证金表（如沪金 16%），不是天勤 risk_ratio"
           />,
           <Metric
             key="pnl"
@@ -540,6 +576,92 @@ export function OverviewPanel() {
           </div>
         ))}
       </section>
+
+      {/* 当前持仓合约 */}
+      <Section
+        title="当前持仓"
+        extra={
+          openPositions.length
+            ? `${openPositions.length} 张合约`
+            : net === 0
+              ? '空仓'
+              : '等待持仓快照'
+        }
+      >
+        {openPositions.length ? (
+          <Table
+            size="small"
+            pagination={false}
+            rowKey={(r) => `${r.symbol}-${r.side}`}
+            dataSource={openPositions}
+            columns={[
+              {
+                title: '合约',
+                dataIndex: 'symbol',
+                render: (v: string) => <span className="font-medium">{v}</span>,
+              },
+              {
+                title: '方向',
+                dataIndex: 'side_label',
+                width: 64,
+                render: (v: string, r) => (
+                  <Tag color={r.side === 'LONG' ? 'success' : 'error'}>{v || r.side}</Tag>
+                ),
+              },
+              { title: '手数', dataIndex: 'lots', width: 64 },
+              {
+                title: '开仓均价',
+                dataIndex: 'average_entry_price',
+                render: (v: number | null | undefined) =>
+                  v != null ? Number(v).toFixed(2) : '—',
+              },
+              {
+                title: '最新价',
+                dataIndex: 'last_price',
+                render: (v: number | null | undefined) =>
+                  v != null ? Number(v).toFixed(2) : '—',
+              },
+              {
+                title: '浮动盈亏',
+                dataIndex: 'unrealized_pnl',
+                render: (v: number) => {
+                  const n = Number(v || 0)
+                  return (
+                    <span className={n > 0 ? 'text-emerald-500' : n < 0 ? 'text-rose-500' : ''}>
+                      ¥{money(n)}
+                    </span>
+                  )
+                },
+              },
+              {
+                title: '保证金',
+                dataIndex: 'margin',
+                render: (v: number, r) => {
+                  const pct =
+                    r.margin_rate_pct != null
+                      ? ` · ${Number(r.margin_rate_pct).toFixed(0)}%`
+                      : ''
+                  return v > 0 ? `¥${money(v)}${pct}` : '—'
+                },
+              },
+              {
+                title: '止损/止盈',
+                key: 'stops',
+                render: (_: unknown, r) => {
+                  const stop = r.stop_price
+                  const take = r.take_price
+                  if (stop == null && take == null) return '—'
+                  const s = stop != null ? Number(stop).toFixed(2) : '—'
+                  const t = take != null ? Number(take).toFixed(2) : '—'
+                  return `${s} / ${t}`
+                },
+              },
+            ]}
+          />
+        ) : (
+          <p className="m-0 text-sm text-muted">当前无持仓。</p>
+        )}
+      </Section>
 
       {/* 双图 */}
       <div className="flex flex-wrap items-center justify-between gap-2">

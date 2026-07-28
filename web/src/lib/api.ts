@@ -258,6 +258,11 @@ export type SimSummary = {
     available: number
     margin: number
     margin_ratio: number
+    realized_pnl_today?: number
+    unrealized_pnl?: number
+    margin_rate?: number | null
+    margin_rate_pct?: number | null
+    margin_source?: string
     as_of?: string
     created_at?: string
   } | null
@@ -266,7 +271,32 @@ export type SimSummary = {
     net_position: number
     source?: string
     as_of?: string
+    average_entry_price?: number | null
+    unrealized_pnl?: number
+    margin?: number
+    long_today?: number
+    long_yesterday?: number
+    short_today?: number
+    short_yesterday?: number
   } | null
+  open_positions?: Array<{
+    symbol: string
+    side: 'LONG' | 'SHORT' | string
+    side_label?: string
+    lots: number
+    net_position: number
+    average_entry_price?: number | null
+    last_price?: number | null
+    unrealized_pnl: number
+    margin: number
+    margin_rate?: number | null
+    margin_rate_pct?: number | null
+    margin_source?: string
+    source?: string
+    as_of?: string
+    stop_price?: number | null
+    take_price?: number | null
+  }>
   position_note?: string | null
   market_session?: {
     open: boolean
@@ -491,6 +521,24 @@ export function repairSimFills(instanceId: string) {
     `/api/sim/sessions/${encodeURIComponent(instanceId)}/repair-fills`,
     { method: 'POST' },
   )
+}
+
+export function catchUpSimBars(instanceId: string) {
+  return request<{
+    instance_id: string
+    missed: number
+    recorded: number
+    skipped_existing: number
+    last_bar_id_before?: string | null
+    last_bar_id_after?: string | null
+    final_target: number
+    confirmed_net: number
+    message: string
+    source?: string
+    process_running?: boolean
+    hint?: string | null
+    bar_ids?: string[]
+  }>(`/api/sim/sessions/${encodeURIComponent(instanceId)}/catch-up-bars`, { method: 'POST' })
 }
 
 export function fetchSimBars(

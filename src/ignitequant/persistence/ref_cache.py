@@ -27,7 +27,7 @@ def _utc_now() -> str:
 
 
 def seed_ref_tables(conn: sqlite3.Connection) -> int:
-    """Upsert product / fee / session rows from the local instrument catalog."""
+    """Upsert product / fee / session / margin rows from the local catalogs."""
     now = _utc_now()
     n = 0
     for spec in INSTRUMENTS.values():
@@ -112,7 +112,51 @@ def seed_ref_tables(conn: sqlite3.Connection) -> int:
             (spec.signal_symbol, spec.signal_symbol),
         )
         n += 1
+    seed_product_margin_rates(conn)
     conn.commit()
+    return n
+
+
+def seed_product_margin_rates(conn: sqlite3.Connection) -> int:
+    """Upsert ref_product_margin (+ instrument default_margin_rate) from bundled JSON."""
+    from ignitequant.market.margin_rates import _DATA_PATH, _bundled_rates
+
+    if not _DATA_PATH.is_file():
+        return 0
+    try:
+        payload = json.loads(_DATA_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    now = _utc_now()
+    source = str(payload.get("source") or "bundled_json")
+    as_of = str(payload.get("as_of") or "")
+    n = 0
+    for (exchange, product), rate in _bundled_rates().items():
+        pct = float(rate) * 100.0
+        conn.execute(
+            """
+            INSERT INTO ref_product_margin(
+                exchange_id, product_id, margin_rate_pct, margin_rate,
+                source, as_of, notes, payload_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?)
+            ON CONFLICT(exchange_id, product_id) DO UPDATE SET
+                margin_rate_pct=excluded.margin_rate_pct,
+                margin_rate=excluded.margin_rate,
+                source=excluded.source,
+                as_of=excluded.as_of,
+                updated_at=excluded.updated_at
+            """,
+            (exchange, product, pct, float(rate), source, as_of, "bundled_seed", now),
+        )
+        conn.execute(
+            """
+            UPDATE ref_instrument
+            SET default_margin_rate = ?, updated_at = ?
+            WHERE LOWER(product_id) = ? AND UPPER(exchange_id) = ?
+            """,
+            (float(rate), now, product, exchange),
+        )
+        n += 1
     return n
 
 

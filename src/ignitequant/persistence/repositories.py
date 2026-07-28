@@ -617,8 +617,8 @@ class SqliteTradingRepository:
             INSERT INTO position_snapshot_event(
                 instance_id, symbol, net_position, source, as_of, payload_json, created_at,
                 long_today, long_yesterday, short_today, short_yesterday,
-                avg_entry_price, unrealized_pnl
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                avg_entry_price, unrealized_pnl, margin
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 instance_id,
@@ -634,6 +634,7 @@ class SqliteTradingRepository:
                 int(snap.short_yesterday),
                 snap.average_entry_price,
                 float(snap.unrealized_pnl),
+                float(getattr(snap, "margin", 0) or 0),
             ),
         )
         self._conn.commit()

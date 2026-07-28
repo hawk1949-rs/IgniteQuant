@@ -1,4 +1,4 @@
-"""Push local sync_outbox → Supabase trading_event_inbox + sim_instance.
+"""Push local sync_outbox → Supabase trading_event_inbox + sim_instance + projections.
 
 Safe to call from the trading loop: failures are swallowed by callers.
 """
@@ -59,6 +59,10 @@ def push_outbox_once(
     """Push pending outbox rows. Returns counts; raises only on hard import/connect errors
     that callers may choose to catch.
     """
+    from ignitequant.persistence.cloud_projections import (
+        sim_instance_patch_from_payload,
+        upsert_projection_for_event,
+    )
     from ignitequant.persistence.outbox import list_pending, mark_failed, mark_synced, prune_synced
 
     if not database_url:
@@ -84,10 +88,8 @@ def push_outbox_once(
                 instance_keys.add(instance_key)
                 try:
                     payload = json.loads(row["payload_json"])
-                    status = _map_sim_status(
-                        payload.get("runtime_state"),
-                        str(row["event_type"]),
-                    )
+                    event_type = str(row["event_type"])
+                    status = _map_sim_status(payload.get("runtime_state"), event_type)
                     cur.execute(
                         """
                         INSERT INTO trading_event_inbox(
@@ -99,7 +101,7 @@ def push_outbox_once(
                         (
                             instance_key,
                             int(row["id"]),
-                            row["event_type"],
+                            event_type,
                             row["aggregate_type"],
                             row["aggregate_id"],
                             Json(payload),
@@ -107,9 +109,23 @@ def push_outbox_once(
                             owner_id_value,
                         ),
                     )
-                    symbol_id = payload.get("symbol") or payload.get("symbol_id") or "au"
+                    upsert_projection_for_event(
+                        cur,
+                        instance_key=instance_key,
+                        event_type=event_type,
+                        aggregate_id=str(row["aggregate_id"]),
+                        payload=payload,
+                        occurred_at=str(row["occurred_at"]),
+                        owner_id_value=owner_id_value,
+                    )
+                    symbol_id = payload.get("symbol_id") or payload.get("symbol") or "au"
+                    # Normalize contract → product id when possible
+                    sym_l = str(symbol_id).lower()
+                    if "au" in sym_l and ("shfe" in sym_l or sym_l.startswith("kq")):
+                        symbol_id = "au"
                     strategy_id = payload.get("strategy_id") or "falcon_v2"
                     runtime_state = payload.get("runtime_state")
+                    patch = sim_instance_patch_from_payload(event_type, payload)
                     cur.execute(
                         """
                         INSERT INTO sim_instance(
@@ -139,23 +155,9 @@ def push_outbox_once(
                             str(symbol_id),
                             status,
                             runtime_state,
-                            row["event_type"],
+                            event_type,
                             db_hint,
-                            Json(
-                                {
-                                    "last_event_type": row["event_type"],
-                                    **{
-                                        k: payload[k]
-                                        for k in (
-                                            "confirmed_net",
-                                            "current_target",
-                                            "last_price",
-                                            "pending_desired",
-                                        )
-                                        if k in payload
-                                    },
-                                }
-                            ),
+                            Json(patch),
                             owner_id_value,
                         ),
                     )

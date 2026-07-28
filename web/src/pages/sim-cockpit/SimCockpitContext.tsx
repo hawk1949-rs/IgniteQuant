@@ -251,7 +251,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
         const msg = sumR.reason instanceof Error ? sumR.reason.message : String(sumR.reason)
         setError(
           msg.includes('404') || msg.includes('not found')
-            ? '尚未启动或暂无会话数据，可点击「启动模拟盘」。'
+            ? '尚未启动或暂无会话数据。当前为云端只读时请确认交易机已同步；本机可启动模拟盘。'
             : msg,
         )
       }

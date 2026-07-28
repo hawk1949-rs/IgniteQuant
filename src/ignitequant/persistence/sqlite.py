@@ -12,6 +12,7 @@ from ignitequant.persistence.schema import (
     V2_NEW_TABLES_DDL,
     V3_NEW_TABLES_DDL,
     V4_ADD_COLUMNS,
+    V5_NEW_TABLES_DDL,
 )
 
 
@@ -103,6 +104,14 @@ def migrate(conn: sqlite3.Connection) -> None:
             "VALUES (4, datetime('now'))"
         )
         current = 4
+
+    if current < 5:
+        conn.executescript(V5_NEW_TABLES_DDL)
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+            "VALUES (5, datetime('now'))"
+        )
+        current = 5
 
     if current < SCHEMA_VERSION:
         conn.execute(

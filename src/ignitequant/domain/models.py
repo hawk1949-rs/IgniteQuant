@@ -204,6 +204,7 @@ class PositionSnapshot(SerializableMixin):
     short_yesterday: int = 0
     average_entry_price: float | None = None
     unrealized_pnl: float = 0.0
+    margin: float = 0.0
     as_of: datetime | None = None
 
 

@@ -7,7 +7,7 @@ via ``migrate()`` in sqlite.py (including safe ADD COLUMN helpers).
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------------------
 # Base DDL — full latest shape for new databases
@@ -125,7 +125,8 @@ CREATE TABLE IF NOT EXISTS position_snapshot_event (
     short_today INTEGER NOT NULL DEFAULT 0,
     short_yesterday INTEGER NOT NULL DEFAULT 0,
     avg_entry_price REAL,
-    unrealized_pnl REAL NOT NULL DEFAULT 0
+    unrealized_pnl REAL NOT NULL DEFAULT 0,
+    margin REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS account_snapshot_event (
@@ -352,6 +353,19 @@ CREATE TABLE IF NOT EXISTS ref_instrument (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ref_product_margin (
+    exchange_id TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    margin_rate_pct REAL NOT NULL,
+    margin_rate REAL NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',
+    as_of TEXT,
+    notes TEXT,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (exchange_id, product_id)
+);
+
 CREATE TABLE IF NOT EXISTS ref_contract (
     symbol TEXT PRIMARY KEY,
     product_id TEXT NOT NULL,
@@ -501,6 +515,7 @@ V2_ADD_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("short_yesterday", "INTEGER NOT NULL DEFAULT 0"),
         ("avg_entry_price", "REAL"),
         ("unrealized_pnl", "REAL NOT NULL DEFAULT 0"),
+        ("margin", "REAL NOT NULL DEFAULT 0"),
     ],
     "account_snapshot_event": [
         ("realized_pnl_today", "REAL NOT NULL DEFAULT 0"),
@@ -684,6 +699,19 @@ CREATE TABLE IF NOT EXISTS ref_instrument (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ref_product_margin (
+    exchange_id TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    margin_rate_pct REAL NOT NULL,
+    margin_rate REAL NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',
+    as_of TEXT,
+    notes TEXT,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (exchange_id, product_id)
+);
+
 CREATE TABLE IF NOT EXISTS ref_contract (
     symbol TEXT PRIMARY KEY,
     product_id TEXT NOT NULL,
@@ -802,3 +830,22 @@ V4_ADD_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("next_retry_at", "TEXT"),
     ],
 }
+
+# New tables at version 5 (product margin rates)
+V5_NEW_TABLES_DDL = """
+CREATE TABLE IF NOT EXISTS ref_product_margin (
+    exchange_id TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    margin_rate_pct REAL NOT NULL,
+    margin_rate REAL NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',
+    as_of TEXT,
+    notes TEXT,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (exchange_id, product_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ref_product_margin_product
+    ON ref_product_margin(product_id);
+"""

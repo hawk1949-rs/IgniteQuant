@@ -134,17 +134,35 @@ class PersistenceSession:
     def record_decision(self, result: PipelineResult) -> None:
         try:
             self.repo.append_decision(self.instance_id, result)
+            factors = result.factors
+            signal = result.signal
+            risk = result.risk_decision
             self._enqueue(
                 event_type="decision.appended",
                 aggregate_type="decision",
                 aggregate_id=result.bar_id,
                 payload={
                     "strategy_id": self.strategy_id,
+                    "decision_id": result.bar_id,
+                    "bar_id": result.bar_id,
                     "symbol": result.target.symbol,
                     "applied_action": result.applied_action,
                     "target_before": result.target_before,
                     "target_after": result.target_after,
                     "legacy_signal": result.signal.legacy_signal,
+                    "regime": factors.regime.value if factors.regime else None,
+                    "factor_quality": factors.quality.value if factors.quality else None,
+                    "factor_values": dict(factors.values) if factors.values else {},
+                    "reason_codes": list(signal.reason_codes)
+                    + list(result.target.reason_codes)
+                    + list(risk.rule_hits),
+                    "score_parts": list(result.legacy_score_parts)
+                    if result.legacy_score_parts
+                    else None,
+                    "risk_action": risk.action.value if risk.action else None,
+                    "requested_position": risk.requested_position,
+                    "approved_position": risk.approved_position,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                 },
             )
             self.healthy = True
@@ -176,6 +194,30 @@ class PersistenceSession:
                 legacy_signal=legacy_signal,
                 payload=payload,
                 created_at=created_at,
+            )
+            stamp = created_at or datetime.now(timezone.utc).isoformat()
+            extra = dict(payload or {})
+            self._enqueue(
+                event_type="decision.appended",
+                aggregate_type="decision",
+                aggregate_id=decision_id,
+                payload={
+                    "strategy_id": self.strategy_id,
+                    "decision_id": decision_id,
+                    "bar_id": decision_id,
+                    "symbol": symbol,
+                    "applied_action": applied_action,
+                    "target_before": target_before,
+                    "target_after": target_after,
+                    "legacy_signal": legacy_signal,
+                    "regime": extra.get("regime"),
+                    "factor_quality": extra.get("factor_quality"),
+                    "factor_values": extra.get("factor_values") or {},
+                    "reason_codes": extra.get("reason_codes") or ["OPS_DECISION"],
+                    "score_parts": None,
+                    "created_at": stamp,
+                    "ops": True,
+                },
             )
             self.healthy = True
             return ok
@@ -234,6 +276,7 @@ class PersistenceSession:
                 aggregate_id=intent.intent_id,
                 payload={
                     "decision_id": intent.decision_id,
+                    "intent_id": intent.intent_id,
                     "symbol": intent.symbol,
                     "current_position": intent.current_position,
                     "desired_position": intent.desired_position,
@@ -241,6 +284,12 @@ class PersistenceSession:
                     "status": status,
                     "side": side,
                     "qty": qty,
+                    "urgency": intent.urgency,
+                    "reason_codes": list(intent.reason_codes),
+                    "created_at": intent.created_at.isoformat()
+                    if intent.created_at
+                    else datetime.now(timezone.utc).isoformat(),
+                    "strategy_id": self.strategy_id,
                 },
             )
             return True
@@ -334,9 +383,44 @@ class PersistenceSession:
 
     def snapshot_position(self, snap: PositionSnapshot, *, source: str = "broker") -> None:
         self.repo.append_position_snapshot(self.instance_id, snap, source=source)
+        as_of = snap.as_of.isoformat() if snap.as_of else datetime.now(timezone.utc).isoformat()
+        self._enqueue(
+            event_type="position.snapshot",
+            aggregate_type="position",
+            aggregate_id=f"{snap.symbol}:{as_of}",
+            payload={
+                "strategy_id": self.strategy_id,
+                "symbol": snap.symbol,
+                "symbol_id": snap.symbol,
+                "net_position": int(snap.net_position),
+                "source": source,
+                "as_of": as_of,
+                "average_entry_price": snap.average_entry_price,
+                "unrealized_pnl": snap.unrealized_pnl,
+                "margin": float(getattr(snap, "margin", 0) or 0),
+                "confirmed_net": int(snap.net_position),
+            },
+        )
 
     def snapshot_account(self, snap: AccountSnapshot) -> None:
         self.repo.append_account_snapshot(self.instance_id, snap)
+        as_of = snap.as_of.isoformat() if snap.as_of else datetime.now(timezone.utc).isoformat()
+        self._enqueue(
+            event_type="account.snapshot",
+            aggregate_type="account",
+            aggregate_id=f"{snap.account_id}:{as_of}",
+            payload={
+                "strategy_id": self.strategy_id,
+                "account_id": snap.account_id,
+                "equity": float(snap.equity),
+                "available": float(snap.available),
+                "margin": float(snap.margin),
+                "margin_ratio": float(snap.margin_ratio),
+                "realized_pnl_today": float(snap.realized_pnl_today),
+                "unrealized_pnl": float(snap.unrealized_pnl),
+                "as_of": as_of,
+            },
+        )
 
     def record_heartbeat(
         self,

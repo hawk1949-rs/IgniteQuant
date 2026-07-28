@@ -108,6 +108,41 @@ class ReconReport:
         }
 
 
+def contract_product_key(symbol: str) -> str:
+    """Normalize futures symbol to exchange+product (ignores month / continuous prefix).
+
+    Examples:
+      SHFE.au2608 / SHFE.au2610 → shfe.au
+      KQ.m@SHFE.au → shfe.au
+    """
+    raw = (symbol or "").strip()
+    if not raw:
+        return ""
+    text = raw
+    if "@" in text:
+        text = text.split("@", 1)[1]
+    text = text.replace(" ", "")
+    parts = text.split(".", 1)
+    if len(parts) != 2:
+        return text.lower()
+    exchange, rest = parts[0], parts[1]
+    product = "".join(ch for ch in rest if ch.isalpha())
+    if not product:
+        product = rest
+    return f"{exchange}.{product}".lower()
+
+
+def is_contract_roll(local_symbol: str, broker_symbol: str) -> bool:
+    """True when symbols differ only by contract month (same product)."""
+    if not local_symbol or not broker_symbol:
+        return False
+    if local_symbol == broker_symbol:
+        return False
+    a = contract_product_key(local_symbol)
+    b = contract_product_key(broker_symbol)
+    return bool(a) and a == b
+
+
 def local_from_state(state: StrategyStateRecord | None, *, symbol: str = "") -> LocalProjection:
     if state is None:
         return LocalProjection(
@@ -147,14 +182,18 @@ def reconcile(
     mismatches: list[ReconMismatch] = []
 
     if local.symbol and broker.symbol and local.symbol != broker.symbol:
-        mismatches.append(
-            ReconMismatch(
-                field="symbol",
-                local=local.symbol,
-                broker=broker.symbol,
-                message="symbol mismatch",
+        if is_contract_roll(local.symbol, broker.symbol):
+            # 主力换月：本地旧合约 vs 券商新合约，不算对账失败；启动恢复会改写 symbol。
+            pass
+        else:
+            mismatches.append(
+                ReconMismatch(
+                    field="symbol",
+                    local=local.symbol,
+                    broker=broker.symbol,
+                    message="symbol mismatch",
+                )
             )
-        )
 
     gap = abs(local.expected_net - broker.net_position)
     if gap > position_tol:
@@ -311,7 +350,13 @@ def startup_recover(
             if pending is None:
                 payload["current_target"] = broker.net_position
         report = ReconReport(matched=True, runtime_state="READY", unknown_order_count=0)
-        message = "reconciliation matched"
+        if is_contract_roll(state.symbol or "", broker.symbol or ""):
+            message = (
+                f"reconciliation matched after contract roll "
+                f"{state.symbol} → {broker.symbol}"
+            )
+        else:
+            message = "reconciliation matched"
     else:
         message = "reconciliation mismatch — DEGRADED, no new risk"
         report.runtime_state = "DEGRADED"

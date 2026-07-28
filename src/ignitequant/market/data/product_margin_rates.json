@@ -1,0 +1,326 @@
+{
+  "source": "user_xls_2026-07-28",
+  "source_file": "新建 XLS 工作表.xls",
+  "column_note": "第三列为保证金比例百分比（文件表头显示为交投，按投机/交易保证金使用）",
+  "as_of": "2026-07-28",
+  "rows": [
+    {
+      "exchange_id": "SHFE",
+      "product_id": "ad",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "ag",
+      "margin_rate_pct": 19.0,
+      "margin_rate": 0.19
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "al",
+      "margin_rate_pct": 9.0,
+      "margin_rate": 0.09
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "ao",
+      "margin_rate_pct": 9.0,
+      "margin_rate": 0.09
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "au",
+      "margin_rate_pct": 16.0,
+      "margin_rate": 0.16
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "br",
+      "margin_rate_pct": 14.0,
+      "margin_rate": 0.14
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "bu",
+      "margin_rate_pct": 14.0,
+      "margin_rate": 0.14
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "cu",
+      "margin_rate_pct": 9.0,
+      "margin_rate": 0.09
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "fu",
+      "margin_rate_pct": 22.0,
+      "margin_rate": 0.22
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "hc",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "ni",
+      "margin_rate_pct": 10.0,
+      "margin_rate": 0.1
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "op",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "pb",
+      "margin_rate_pct": 9.0,
+      "margin_rate": 0.09
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "rb",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "ru",
+      "margin_rate_pct": 9.0,
+      "margin_rate": 0.09
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "sn",
+      "margin_rate_pct": 13.0,
+      "margin_rate": 0.13
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "sp",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "ss",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "wr",
+      "margin_rate_pct": 9.0,
+      "margin_rate": 0.09
+    },
+    {
+      "exchange_id": "SHFE",
+      "product_id": "zn",
+      "margin_rate_pct": 9.0,
+      "margin_rate": 0.09
+    },
+    {
+      "exchange_id": "INE",
+      "product_id": "bc",
+      "margin_rate_pct": 9.0,
+      "margin_rate": 0.09
+    },
+    {
+      "exchange_id": "INE",
+      "product_id": "ec",
+      "margin_rate_pct": 22.0,
+      "margin_rate": 0.22
+    },
+    {
+      "exchange_id": "INE",
+      "product_id": "lu",
+      "margin_rate_pct": 22.0,
+      "margin_rate": 0.22
+    },
+    {
+      "exchange_id": "INE",
+      "product_id": "nr",
+      "margin_rate_pct": 9.0,
+      "margin_rate": 0.09
+    },
+    {
+      "exchange_id": "INE",
+      "product_id": "sc",
+      "margin_rate_pct": 22.0,
+      "margin_rate": 0.22
+    },
+    {
+      "exchange_id": "GFEX",
+      "product_id": "lc",
+      "margin_rate_pct": 15.0,
+      "margin_rate": 0.15
+    },
+    {
+      "exchange_id": "GFEX",
+      "product_id": "pd",
+      "margin_rate_pct": 19.0,
+      "margin_rate": 0.19
+    },
+    {
+      "exchange_id": "GFEX",
+      "product_id": "ps",
+      "margin_rate_pct": 13.0,
+      "margin_rate": 0.13
+    },
+    {
+      "exchange_id": "GFEX",
+      "product_id": "pt",
+      "margin_rate_pct": 19.0,
+      "margin_rate": 0.19
+    },
+    {
+      "exchange_id": "GFEX",
+      "product_id": "si",
+      "margin_rate_pct": 10.0,
+      "margin_rate": 0.1
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "a",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "b",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "bb",
+      "margin_rate_pct": 15.0,
+      "margin_rate": 0.15
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "bz",
+      "margin_rate_pct": 8.0,
+      "margin_rate": 0.08
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "c",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "cs",
+      "margin_rate_pct": 6.0,
+      "margin_rate": 0.06
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "eb",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "eg",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "fb",
+      "margin_rate_pct": 10.0,
+      "margin_rate": 0.1
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "i",
+      "margin_rate_pct": 11.0,
+      "margin_rate": 0.11
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "j",
+      "margin_rate_pct": 20.0,
+      "margin_rate": 0.2
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "jd",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "jm",
+      "margin_rate_pct": 12.0,
+      "margin_rate": 0.12
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "l",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "lg",
+      "margin_rate_pct": 8.0,
+      "margin_rate": 0.08
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "lh",
+      "margin_rate_pct": 8.0,
+      "margin_rate": 0.08
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "m",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "p",
+      "margin_rate_pct": 8.0,
+      "margin_rate": 0.08
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "pg",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "pp",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "rr",
+      "margin_rate_pct": 6.0,
+      "margin_rate": 0.06
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "v",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    },
+    {
+      "exchange_id": "DCE",
+      "product_id": "y",
+      "margin_rate_pct": 7.0,
+      "margin_rate": 0.07
+    }
+  ]
+}

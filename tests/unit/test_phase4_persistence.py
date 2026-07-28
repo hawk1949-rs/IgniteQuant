@@ -143,6 +143,43 @@ def test_reconcile_pending_explains_gap() -> None:
     assert report.matched is True
 
 
+def test_contract_roll_symbol_not_degraded() -> None:
+    from ignitequant.engine.reconciliation import contract_product_key, is_contract_roll
+
+    assert contract_product_key("SHFE.au2608") == "shfe.au"
+    assert contract_product_key("SHFE.au2610") == "shfe.au"
+    assert contract_product_key("KQ.m@SHFE.au") == "shfe.au"
+    assert is_contract_roll("SHFE.au2608", "SHFE.au2610") is True
+    assert is_contract_roll("SHFE.au2608", "SHFE.ag2610") is False
+
+    local = LocalProjection(
+        symbol="SHFE.au2608",
+        expected_net=0,
+        current_target=0,
+    )
+    broker = BrokerFacts(symbol="SHFE.au2610", net_position=0)
+    report = reconcile(local, broker)
+    assert report.matched is True
+    assert report.runtime_state == "RUNNING"
+
+
+def test_startup_recover_contract_roll_allows_new_risk(tmp_path: Path) -> None:
+    session = PersistenceSession.open(tmp_path / "roll.sqlite", instance_id="sim1")
+    session.save_state(
+        symbol="SHFE.au2608",
+        current_target=0,
+        confirmed_net=0,
+        cooldown_left=0,
+    )
+    recovery = session.recover(BrokerFacts(symbol="SHFE.au2610", net_position=0))
+    assert recovery.report.matched is True
+    assert recovery.allow_new_risk is True
+    assert recovery.state is not None
+    assert recovery.state.symbol == "SHFE.au2610"
+    assert "contract roll" in recovery.message
+    session.close()
+
+
 def test_startup_recover_open_position(tmp_path: Path) -> None:
     session = PersistenceSession.open(tmp_path / "r.sqlite", instance_id="sim1")
     session.save_state(
