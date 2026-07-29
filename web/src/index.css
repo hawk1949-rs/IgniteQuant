@@ -267,6 +267,119 @@ option {
   line-height: 1.65;
 }
 
+.site-header__user {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+  color: #a8b0c0;
+}
+
+/* —— Login —— */
+.login-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.login-loading {
+  color: #a8b0c0;
+  font-size: 0.95rem;
+}
+
+.login-panel {
+  width: min(100%, 24rem);
+  padding: 2rem 1.75rem 1.75rem;
+  background: rgba(16, 28, 48, 0.94);
+  border: 1px solid rgba(120, 140, 180, 0.3);
+  border-radius: 20px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+}
+
+.login-eyebrow {
+  margin: 0 0 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #0a84ff;
+}
+
+.login-panel h1 {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-display);
+  font-size: 1.65rem;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+}
+
+.login-lead {
+  margin: 0 0 1.5rem;
+  color: #a8b0c0;
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.95rem;
+}
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: #c8d0dc;
+}
+
+.login-field input {
+  appearance: none;
+  border: 1px solid rgba(120, 140, 180, 0.35);
+  border-radius: 12px;
+  background: #0c1526;
+  padding: 0.7rem 0.85rem;
+  color: #f5f5f7;
+  outline: none;
+}
+
+.login-field input:focus {
+  border-color: rgba(10, 132, 255, 0.7);
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.18);
+}
+
+.login-error {
+  margin: 0;
+  color: #ff453a;
+  font-size: 0.85rem;
+}
+
+.login-submit {
+  appearance: none;
+  margin-top: 0.35rem;
+  border: 0;
+  border-radius: 12px;
+  background: #0a84ff;
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.95rem;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+}
+
+.login-submit:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.login-submit:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
 @media (min-width: 640px) {
   .welcome {
     padding-top: 6rem;

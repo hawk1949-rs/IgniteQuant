@@ -1,16 +1,34 @@
+import { clearSession, getStoredToken } from './auth'
+
 const API_BASE = ''
 const REQUEST_TIMEOUT_MS = 30_000
 const BACKTEST_POLL_MAX_MS = 30 * 60_000
+
+function notifyUnauthorized() {
+  clearSession()
+  window.dispatchEvent(new CustomEvent('iq:unauthorized'))
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const ctrl = new AbortController()
   const timer = window.setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
   try {
+    const token = getStoredToken()
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(init?.headers as Record<string, string> | undefined),
+    }
+    if (token) headers.Authorization = `Bearer ${token}`
+
     const res = await fetch(`${API_BASE}${path}`, {
-      headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
-      signal: ctrl.signal,
       ...init,
+      headers,
+      signal: ctrl.signal,
     })
+    if (res.status === 401) {
+      notifyUnauthorized()
+      throw new Error('未登录或会话已过期')
+    }
     if (!res.ok) {
       let detail = res.statusText
       try {

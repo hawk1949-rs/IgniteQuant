@@ -2,6 +2,8 @@ type ModuleKey = 'lab' | 'lab-legacy' | 'sim'
 
 type Props = {
   onNavigate: (key: ModuleKey) => void
+  username?: string | null
+  onLogout?: () => void
 }
 
 const MODULES: {
@@ -30,7 +32,7 @@ const MODULES: {
   },
 ]
 
-export default function WelcomePage({ onNavigate }: Props) {
+export default function WelcomePage({ onNavigate, username, onLogout }: Props) {
   return (
     <div className="welcome-shell">
       <header className="site-header" role="navigation">
@@ -60,6 +62,16 @@ export default function WelcomePage({ onNavigate }: Props) {
           >
             模拟盘座舱
           </button>
+          {username ? (
+            <span className="site-header__user">
+              {username}
+              {onLogout ? (
+                <button type="button" className="site-header__link-btn" onClick={onLogout}>
+                  退出
+                </button>
+              ) : null}
+            </span>
+          ) : null}
         </nav>
       </header>
 

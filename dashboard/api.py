@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,13 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
+from dashboard.auth import (
+    CockpitAuthMiddleware,
+    authenticate,
+    extract_bearer,
+    load_auth_config,
+    verify_token,
+)
 from dashboard.catalog import ENGINES, STRATEGIES, SYMBOLS
 from dashboard.jobs import get_job_queue
 from dashboard.runners import run_falcon_local, run_falcon_v2, run_vwap_stub
@@ -43,6 +50,8 @@ RUNNERS = {
 }
 
 app = FastAPI(title="IgniteQuant Dashboard API", version="0.6.0")
+# 先注册鉴权（内层），再注册 CORS（外层），保证 401 也带 CORS 头
+app.add_middleware(CockpitAuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -51,6 +60,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(sim_router)
+
+
+class LoginRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+@app.get("/api/auth/status")
+def auth_status() -> dict[str, object]:
+    cfg = load_auth_config()
+    return {"auth_required": cfg.enabled}
+
+
+@app.post("/api/auth/login")
+def auth_login(body: LoginRequest) -> dict[str, object]:
+    cfg = load_auth_config()
+    token, exp = authenticate(cfg, body.username, body.password)
+    # authenticate 已校验；username 以签发主体为准（去掉首尾空格）
+    username = body.username.strip()
+    return {
+        "token": token,
+        "expires_at": exp,
+        "username": username,
+        "token_type": "Bearer",
+    }
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request) -> dict[str, object]:
+    cfg = load_auth_config()
+    if not cfg.enabled:
+        return {"authenticated": True, "username": "dev", "auth_required": False}
+    token = extract_bearer(request)
+    user = verify_token(cfg, token or "")
+    if not user:
+        raise HTTPException(status_code=401, detail="未登录或会话已过期")
+    return {"authenticated": True, "username": user, "auth_required": True}
 
 WEB_DIST = ROOT / "web" / "dist"
 

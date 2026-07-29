@@ -201,8 +201,14 @@ systemctl is-active ignitequant-api
 if [ "{sim}" = "1" ]; then
   systemctl is-active ignitequant-sim
 fi
-curl -sS -m 10 http://127.0.0.1:8787/api/sim/sessions/falcon_au_sim/summary \\
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status'), d.get('process_running'), d.get('pid'), d.get('updated_at'))"
+curl -sS -m 10 http://127.0.0.1:8787/api/health
+echo
+curl -sS -m 10 http://127.0.0.1:8787/api/auth/status
+echo
+# 有鉴权时 summary 需 Token；这里只做进程探测
+if systemctl is-active --quiet ignitequant-sim; then
+  echo SIM_ACTIVE
+fi
 """
     put_text(client, "/tmp/iq_rebuild.sh", script)
     return run_ssh(client, "bash /tmp/iq_rebuild.sh", timeout=1200)

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useAuth } from '@/auth/AuthGate'
 import WelcomePage from '@/pages/WelcomePage'
 import StrategyLabPage from '@/pages/StrategyLabPage'
 import LegacyStrategyLabPage from '@/pages/LegacyStrategyLabPage'
@@ -23,6 +24,7 @@ const TITLES: Record<Route, string> = {
 }
 
 export default function App() {
+  const { username, logout } = useAuth()
   const [route, setRoute] = useState<Route>(() =>
     typeof window === 'undefined' ? 'welcome' : routeFromHash(),
   )
@@ -58,5 +60,11 @@ export default function App() {
     return <SimCockpitPage onBackHome={goWelcome} />
   }
 
-  return <WelcomePage onNavigate={go} />
+  return (
+    <WelcomePage
+      onNavigate={go}
+      username={username}
+      onLogout={logout}
+    />
+  )
 }
