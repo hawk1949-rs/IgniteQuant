@@ -45,6 +45,8 @@ def apply_pretrade(
     risk_engine: RiskEngine,
     runtime: RuntimeSnapshot | None = None,
     symbol: str | None = None,
+    trade_status: str = "CONTINUOUS",
+    data_age_seconds: float = 0.0,
 ) -> RiskDecision:
     symbol = symbol or result.target.symbol
     return risk_engine.evaluate(
@@ -54,7 +56,8 @@ def apply_pretrade(
             symbol=symbol,
             last_price=last_price,
             latest_bar_volume=0,
-            data_age_seconds=0.0,
+            data_age_seconds=data_age_seconds,
+            trade_status=trade_status,
         ),
         contract=ContractSnapshot(symbol=symbol, is_valid=True),
         position=PositionSnapshot(symbol=symbol, net_position=net_position),

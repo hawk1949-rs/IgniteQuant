@@ -49,7 +49,8 @@ from ignitequant.execution import (
     is_gfd_day_end_cancel,
 )
 from ignitequant.market.cache import resolve_instrument
-from ignitequant.market.symbols import cost_model_for
+from ignitequant.market.symbols import cost_model_for, resolve_signal_source
+from ignitequant.market.session import TRADE_STATUS_OPEN
 import ignitequant as _iq
 
 
@@ -215,7 +216,26 @@ def run_falcon_v2(
     data_length: int = 400,
     progress_cb=None,
 ) -> dict[str, Any]:
-    """跑完一次 Falcon 回测并返回指标（无 web_gui，结束后立即关闭）。"""
+    """跑完一次 Falcon 回测并返回指标（无 web_gui，结束后立即关闭）。
+
+    Overseas-priced products (au/ag) use local overseas-bar clock + MARKET_CLOSED gate.
+    """
+    spec = resolve_instrument(signal_symbol)
+    source = resolve_signal_source(spec)
+    if source.pricing_basis == "overseas":
+        out = run_falcon_local(
+            signal_symbol=signal_symbol,
+            start=start,
+            end=end,
+            init_balance=init_balance,
+            kline_seconds=kline_seconds,
+            data_length=data_length,
+            progress_cb=progress_cb,
+            auto_download=True,
+        )
+        out["engine"] = "local_overseas"
+        return out
+
     from tqsdk import BacktestFinished, TqApi, TqAuth, TqBacktest, TqSim
 
     load_dotenv(ROOT / ".env")
@@ -239,7 +259,6 @@ def run_falcon_v2(
         risk=base.risk,
     )
 
-    spec = resolve_instrument(signal_symbol)
     cost = cost_model_for(spec, tq_align=True)
     commission_per_lot = cost.tq_commission_per_lot()
 
@@ -382,6 +401,7 @@ def run_falcon_v2(
                 risk_engine=risk_engine,
                 runtime=healthy_runtime(roll_in_progress=roll.in_progress),
                 symbol=trade_symbol,
+                trade_status=TRADE_STATUS_OPEN,
             )
             if pretrade.action in {RiskAction.REJECT, RiskAction.HALT}:
                 continue

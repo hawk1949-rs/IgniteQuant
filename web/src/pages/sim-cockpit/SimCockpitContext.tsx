@@ -64,11 +64,38 @@ type Ctx = {
 
 const SimCockpitContext = createContext<Ctx | null>(null)
 
-/** Align live cockpit refresh; decisions still only appear on 5m bar close. */
-const BOOTSTRAP_POLL_MS = 5_000
-const LIVE_POLL_MS = 5_000
+/**
+ * Split polling so quote/account stay snappy while heavy K-line / overseas HTTP
+ * does not block the light path. Overseas upstream alone is often 1–3s.
+ */
+const LIGHT_POLL_MS = 2_000
+const HEAVY_POLL_MS = 15_000
 const LS_INSTANCE = 'ignitequant.sim.instanceId'
 const LS_SYMBOL = 'ignitequant.sim.symbolId'
+
+type BarLike = {
+  time: number
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
+function withLiveTip<T extends { bars: BarLike[]; last_price?: number | null }>(
+  src: T,
+  price: number | null,
+): T {
+  if (price == null || !src.bars.length) {
+    return { ...src, last_price: price ?? src.last_price }
+  }
+  const bars = src.bars.slice()
+  const tip = { ...bars[bars.length - 1] }
+  tip.close = price
+  tip.high = Math.max(tip.high, price)
+  tip.low = Math.min(tip.low, price)
+  bars[bars.length - 1] = tip
+  return { ...src, bars, last_price: price }
+}
 
 function readLs(key: string, fallback: string) {
   try {
@@ -97,7 +124,10 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
   const [warn, setWarn] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const refreshGenRef = useRef(0)
-  const refreshInFlightRef = useRef(false)
+  const lightInFlightRef = useRef(false)
+  const heavyInFlightRef = useRef(false)
+  const catalogRef = useRef<SimCatalog | null>(null)
+  const catalogLoadedRef = useRef(false)
   const repairedRef = useRef(false)
   const [starting, setStarting] = useState(false)
   const [replayAt, setReplayAt] = useState<string | null>(null)
@@ -135,16 +165,60 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const refresh = useCallback(async () => {
-    if (refreshInFlightRef.current) return
-    refreshInFlightRef.current = true
-    const gen = ++refreshGenRef.current
+  const ensureCatalog = useCallback(async (force = false) => {
+    if (catalogLoadedRef.current && !force && catalogRef.current) {
+      return catalogRef.current
+    }
+    const [cat, sess] = await Promise.all([fetchSimCatalog(), fetchSimSessions()])
+    catalogLoadedRef.current = true
+    catalogRef.current = cat
+    setCatalog(cat)
+    setSessions(sess.sessions || [])
+    return cat
+  }, [])
+
+  const refreshLight = useCallback(async () => {
+    if (lightInFlightRef.current || replayAt) return
+    lightInFlightRef.current = true
+    const gen = refreshGenRef.current
     const stale = () => gen !== refreshGenRef.current
     try {
-      const [cat, sess] = await Promise.all([fetchSimCatalog(), fetchSimSessions()])
+      const id = instanceId
+      if (!id) {
+        setLoading(false)
+        return
+      }
+      const sum = await fetchSimSummary(id)
       if (stale()) return
-      setCatalog(cat)
-      setSessions(sess.sessions || [])
+      setSummary(sum)
+      setError(null)
+      const livePrice = sum.last_price ?? null
+      if (livePrice != null) {
+        setBars((prev) => (prev?.bars?.length ? withLiveTip(prev, livePrice) : prev))
+      }
+    } catch (e) {
+      if (!stale()) {
+        const msg = e instanceof Error ? e.message : String(e)
+        setError(
+          msg.includes('404') || msg.includes('not found')
+            ? '尚未启动或暂无会话数据。当前为云端只读时请确认交易机已同步；本机可启动模拟盘。'
+            : msg,
+        )
+      }
+    } finally {
+      lightInFlightRef.current = false
+      if (!stale()) setLoading(false)
+    }
+  }, [instanceId, replayAt])
+
+  const refreshHeavy = useCallback(async () => {
+    if (heavyInFlightRef.current) return
+    heavyInFlightRef.current = true
+    const gen = refreshGenRef.current
+    const stale = () => gen !== refreshGenRef.current
+    try {
+      const cat = await ensureCatalog(false)
+      if (stale()) return
 
       const id = instanceId
       if (!id) {
@@ -208,7 +282,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
               pnl: rp.metrics_snapshot.pnl,
               pnl_pct: rp.metrics_snapshot.pnl / (prev?.init_balance ?? 1_000_000),
               trade_count: prev?.trade_count ?? 0,
-              fill_count: rp.metrics_snapshot.fill_count,
+              fill_count: rp.metrics_snapshot.fills_count,
               wins: prev?.wins ?? 0,
               losses: prev?.losses ?? 0,
               win_rate: prev?.win_rate ?? 0,
@@ -226,6 +300,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
         return
       }
 
+      // Heavy path: K-lines + overseas HTTP. Do not await on the light quote path.
       const marketBarsPromise = fetchSimMarketBars(symbolId, 400).catch(() => null)
       const overseasPromise = fetchSimOverseasBars(symbolId, 400).catch(() => null)
 
@@ -238,9 +313,10 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
         fetchSimBars(id, { limit: 400 }),
         marketBarsPromise,
         overseasPromise,
+        fetchSimSessions(),
       ])
 
-      const [sumR, metR, decR, intentR, fillR, barR, marketR, overseasR] = settled
+      const [sumR, metR, decR, intentR, fillR, barR, marketR, overseasR, sessR] = settled
       if (stale()) return
 
       const partial: string[] = []
@@ -268,6 +344,8 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
 
       if (fillR.status === 'fulfilled') setFills(fillR.value.fills || [])
       else partial.push('成交记录')
+
+      if (sessR.status === 'fulfilled') setSessions(sessR.value.sessions || [])
 
       setWarn(partial.length ? `部分数据加载失败：${partial.join('、')}（已保留上次成功数据）` : null)
 
@@ -307,24 +385,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
         sumR.status === 'fulfilled' ? sumR.value.last_price ?? null : null
       const launcherSymbolId =
         cat?.launchers?.find((l) => l.instance_id === id)?.symbol_id ?? null
-      // Session klines belong to the running sim (e.g. au). Never paint them for rb/ag/…
       const sessionMatchesSymbol = launcherSymbolId != null && launcherSymbolId === symbolId
-
-      const withLiveTip = <T extends { bars: { time: number; open: number; high: number; low: number; close: number }[]; last_price?: number | null }>(
-        src: T,
-        price: number | null,
-      ): T => {
-        if (price == null || !src.bars.length) {
-          return { ...src, last_price: price ?? src.last_price }
-        }
-        const bars = src.bars.slice()
-        const tip = { ...bars[bars.length - 1] }
-        tip.close = price
-        tip.high = Math.max(tip.high, price)
-        tip.low = Math.min(tip.low, price)
-        bars[bars.length - 1] = tip
-        return { ...src, bars, last_price: price }
-      }
 
       if (sessionMatchesSymbol && sessionBars?.bars?.length) {
         setBars(withLiveTip(sessionBars, livePrice))
@@ -381,43 +442,63 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
     } catch (e) {
       if (!stale()) setError(e instanceof Error ? e.message : String(e))
     } finally {
-      refreshInFlightRef.current = false
+      heavyInFlightRef.current = false
       if (!stale()) setLoading(false)
     }
-  }, [instanceId, replayAt, symbolId])
+  }, [ensureCatalog, instanceId, replayAt, symbolId])
+
+  const refresh = useCallback(async () => {
+    catalogLoadedRef.current = false
+    await refreshHeavy()
+  }, [refreshHeavy])
 
   useEffect(() => {
-    // Clear charts immediately on symbol switch to avoid showing the previous product.
+    // Invalidate in-flight responses when session/symbol/replay changes.
+    refreshGenRef.current += 1
+  }, [instanceId, symbolId, replayAt])
+
+  useEffect(() => {
     setOverseas(null)
     setBars(null)
   }, [symbolId])
 
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    void refreshHeavy()
+  }, [refreshHeavy])
 
   useEffect(() => {
     if (replayAt) return
     let cancelled = false
-    let timeoutId = 0
+    let lightTimer = 0
+    let heavyTimer = 0
 
-    const schedule = (delay: number) => {
-      timeoutId = window.setTimeout(() => {
+    const scheduleLight = (delay: number) => {
+      lightTimer = window.setTimeout(() => {
         if (cancelled) return
-        void refresh().finally(() => {
-          if (!cancelled) schedule(LIVE_POLL_MS)
+        void refreshLight().finally(() => {
+          if (!cancelled) scheduleLight(LIGHT_POLL_MS)
         })
       }, delay)
     }
 
-    // Keep account/position/fills fresh; bar decisions still arrive on 5m closes.
-    schedule(BOOTSTRAP_POLL_MS)
+    const scheduleHeavy = (delay: number) => {
+      heavyTimer = window.setTimeout(() => {
+        if (cancelled) return
+        void refreshHeavy().finally(() => {
+          if (!cancelled) scheduleHeavy(HEAVY_POLL_MS)
+        })
+      }, delay)
+    }
+
+    scheduleLight(LIGHT_POLL_MS)
+    scheduleHeavy(HEAVY_POLL_MS)
 
     return () => {
       cancelled = true
-      window.clearTimeout(timeoutId)
+      window.clearTimeout(lightTimer)
+      window.clearTimeout(heavyTimer)
     }
-  }, [refresh, replayAt])
+  }, [refreshLight, refreshHeavy, replayAt])
 
   const value = useMemo<Ctx>(
     () => ({

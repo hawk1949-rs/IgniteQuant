@@ -167,6 +167,27 @@ class FactorReadyRule:
 
 
 @dataclass
+class MarketClosedRule:
+    """Domestic session closed: keep position; do not submit any order (2A)."""
+
+    priority: int = 37
+    rule_code: str = ReasonCode.MARKET_CLOSED.value
+
+    def evaluate(self, context: RiskContext) -> RuleResult | None:
+        status = (context.market.trade_status or "").strip().upper()
+        if status in {"", "CONTINUOUS", "OPEN", "TRADING", "AUCTION"}:
+            return None
+        if context.target.desired_position == context.position.net_position:
+            return None
+        return RuleResult(
+            action=RiskAction.REJECT,
+            approved_position=context.position.net_position,
+            rule_code=self.rule_code,
+            message="domestic market closed; signal recorded, no order",
+        )
+
+
+@dataclass
 class RollInProgressRule:
     priority: int = 40
     rule_code: str = ReasonCode.ROLL_IN_PROGRESS.value
@@ -254,6 +275,7 @@ def default_legacy_rules(*, max_symbol_lots: int = 3) -> list[RiskRule]:
         GatewayHealthRule(),
         DataFreshnessRule(),
         FactorReadyRule(),
+        MarketClosedRule(),
         RollInProgressRule(),
         ContractValidityRule(),
         PriceLimitRule(),

@@ -44,7 +44,8 @@ from ignitequant.engine import (
 from ignitequant.execution import TargetPositionExecutor, is_gfd_day_end_cancel
 from ignitequant.domain.enums import RiskAction
 from ignitequant.market.cache import resolve_instrument
-from ignitequant.market.symbols import cost_model_for
+from ignitequant.market.symbols import cost_model_for, resolve_signal_source
+from ignitequant.engine.local_replay import run_local_falcon_backtest
 
 
 def load_dotenv(path: Path) -> None:
@@ -78,6 +79,34 @@ FLAT_DATE = last_business_day_on_or_before(END_DT)
 
 def main() -> None:
     load_dotenv(ROOT / ".env")
+
+    instrument = resolve_instrument(SIGNAL_SYMBOL)
+    source = resolve_signal_source(instrument)
+    if source.pricing_basis == "overseas":
+        print(
+            f"启动 Falcon v2 外盘驱动本地回测: decision={source.decision_symbol} "
+            f"exec={SIGNAL_SYMBOL}",
+            flush=True,
+        )
+        print(f"区间: {START_DT} ~ {END_DT}", flush=True)
+        out = run_local_falcon_backtest(
+            signal_symbol=SIGNAL_SYMBOL,
+            start=START_DT,
+            end=END_DT,
+            init_balance=INIT_BALANCE,
+            kline_seconds=KLINE_SECONDS,
+            auto_download=True,
+            record_decisions=True,
+        )
+        metrics = out.get("metrics") or {}
+        print(
+            f"完成 engine={out.get('engine')} decision={out.get('decision_symbol')} "
+            f"pricing={out.get('pricing_basis')} "
+            f"net_pnl={metrics.get('net_pnl')} trades={metrics.get('trade_count')}",
+            flush=True,
+        )
+        return
+
     user = os.environ.get("TQ_USER", "").strip()
     password = os.environ.get("TQ_PASS", "").strip()
     if not user or not password:
@@ -85,7 +114,7 @@ def main() -> None:
 
     cfg = load_active_decision_config()
     risk_engine = make_risk_engine(cfg)
-    cost = cost_model_for(resolve_instrument(SIGNAL_SYMBOL), tq_align=True)
+    cost = cost_model_for(instrument, tq_align=True)
     commission_per_lot = cost.tq_commission_per_lot()
     print(f"启动 Falcon v2 回测: 信号={SIGNAL_SYMBOL}", flush=True)
     print(f"区间: {START_DT} ~ {END_DT}（{FLAT_DATE} 起强制清仓）", flush=True)

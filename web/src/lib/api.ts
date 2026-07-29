@@ -470,6 +470,11 @@ export type SimOverseasBars = {
     volume: number
   }[]
   last_price?: number | null
+  last_bar_open?: number | null
+  lag_seconds?: number | null
+  source?: string | null
+  pricing_role?: string | null
+  note?: string | null
   hint?: string | null
 }
 

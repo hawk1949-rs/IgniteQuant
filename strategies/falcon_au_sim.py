@@ -46,7 +46,16 @@ from ignitequant.engine import (
     score_parts,
 )
 from ignitequant.execution import TargetPositionExecutor
+from ignitequant.market.cache import resolve_instrument
+from ignitequant.market.overseas_bars import (
+    bars_dicts_to_dataframe,
+    drop_forming_5m_bar,
+    fetch_for_signal_source,
+)
+from ignitequant.market.session import shfe_precious_session_open, trade_status_for_session
+from ignitequant.market.symbols import resolve_signal_source
 from ignitequant.persistence import PersistenceSession
+from ignitequant.portfolio.stop_scale import scale_atr_to_entry
 
 
 def load_dotenv(path: Path) -> None:
@@ -77,6 +86,8 @@ PERSIST_DB = ROOT / "data" / "runtime" / "falcon_au_sim.sqlite"
 PID_FILE = PERSIST_DB.parent / f"{INSTANCE_ID}.pid"
 RECON_EVERY_BARS = 12  # ~1 hour on 5m bars
 MAX_CONSECUTIVE_ERRORS = 5
+OVERSEAS_POLL_SECONDS = 20
+OVERSEAS_BAR_SECONDS = 300
 
 
 def _write_pid_file() -> None:
@@ -119,6 +130,20 @@ def _cloud_sync_outbox(persist: PersistenceSession | None) -> None:
         print(f"[云同步] 失败（忽略）: {exc}", flush=True)
 
 
+def _domestic_mark(quote_px: float, *fallbacks: float) -> float | None:
+    """Cockpit / fill mark must be domestic price — never overseas decision close."""
+    if quote_px > 0:
+        return float(quote_px)
+    for raw in fallbacks:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
 def _persist_state(
     session: PersistenceSession | None,
     pipeline: FalconDecisionPipeline,
@@ -129,6 +154,7 @@ def _persist_state(
     last_bar_id: str,
     config_hash: str,
     last_price: float | None = None,
+    signal_close: float | None = None,
 ) -> None:
     if session is None:
         return
@@ -137,6 +163,9 @@ def _persist_state(
     if last_price is not None and float(last_price) > 0:
         extra["last_price"] = float(last_price)
         extra["quote_as_of"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    if signal_close is not None and float(signal_close) > 0:
+        # Overseas (or other) decision bar close — never use as cockpit tip paint.
+        extra["signal_close"] = float(signal_close)
     session.save_state(
         symbol=symbol,
         current_target=pipeline.current_target,
@@ -405,8 +434,13 @@ def main() -> None:
     _write_pid_file()
 
     print(f"启动 Falcon v2 快期模拟盘: 信号={SIGNAL_SYMBOL}", flush=True)
+    instrument = resolve_instrument(SIGNAL_SYMBOL)
+    signal_source = resolve_signal_source(instrument)
+    overseas_mode = signal_source.pricing_basis == "overseas"
     print(
         f"账户=TqKq | K线={KLINE_SECONDS // 60}分钟 | 仓位映射={LOT_BY_SIGNAL} | "
+        f"pricing={signal_source.pricing_basis} "
+        f"decision={signal_source.decision_symbol} exec={SIGNAL_SYMBOL} | "
         f"config={cfg.config_version} | RiskEngine+Executor | "
         f"persist={'ON ' + str(PERSIST_DB) if persist else 'OFF'} | "
         f"Web UI: http://127.0.0.1{WEB_GUI}",
@@ -433,9 +467,12 @@ def main() -> None:
     try:
         main_quote = api.get_quote(SIGNAL_SYMBOL)
         klines = api.get_kline_serial(SIGNAL_SYMBOL, KLINE_SECONDS, data_length=400)
+        decision_klines = klines
         last_progress_day = None
         last_heartbeat = 0.0
         last_kline_dump = 0.0
+        last_overseas_poll = 0.0
+        last_seen_overseas_ts = 0
         try:
             last_seen_kline_ns = int(klines.iloc[-1]["datetime"])
         except Exception:
@@ -635,15 +672,35 @@ def main() -> None:
                 except Exception as exc:  # noqa: BLE001
                     print(f"启动补跑跳过: {exc}", flush=True)
 
-            result0 = pipeline.on_bar_close(klines, trade=True)
-            annotate_klines(klines, result0)
+            # Prefer overseas decision window on boot when pricing_basis=overseas.
+            boot_klines = klines
+            if overseas_mode:
+                live_bars, live_src = fetch_for_signal_source(signal_source, limit=400)
+                if live_bars:
+                    if len(live_bars) > 1:
+                        live_bars = drop_forming_5m_bar(live_bars, now=time.time())
+                    boot_klines = bars_dicts_to_dataframe(
+                        live_bars,
+                        underlying_symbol=signal_source.overseas_signal_symbol or "",
+                    )
+                    decision_klines = boot_klines
+                    last_seen_overseas_ts = int(live_bars[-1]["time"])
+                    print(
+                        f"启动外盘窗口 | source={live_src} bars={len(live_bars)} "
+                        f"symbol={signal_source.decision_symbol}",
+                        flush=True,
+                    )
+
+            result0 = pipeline.on_bar_close(boot_klines, trade=True)
+            annotate_klines(boot_klines, result0)
             if persist is not None:
                 persist.record_decision(result0)
+            boot_session = shfe_precious_session_open()
             print(
                 f"启动评估 | regime={result0.factors.regime.value} "
                 f"signal={result0.signal.legacy_signal} ({score_parts(result0)}) "
                 f"desired={result0.sizing_target} atr={atr_of(result0):.2f} "
-                f"close={close_of(result0):.2f}",
+                f"close={close_of(result0):.2f} session={boot_session['label']}",
                 flush=True,
             )
             runtime0 = persist.runtime if persist is not None else healthy_runtime()
@@ -656,10 +713,12 @@ def main() -> None:
                 pre0 = apply_pretrade(
                     result0,
                     net_position=net0,
-                    last_price=close_of(result0),
+                    last_price=float(getattr(main_quote, "last_price", 0) or 0)
+                    or close_of(result0),
                     risk_engine=risk_engine,
                     runtime=runtime0,
                     symbol=trade_symbol,
+                    trade_status=str(boot_session["trade_status"]),
                 )
                 if persist is not None:
                     persist.record_risk(result0.bar_id, pre0)
@@ -681,7 +740,7 @@ def main() -> None:
                         ),
                         last_bar_id=result0.bar_id,
                         config_hash=cfg.config_hash(),
-                        last_price=close_of(result0),
+                        last_price=_domestic_mark(float(getattr(main_quote, "last_price", 0) or 0)),
                     )
                     last_saved_bar_id = result0.bar_id
                 else:
@@ -725,7 +784,7 @@ def main() -> None:
                                 executor=executor,
                                 position=position,
                                 persist=persist,
-                                last_price=close_of(result0),
+                                last_price=_domestic_mark(float(getattr(main_quote, "last_price", 0) or 0)),
                                 atr=last_fill_atr,
                                 signal=last_fill_signal,
                             )
@@ -738,7 +797,7 @@ def main() -> None:
                             pending=None if confirmed0 == desired0 else desired0,
                             last_bar_id=result0.bar_id,
                             config_hash=cfg.config_hash(),
-                            last_price=close_of(result0),
+                            last_price=_domestic_mark(float(getattr(main_quote, "last_price", 0) or 0)),
                         )
                         last_saved_bar_id = result0.bar_id
                     else:
@@ -750,7 +809,7 @@ def main() -> None:
                             pending=None,
                             last_bar_id=result0.bar_id,
                             config_hash=cfg.config_hash(),
-                            last_price=close_of(result0),
+                            last_price=_domestic_mark(float(getattr(main_quote, "last_price", 0) or 0)),
                         )
                         last_saved_bar_id = result0.bar_id
 
@@ -795,13 +854,45 @@ def main() -> None:
                 cur_kline_ns = int(klines.iloc[-1]["datetime"])
             except Exception:
                 cur_kline_ns = 0
-            # Require a *new* bar timestamp — deadline timeouts can leave stale
-            # is_changing flags and would otherwise re-run the same close forever.
-            new_bar = (
-                cur_kline_ns > 0
-                and cur_kline_ns != last_seen_kline_ns
-                and api.is_changing(klines.iloc[-1], "datetime")
-            )
+
+            session = shfe_precious_session_open()
+            trade_status = str(session["trade_status"])
+
+            new_bar = False
+            if overseas_mode:
+                if now - last_overseas_poll >= OVERSEAS_POLL_SECONDS:
+                    last_overseas_poll = now
+                    live_bars, live_src = fetch_for_signal_source(signal_source, limit=400)
+                    if live_bars:
+                        # Decision clock uses completed 5m only (drop open bucket).
+                        completed = drop_forming_5m_bar(live_bars, now=now)
+                        if not completed:
+                            completed = live_bars
+                        last_ts = int(completed[-1]["time"])
+                        decision_klines = bars_dicts_to_dataframe(
+                            completed,
+                            underlying_symbol=signal_source.overseas_signal_symbol or "",
+                        )
+                        if last_ts > last_seen_overseas_ts:
+                            new_bar = True
+                            last_seen_overseas_ts = last_ts
+                            cur_kline_ns = last_ts * 1_000_000_000
+                            tip_age = max(0.0, now - last_ts - OVERSEAS_BAR_SECONDS)
+                            print(
+                                f"[外盘K] source={live_src} bars={len(completed)} "
+                                f"last={datetime.datetime.fromtimestamp(last_ts):%Y-%m-%d %H:%M} "
+                                f"lag≈{tip_age:.0f}s session={session['label']}",
+                                flush=True,
+                            )
+            else:
+                # Require a *new* bar timestamp — deadline timeouts can leave stale
+                # is_changing flags and would otherwise re-run the same close forever.
+                new_bar = (
+                    cur_kline_ns > 0
+                    and cur_kline_ns != last_seen_kline_ns
+                    and api.is_changing(klines.iloc[-1], "datetime")
+                )
+
             if not new_bar:
                 if now - last_heartbeat >= HEARTBEAT_SECONDS:
                     last_heartbeat = now
@@ -891,8 +982,14 @@ def main() -> None:
                             confirmed_net=net,
                             current_target=int(pipeline.current_target),
                             pending_desired=pending,
-                            session_open=True,
-                            payload={"trade_symbol": trade_symbol},
+                            session_open=bool(session["open"]),
+                            payload={
+                                "trade_symbol": trade_symbol,
+                                "pricing_basis": signal_source.pricing_basis,
+                                "decision_symbol": signal_source.decision_symbol,
+                                "trade_status": trade_status,
+                                "session_label": session["label"],
+                            },
                         )
                         _cloud_sync_outbox(persist)
                     if trade_symbol:
@@ -969,17 +1066,21 @@ def main() -> None:
 
             assert executor is not None and position is not None
 
-            result = pipeline.on_bar_close(klines, trade=True)
-            annotate_klines(klines, result)
+            result = pipeline.on_bar_close(decision_klines, trade=True)
+            annotate_klines(decision_klines, result)
             if persist is not None:
                 persist.record_decision(result)
                 _cloud_sync_outbox(persist)
             dt = datetime.datetime.fromtimestamp(
-                int(klines.iloc[-1]["datetime"]) // 1_000_000_000
+                int(decision_klines.iloc[-1]["datetime"]) // 1_000_000_000
             )
             net_pos = int(position.pos)
             parts = score_parts(result)
             atr = atr_of(result)
+            overseas_close = float(close_of(result)) if overseas_mode else None
+            if overseas_mode and q_px > 0 and overseas_close and overseas_close > 0:
+                # Scale overseas ATR onto domestic last for fill/stop locking.
+                atr = scale_atr_to_entry(atr, overseas_close, q_px) or atr
             bars_since_recon += 1
 
             if last_progress_day != dt.date():
@@ -989,7 +1090,8 @@ def main() -> None:
                     f"regime={result.factors.regime.value} "
                     f"signal={result.signal.legacy_signal} ({parts}) "
                     f"target={pipeline.current_target} net={net_pos} "
-                    f"close={close_of(result):.2f}",
+                    f"close={close_of(result):.2f} "
+                    f"session={session['label']} decision={signal_source.decision_symbol}",
                     flush=True,
                 )
             else:
@@ -998,7 +1100,8 @@ def main() -> None:
                     f"regime={result.factors.regime.value} "
                     f"signal={result.signal.legacy_signal} ({parts}) "
                     f"target={pipeline.current_target} net={net_pos} "
-                    f"close={close_of(result):.2f}",
+                    f"close={close_of(result):.2f} "
+                    f"session={session['label']}",
                     flush=True,
                 )
 
@@ -1076,7 +1179,8 @@ def main() -> None:
                     pending=None,
                     last_bar_id=result.bar_id,
                     config_hash=cfg.config_hash(),
-                    last_price=close_of(result),
+                    last_price=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0)),
+                    signal_close=close_of(result),
                 )
                 last_saved_bar_id = result.bar_id
                 continue
@@ -1090,10 +1194,11 @@ def main() -> None:
             pretrade = apply_pretrade(
                 result,
                 net_position=net_pos,
-                last_price=close_of(result),
+                last_price=q_px if q_px > 0 else close_of(result),
                 risk_engine=risk_engine,
                 runtime=runtime,
                 symbol=trade_symbol,
+                trade_status=trade_status,
             )
             if persist is not None:
                 persist.record_risk(result.bar_id, pretrade)
@@ -1138,7 +1243,8 @@ def main() -> None:
                     ),
                     last_bar_id=result.bar_id,
                     config_hash=cfg.config_hash(),
-                    last_price=close_of(result),
+                    last_price=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0)),
+                    signal_close=close_of(result),
                 )
                 last_saved_bar_id = result.bar_id
                 continue
@@ -1196,7 +1302,8 @@ def main() -> None:
                     pending=desired if desired != net_pos else None,
                     last_bar_id=result.bar_id,
                     config_hash=cfg.config_hash(),
-                    last_price=close_of(result),
+                    last_price=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0)),
+                    signal_close=close_of(result),
                 )
                 last_saved_bar_id = result.bar_id
                 continue
@@ -1210,7 +1317,7 @@ def main() -> None:
                 executor=executor,
                 position=position,
                 persist=persist,
-                last_price=close_of(result),
+                last_price=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0)) or close_of(result),
                 atr=atr,
                 signal=last_fill_signal,
             )
@@ -1240,7 +1347,8 @@ def main() -> None:
                 pending=pending,
                 last_bar_id=result.bar_id,
                 config_hash=cfg.config_hash(),
-                last_price=close_of(result),
+                last_price=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0)),
+                signal_close=close_of(result),
             )
             last_saved_bar_id = result.bar_id
 

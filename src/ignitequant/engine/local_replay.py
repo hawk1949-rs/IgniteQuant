@@ -19,8 +19,14 @@ from ignitequant.engine.runtime_bridge import (
     make_risk_engine,
 )
 from ignitequant.execution.roll import RollStateMachine
-from ignitequant.market.cache import ensure_cache, resolve_instrument
-from ignitequant.market.symbols import cost_model_for
+from ignitequant.market.cache import ensure_cache, load_bars, resolve_instrument
+from ignitequant.market.overseas_bars import load_overseas_cache_bars
+from ignitequant.market.session import (
+    TRADE_STATUS_CLOSED,
+    TRADE_STATUS_OPEN,
+    is_session_open_at,
+)
+from ignitequant.market.symbols import cost_model_for, resolve_signal_source
 from ignitequant.market.trading_day import trading_day_from_timestamp_ns
 import ignitequant as _iq
 
@@ -69,6 +75,20 @@ def _record_settle_day(
     sim.record_day(settle_day)
 
 
+def _asof_domestic_row(
+    domestic: pd.DataFrame | None, bar_ns: int
+) -> tuple[float | None, float | None, str]:
+    """Latest domestic bar at or before overseas bar time → (open, close, underlying)."""
+    if domestic is None or domestic.empty:
+        return None, None, ""
+    eligible = domestic[domestic["datetime"] <= bar_ns]
+    if eligible.empty:
+        return None, None, ""
+    row = eligible.iloc[-1]
+    underlying = str(row.get("underlying_symbol") or "").strip()
+    return float(row["open"]), float(row["close"]), underlying
+
+
 def run_local_falcon_backtest(
     *,
     signal_symbol: str,
@@ -99,18 +119,53 @@ def run_local_falcon_backtest(
 
     spec = resolve_instrument(signal_symbol)
     cost = cost_model_for(spec, tq_align=True)
+    source = resolve_signal_source(spec)
+    domestic_bars: pd.DataFrame | None = None
+    decision_symbol = signal_symbol
 
     if bars is None:
-        bars = ensure_cache(
-            signal_symbol,
-            start=start,
-            end=end,
-            duration_seconds=kline_seconds,
-            auto_download=auto_download,
-            progress_cb=progress_cb,
-        )
+        if source.pricing_basis == "overseas" and source.overseas_signal_symbol:
+            decision_symbol = source.overseas_signal_symbol
+            bars = load_overseas_cache_bars(
+                source.overseas_signal_symbol, duration_seconds=kline_seconds
+            )
+            if bars.empty:
+                raise RuntimeError(
+                    f"overseas cache missing for {source.overseas_signal_symbol}. "
+                    f"Run: PYTHONPATH=src python tools/download_overseas_cache.py "
+                    f"--ids {source.overseas_id} --intervals 5m"
+                )
+            try:
+                domestic_bars = ensure_cache(
+                    signal_symbol,
+                    start=start,
+                    end=end,
+                    duration_seconds=kline_seconds,
+                    auto_download=auto_download,
+                    progress_cb=progress_cb,
+                )
+            except Exception:
+                try:
+                    domestic_bars = load_bars(signal_symbol, duration_seconds=kline_seconds)
+                except FileNotFoundError:
+                    domestic_bars = None
+        else:
+            bars = ensure_cache(
+                signal_symbol,
+                start=start,
+                end=end,
+                duration_seconds=kline_seconds,
+                auto_download=auto_download,
+                progress_cb=progress_cb,
+            )
+    elif source.pricing_basis == "overseas":
+        decision_symbol = source.overseas_signal_symbol or signal_symbol
+        try:
+            domestic_bars = load_bars(signal_symbol, duration_seconds=kline_seconds)
+        except FileNotFoundError:
+            domestic_bars = None
     if bars.empty:
-        raise RuntimeError(f"no bars for {signal_symbol}")
+        raise RuntimeError(f"no bars for {decision_symbol}")
 
     start_ns = int(dt.datetime.combine(start, dt.time.min).timestamp() * 1_000_000_000)
     end_ns = int(
@@ -158,6 +213,15 @@ def run_local_falcon_backtest(
         close_px = float(row["close"])
         # Tq decides on datetime-change using the new bar's open as last/close.
         decision_px = float(row["open"])
+        overseas_mode = source.pricing_basis == "overseas"
+        session_open = is_session_open_at(bar_ns) if overseas_mode else True
+        trade_status = TRADE_STATUS_OPEN if session_open else TRADE_STATUS_CLOSED
+        fill_open, fill_close, dom_underlying = _asof_domestic_row(domestic_bars, bar_ns)
+        if overseas_mode and dom_underlying:
+            underlying = dom_underlying
+        if overseas_mode and fill_open is not None:
+            decision_px = float(fill_open)
+            close_px = float(fill_close if fill_close is not None else fill_open)
 
         if underlying != trade_symbol:
             if trade_symbol and not roll.in_progress:
@@ -237,11 +301,31 @@ def run_local_falcon_backtest(
         pretrade = apply_pretrade(
             result,
             net_position=net_pos,
-            last_price=close_of(result),
+            last_price=close_of(result) if not overseas_mode else decision_px,
             risk_engine=risk_engine,
             runtime=healthy_runtime(roll_in_progress=roll.in_progress),
             symbol=trade_symbol,
+            trade_status=trade_status,
         )
+        if record_decisions:
+            decisions.append(
+                {
+                    "bar_id": result.bar_id,
+                    "day": settle_day.isoformat(),
+                    "calendar_day": calendar_day.isoformat(),
+                    "symbol": trade_symbol,
+                    "action": result.applied_action,
+                    "desired": int(result.target.desired_position),
+                    "net_before": net_pos,
+                    "close": decision_px,
+                    "bar_close": close_px,
+                    "trade_status": trade_status,
+                    "risk_action": pretrade.action.value,
+                    "rule_hits": list(pretrade.rule_hits),
+                    "signal_symbol": decision_symbol,
+                    "exec_symbol": trade_symbol,
+                }
+            )
         if pretrade.action in {RiskAction.REJECT, RiskAction.HALT}:
             _record_settle_day(
                 sim, symbol=trade_symbol, settle_day=settle_day, mark_price=close_px
@@ -259,7 +343,6 @@ def run_local_falcon_backtest(
             )
             continue
 
-        before = sim.net_pos(trade_symbol)
         sim.fill_to_target(
             symbol=trade_symbol,
             desired=desired,
@@ -268,20 +351,6 @@ def run_local_falcon_backtest(
             is_roll=False,
             month=settle_day.strftime("%Y-%m"),
         )
-        if record_decisions and before != desired:
-            decisions.append(
-                {
-                    "bar_id": result.bar_id,
-                    "day": settle_day.isoformat(),
-                    "calendar_day": calendar_day.isoformat(),
-                    "symbol": trade_symbol,
-                    "action": result.applied_action,
-                    "desired": desired,
-                    "net_before": before,
-                    "close": decision_px,
-                    "bar_close": close_px,
-                }
-            )
         _record_settle_day(
             sim, symbol=trade_symbol, settle_day=settle_day, mark_price=close_px
         )
@@ -303,6 +372,8 @@ def run_local_falcon_backtest(
         "strategy_id": "falcon_v2",
         "engine": "local",
         "signal_symbol": signal_symbol,
+        "decision_symbol": decision_symbol,
+        "pricing_basis": source.pricing_basis,
         "trade_symbol": trade_symbol,
         "start": start.isoformat(),
         "end": end.isoformat(),

@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,6 +29,8 @@ from ignitequant.market.sim_klines import (
 )
 from ignitequant.market.symbols import INSTRUMENTS
 from ignitequant.market.overseas import cockpit_overseas_pair as _cockpit_overseas_pair
+from ignitequant.market.overseas_bars import fetch_live_overseas_5m_bars as _fetch_overseas_5m_bars_impl
+from ignitequant.market.session import shfe_precious_session_open as _shfe_precious_session_open
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = ROOT / "data" / "runtime"
@@ -718,17 +721,33 @@ def _fetch_yahoo_5m_bars(yahoo_symbol: str, *, limit: int = 400) -> list[dict[st
     return bars[-limit:]
 
 
+# Cockpit polls overseas often; upstream HTTP is ~1–3s. Short TTL avoids blocking every refresh.
+_OVERSEAS_BARS_TTL_S = 15.0
+_overseas_bars_cache: dict[str, tuple[float, list[dict[str, Any]], str | None]] = {}
+_overseas_bars_lock = threading.Lock()
+
+
 def _fetch_overseas_5m_bars(
     pair: dict[str, str], *, limit: int = 400
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Prefer Eastmoney (reachable in CN); fall back to Yahoo."""
-    bars = _fetch_eastmoney_5m_bars(pair.get("eastmoney_secid") or "", limit=limit)
-    if bars:
-        return bars, "eastmoney"
-    bars = _fetch_yahoo_5m_bars(pair.get("yahoo_symbol") or "", limit=limit)
-    if bars:
-        return bars, "yahoo"
-    return [], None
+    """Prefer Eastmoney (reachable in CN); fall back to Yahoo. TTL-cached for cockpit."""
+    cache_key = (
+        f"{pair.get('overseas_id')}|{pair.get('eastmoney_secid')}|{pair.get('yahoo_symbol')}|{limit}"
+    )
+    now = time.monotonic()
+    with _overseas_bars_lock:
+        hit = _overseas_bars_cache.get(cache_key)
+        if hit is not None and now - hit[0] < _OVERSEAS_BARS_TTL_S:
+            return hit[1], hit[2]
+    bars, source = _fetch_overseas_5m_bars_impl(
+        eastmoney_secid=pair.get("eastmoney_secid") or "",
+        yahoo_symbol=pair.get("yahoo_symbol") or "",
+        overseas_id=pair.get("overseas_id") or "",
+        limit=limit,
+    )
+    with _overseas_bars_lock:
+        _overseas_bars_cache[cache_key] = (time.monotonic(), bars, source)
+    return bars, source
 
 
 def _status_from_updated(updated_at: str | None) -> str:
@@ -807,33 +826,6 @@ def _chart_context_from_bars(bars: list[dict[str, Any]]) -> dict[str, Any] | Non
         }
     except Exception:
         return None
-
-
-def _shfe_precious_session_open(now: datetime | None = None) -> dict[str, Any]:
-    """Rough SHFE gold/silver session flag in Asia/Shanghai (display only)."""
-    cst = now.astimezone(_CST) if now else datetime.now(_CST)
-    wd = cst.weekday()  # Mon=0 … Sun=6
-    hm = cst.hour * 100 + cst.minute
-    # Night session crosses midnight: Fri 21:00 → Sat 02:30 still open.
-    in_night = hm >= 2100 or hm < 230
-    in_day = (900 <= hm < 1015) or (1030 <= hm < 1130) or (1330 <= hm < 1500)
-    if wd == 5:  # Saturday
-        open_now = hm < 230  # only leftover Friday night
-    elif wd == 6:  # Sunday
-        open_now = False
-    elif wd == 0 and hm < 900:
-        # Monday before day session: no Sunday night for SHFE au
-        open_now = False
-    else:
-        open_now = in_day or in_night
-    return {
-        "open": open_now,
-        "local_time": cst.strftime("%Y-%m-%d %H:%M:%S"),
-        "label": "交易时段" if open_now else "非交易时段",
-        "note": None
-        if open_now
-        else "周末/休市时账户持仓仍可能保留，属天勤模拟账户状态，不是前端错显。",
-    }
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -1531,18 +1523,36 @@ def overseas_bars(
         }
     bars, source = _fetch_overseas_5m_bars(pair, limit=limit)
     last_price = float(bars[-1]["close"]) if bars else None
+    last_open = int(bars[-1]["time"]) if bars else None
+    now_ts = time.time()
+    # Age past the bar open; also report how late we are vs an ideal live tip.
+    lag_seconds = None
+    if last_open is not None:
+        lag_seconds = max(0.0, now_ts - float(last_open) - 300.0)
     return {
         "symbol_id": symbol_id,
         "supported": True,
         "pair": pair,
         "bars": bars,
         "last_price": last_price,
+        "last_bar_open": last_open,
+        "lag_seconds": lag_seconds,
         "source": source,
         "hint": None
         if bars
         else (
-            f"暂时无法拉取 {pair['display_symbol']} 外盘对照行情（Yahoo/东方财富均不可达）。"
-            f"{pair['note']} 不影响天勤模拟盘交易本身。"
+            f"暂时无法拉取 {pair['display_symbol']} 外盘信号行情（Yahoo/东方财富均不可达）。"
+            "外盘定价品种 fail-closed：无外盘K线时不开新仓。"
+        ),
+        "pricing_role": "signal_clock",
+        "note": (
+            "本品种信号由外盘 5m K 线驱动；内盘休市时信号仍落库，"
+            "Risk 记 MARKET_CLOSED，不下单、持仓保留。"
+            + (
+                f" 当前源={source}，末根延迟约 {int(lag_seconds)}s。"
+                if lag_seconds is not None and lag_seconds > 90
+                else ""
+            )
         ),
     }
 

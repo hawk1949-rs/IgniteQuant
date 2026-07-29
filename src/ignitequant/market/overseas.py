@@ -139,6 +139,7 @@ def cockpit_overseas_pair(domestic_id: str) -> dict[str, str] | None:
     }.get(spec.id, {})
     return {
         "id": legacy.get("id", spec.id),
+        "overseas_id": spec.id,
         "name": legacy.get("name", spec.name),
         "display_symbol": legacy.get("display_symbol", spec.display_symbol),
         "yahoo_symbol": spec.yahoo_symbol,

@@ -262,9 +262,22 @@ def build_sl_tp(
     *,
     sl_mult: float,
     tp_mult: float,
+    overseas_close: float | None = None,
 ) -> tuple[float | None, float | None]:
+    """Build stop/take around fill_price.
+
+    When ``overseas_close`` is set, ``atr`` is treated as overseas ATR and scaled
+    onto the domestic fill via relative volatility (atr/overseas_close).
+    """
     if side_lots == 0 or atr <= 0:
         return None, None
+    use_atr = atr
+    if overseas_close is not None and overseas_close > 0:
+        from ignitequant.portfolio.stop_scale import scale_atr_to_entry
+
+        use_atr = scale_atr_to_entry(atr, overseas_close, fill_price)
+        if use_atr <= 0:
+            return None, None
     if side_lots > 0:
-        return fill_price - sl_mult * atr, fill_price + tp_mult * atr
-    return fill_price + sl_mult * atr, fill_price - tp_mult * atr
+        return fill_price - sl_mult * use_atr, fill_price + tp_mult * use_atr
+    return fill_price + sl_mult * use_atr, fill_price - tp_mult * use_atr

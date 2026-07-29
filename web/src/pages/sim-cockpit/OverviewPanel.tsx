@@ -308,7 +308,9 @@ export function OverviewPanel() {
           },
           {
             step: '风控',
-            detail: session?.open ? '交易时段' : '非交易时段（仅观察账户状态）',
+            detail: session?.open
+              ? '交易时段'
+              : '非交易时段（信号可记、MARKET_CLOSED 不成交）',
           },
         ]
       : []
@@ -511,7 +513,7 @@ export function OverviewPanel() {
             type="info"
             showIcon
             banner
-            message={`${session.label || '非交易时段'}：K 线可能停更；模拟进程仍在后台心跳，不会因关页面而停止。账户持仓/权益来自天勤快照。`}
+            message={`${session.label || '非交易时段'}：外盘信号仍可产生并落库；内盘成交门禁为 MARKET_CLOSED（不下单、持仓保留）。模拟进程继续心跳。`}
           />
         ) : null}
         {targetNetDesync ? (
@@ -735,11 +737,22 @@ export function OverviewPanel() {
                 {overseas.last_price != null
                   ? Number(overseas.last_price).toFixed(2)
                   : '—'}
+                {overseas.source ? ` · ${overseas.source}` : ''}
+                {overseas.lag_seconds != null && overseas.lag_seconds > 90
+                  ? ` · 延迟≈${Math.round(overseas.lag_seconds / 60)}分钟`
+                  : ''}
               </span>
             }
           >
             {overseas.hint ? (
               <p className="mb-2 text-xs text-amber-300/90">{overseas.hint}</p>
+            ) : null}
+            {overseas.lag_seconds != null && overseas.lag_seconds > 300 ? (
+              <p className="mb-2 text-xs text-amber-300/90">
+                外盘源延迟较大（约 {Math.round(overseas.lag_seconds / 60)}{' '}
+                分钟）。已自动在东财/Yahoo 间选更新尖端；图表时间戳为 5 分钟
+                K 线开盘时刻。
+              </p>
             ) : null}
             {overseasChart.bars.length ? (
               <MiniCandleChart
