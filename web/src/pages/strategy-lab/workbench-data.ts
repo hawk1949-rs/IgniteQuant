@@ -266,7 +266,7 @@ export function loadBacktestRuns(): BacktestRun[] {
       const account = {
         ...DEFAULT_ACCOUNT,
         ...r.account,
-        engine: r.account?.engine === 'tq' ? 'tq' : ('cache' as const),
+        engine: (r.account?.engine === 'tq' ? 'tq' : 'cache') as BacktestEngine,
       }
       const needsEnrich = r.series.some(
         (p) => typeof p.ror !== 'number' || typeof p.drawdown !== 'number',

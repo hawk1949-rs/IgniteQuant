@@ -612,6 +612,18 @@ class SqliteTradingRepository:
         self, instance_id: str, snap: PositionSnapshot, *, source: str
     ) -> None:
         as_of = snap.as_of.isoformat() if snap.as_of else _utc_now()
+        try:
+            upnl = float(snap.unrealized_pnl or 0)
+        except (TypeError, ValueError):
+            upnl = 0.0
+        if upnl != upnl:  # NaN
+            upnl = 0.0
+        try:
+            margin = float(getattr(snap, "margin", 0) or 0)
+        except (TypeError, ValueError):
+            margin = 0.0
+        if margin != margin:
+            margin = 0.0
         self._conn.execute(
             """
             INSERT INTO position_snapshot_event(
@@ -633,8 +645,8 @@ class SqliteTradingRepository:
                 int(snap.short_today),
                 int(snap.short_yesterday),
                 snap.average_entry_price,
-                float(snap.unrealized_pnl),
-                float(getattr(snap, "margin", 0) or 0),
+                upnl,
+                margin,
             ),
         )
         self._conn.commit()

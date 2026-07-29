@@ -191,10 +191,14 @@ def _tq_position_snapshot(
 
     try:
         upnl = float(getattr(position, "float_profit", 0) or 0)
+        if upnl != upnl:  # NaN from tqsdk → SQLite NULL
+            upnl = 0.0
     except (TypeError, ValueError):
         upnl = 0.0
     try:
         margin = float(getattr(position, "margin", 0) or 0)
+        if margin != margin:
+            margin = 0.0
     except (TypeError, ValueError):
         margin = 0.0
 

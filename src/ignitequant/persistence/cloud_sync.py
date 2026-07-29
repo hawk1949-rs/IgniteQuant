@@ -23,10 +23,49 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+def _rewrite_direct_db_to_pooler(url: str) -> str:
+    """Rewrite db.<ref>.supabase.co → Session pooler (IPv4-friendly).
+
+    Many office/home networks fail DNS on the direct DB host; pooler works.
+    Disable with SUPABASE_FORCE_POOLER=0.
+    """
+    if not url or os.environ.get("SUPABASE_FORCE_POOLER", "1").strip() == "0":
+        return url
+    from urllib.parse import quote, urlparse, urlunparse
+
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host.startswith("db.") or not host.endswith(".supabase.co"):
+        return url
+    # db.<project_ref>.supabase.co
+    project_ref = host[len("db.") : -len(".supabase.co")]
+    if not project_ref or "." in project_ref:
+        return url
+    region = os.environ.get("SUPABASE_POOLER_REGION", "ap-southeast-1").strip() or "ap-southeast-1"
+    pool_host = os.environ.get(
+        "SUPABASE_POOLER_HOST", f"aws-0-{region}.pooler.supabase.com"
+    ).strip()
+    user = parsed.username or "postgres"
+    if not user.startswith("postgres."):
+        user = f"postgres.{project_ref}"
+    password = parsed.password or ""
+    auth = f"{user}:{quote(password)}" if password else user
+    return urlunparse(
+        (
+            parsed.scheme or "postgresql",
+            f"{auth}@{pool_host}:6543",
+            parsed.path or "/postgres",
+            "",
+            "sslmode=require",
+            "",
+        )
+    )
+
+
 def database_url(*, root: Path | None = None) -> str:
     if root is not None:
         _load_dotenv(root / ".env")
-    return os.environ.get("DATABASE_URL", "").strip()
+    return _rewrite_direct_db_to_pooler(os.environ.get("DATABASE_URL", "").strip())
 
 
 def owner_id(*, root: Path | None = None) -> str | None:

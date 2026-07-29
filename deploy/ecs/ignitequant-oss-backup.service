@@ -1,0 +1,10 @@
+[Unit]
+Description=IgniteQuant daily runtime backup to OSS
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/IgniteQuant
+EnvironmentFile=/opt/IgniteQuant/.env
+Environment=PYTHONPATH=src
+ExecStart=/opt/IgniteQuant/.venv/bin/python tools/sync_files_to_oss.py --upload-runtime

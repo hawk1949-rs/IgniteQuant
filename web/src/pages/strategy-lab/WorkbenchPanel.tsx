@@ -314,8 +314,6 @@ export function WorkbenchPanel() {
   const [chartMetric, setChartMetric] = useState<ChartMetric>('equity')
   const [chartPeriod, setChartPeriod] = useState<ChartPeriod>('day')
 
-  const symbol =
-    WORKBENCH_SYMBOLS.find((s) => s.id === account.symbolId) ?? WORKBENCH_SYMBOLS[0]
   const engineMeta =
     BACKTEST_ENGINE_OPTIONS.find((o) => o.id === account.engine) ??
     BACKTEST_ENGINE_OPTIONS[0]

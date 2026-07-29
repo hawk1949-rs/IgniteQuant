@@ -27,6 +27,7 @@ from ignitequant.market.sim_klines import (
     load_klines_snapshot,
 )
 from ignitequant.market.symbols import INSTRUMENTS
+from ignitequant.market.overseas import cockpit_overseas_pair as _cockpit_overseas_pair
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = ROOT / "data" / "runtime"
@@ -41,25 +42,12 @@ STATUS_LABELS = {
 }
 
 # IgniteQuant 本地品种目录（非天勤「自带列表」）；交易走天勤连续合约，K 线默认读本地 market_cache。
-# 外盘对照优先走东方财富 COMEX 连续（国内可达）；Yahoo 作备用（国内常 403）。
+# 外盘对照优先走东方财富 COMEX 连续（国内可达）；Yahoo 作备用 / 历史归档源。
 _CST = timezone(timedelta(hours=8))
+
 OVERSEAS_PAIRS: dict[str, dict[str, str]] = {
-    "au": {
-        "id": "xauusd",
-        "name": "国际黄金 XAUUSD",
-        "display_symbol": "XAUUSD",
-        "yahoo_symbol": "GC=F",
-        "eastmoney_secid": "101.GC00Y",
-        "note": "外盘对照：以 COMEX 黄金期货（GC00Y / GC=F）近似 XAUUSD；非天勤/MT5 实盘账户。",
-    },
-    "ag": {
-        "id": "xagusd",
-        "name": "国际白银 XAGUSD",
-        "display_symbol": "XAGUSD",
-        "yahoo_symbol": "SI=F",
-        "eastmoney_secid": "101.SI00Y",
-        "note": "外盘对照：以 COMEX 白银期货（SI00Y / SI=F）近似 XAGUSD；非天勤/MT5 实盘账户。",
-    },
+    "au": _cockpit_overseas_pair("au") or {},
+    "ag": _cockpit_overseas_pair("ag") or {},
 }
 
 # instance_id → launcher

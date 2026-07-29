@@ -113,6 +113,13 @@ def migrate(conn: sqlite3.Connection) -> None:
         )
         current = 5
 
+    # Heal additive columns that may have been introduced after a version stamp
+    # (e.g. position.margin added to V2 list after DBs were already at v2+).
+    for table, cols in V2_ADD_COLUMNS.items():
+        _add_missing_columns(conn, table, cols)
+    for table, cols in V4_ADD_COLUMNS.items():
+        _add_missing_columns(conn, table, cols)
+
     if current < SCHEMA_VERSION:
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, datetime('now'))",
