@@ -223,6 +223,9 @@ export type SimCatalog = {
   runtime_dir?: string
   refresh_hint?: string
   symbol_catalog_note?: string
+  data_source?: 'cloud' | 'local' | string
+  read_only?: boolean
+  read_only_hint?: string | null
 }
 
 export type SimSession = {
@@ -312,6 +315,9 @@ export type SimSummary = {
   process_running?: boolean
   pid?: number | null
   can_start?: boolean
+  data_source?: 'cloud' | 'local' | string
+  read_only?: boolean
+  read_only_hint?: string | null
 }
 
 export type SimMetrics = {

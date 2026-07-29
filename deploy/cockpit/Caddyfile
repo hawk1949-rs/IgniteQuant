@@ -1,0 +1,5 @@
+# IP / LAN access — no domain, no TLS certificate cost
+:80 {
+	encode gzip
+	reverse_proxy cockpit:8787
+}

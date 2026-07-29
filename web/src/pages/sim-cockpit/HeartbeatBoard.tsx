@@ -282,7 +282,9 @@ export function HeartbeatBoard() {
           detail={
             summary?.process_running
               ? `在线 · ${summary.symbol || '—'}`
-              : '离线 — 可点上方「启动」'
+              : summary?.read_only || summary?.data_source === 'cloud'
+                ? '云端只读 — 进程状态以交易机为准'
+                : '离线 — 可点上方「启动」'
           }
         />
         <Cell

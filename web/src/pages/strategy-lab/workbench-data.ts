@@ -263,10 +263,10 @@ export function loadBacktestRuns(): BacktestRun[] {
         r.kpis,
     )
     .map((r) => {
-      const account = {
+      const account: AccountConfig = {
         ...DEFAULT_ACCOUNT,
         ...r.account,
-        engine: (r.account?.engine === 'tq' ? 'tq' : 'cache') as BacktestEngine,
+        engine: r.account?.engine === 'tq' ? ('tq' as const) : ('cache' as const),
       }
       const needsEnrich = r.series.some(
         (p) => typeof p.ror !== 'number' || typeof p.drawdown !== 'number',

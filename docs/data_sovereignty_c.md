@@ -94,9 +94,33 @@ PYTHONPATH=src python tools/apply_rds_schema.py
 1. ECS：`.env` 中 `DATABASE_URL`=`RDS_DATABASE_URL`；`systemctl restart ignitequant-api ignitequant-sim`
 2. 确认 outbox 推送后 RDS 表 `sim_decision_projection` / `sim_intent_projection` / `sim_fill_projection` / `sim_instance` 有新行
 3. （可选）历史回填：`PYTHONPATH=src python tools/backfill_sim_projections_to_supabase.py --db data/runtime/falcon_au_sim.sqlite`
-4. 家里电脑：只起 API+前端，`.env` 含 RDS `DATABASE_URL` 与 `SIM_DATA_SOURCE=cloud`
-5. 打开座舱：应能看到会话、决策、意图、成交与账户摘要
+4. 家里电脑 / 观看端：`.env` 含 RDS `DATABASE_URL` 与 `SIM_DATA_SOURCE=cloud`（无需 sqlite）
+5. 打开座舱：应能看到会话、决策、意图、成交与账户摘要；云端只读时启动/补跑应禁用
 6. 本机调试：`SIM_DATA_SOURCE=local`
+
+## 常驻托管只读座舱（不依赖笔记本开着）
+
+**当前生产路径**：阿里云 ECS 常开跑模拟 + API/前端（见 `tools/deploy_to_ecs.py` / `deploy/ecs/README.md`），云库为 RDS。
+
+可选替代（Docker 只读观看端，读同一 `DATABASE_URL`）：
+
+```bash
+docker build -t ignitequant-cockpit .
+docker run --rm -p 8787:8787 \
+  -e SIM_DATA_SOURCE=cloud \
+  -e DATABASE_URL='postgresql://USER:PASS@RDS主机:5432/ignitequant?sslmode=disable' \
+  ignitequant-cockpit
+```
+
+也可参考 [`deploy/cockpit/README.md`](../deploy/cockpit/README.md) / 根目录 `fly.toml`。
+
+职责划分：
+
+| 角色 | 需要什么 | 做什么 |
+| --- | --- | --- |
+| 交易机 / ECS | `TQ_*` + sqlite + RDS `DATABASE_URL` | 跑 `falcon_au_sim`，写本地，outbox 推 RDS |
+| 观看端 | 仅 RDS `DATABASE_URL` + `SIM_DATA_SOURCE=cloud` | 常驻网页/API，**不下单** |
+| 禁止 | 云→本地回拉意图/成交进 sqlite | 避免双写；观看直读投影即可 |
 
 ## 换机迁移清单
 

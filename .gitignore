@@ -1,5 +1,6 @@
 # 本地凭证，禁止提交
 .env
+deploy/cockpit/.env
 *.local.py
 
 # 回测跑批结果（保留目录）
