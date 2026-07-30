@@ -26,6 +26,7 @@ export const ACTION_LABEL: Record<string, string> = {
   TAKE_PROFIT: '止盈',
   BOOT_FLATTEN: '启动补平',
   COOLDOWN_HOLD: '冷却观望',
+  RESYNC: '仓位补齐',
   NONE: '无动作',
 }
 
@@ -61,7 +62,20 @@ export function shortBiasLabel(bias?: string | null) {
 
 export function actionLabel(action?: string | null) {
   if (!action) return '—'
-  return ACTION_LABEL[action] || action
+  if (ACTION_LABEL[action]) return ACTION_LABEL[action]
+  // Never leak raw English enums (e.g. TARGET) into the cockpit.
+  const pretty = action
+    .replace(/_/g, '')
+    .replace(/([A-Z])/g, ' $1')
+    .trim()
+  const fallback: Record<string, string> = {
+    TARGET: '调仓',
+    HOLD: '维持目标',
+    STOPLOSS: '止损',
+    TAKEPROFIT: '止盈',
+  }
+  const key = action.replace(/_/g, '').toUpperCase()
+  return fallback[key] || pretty || action
 }
 
 export function riskActionLabel(action?: string | null) {

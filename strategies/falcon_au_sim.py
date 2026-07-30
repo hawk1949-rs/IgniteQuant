@@ -17,6 +17,7 @@ import datetime
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from tqsdk import TqApi, TqAuth, TqKq
@@ -52,7 +53,11 @@ from ignitequant.market.overseas_bars import (
     drop_forming_5m_bar,
     fetch_for_signal_source,
 )
-from ignitequant.market.session import shfe_precious_session_open, trade_status_for_session
+from ignitequant.market.session import (
+    TRADE_STATUS_CLOSED,
+    shfe_precious_session_open,
+    trade_status_for_session,
+)
 from ignitequant.market.symbols import resolve_signal_source
 from ignitequant.persistence import PersistenceSession
 from ignitequant.portfolio.stop_scale import scale_atr_to_entry
@@ -130,6 +135,61 @@ def _cloud_sync_outbox(persist: PersistenceSession | None) -> None:
         print(f"[云同步] 失败（忽略）: {exc}", flush=True)
 
 
+def _with_fill_confirmed_entry(cfg):
+    """Sim must arm stops only after broker fill — never on TARGET intent alone."""
+    if getattr(cfg, "entry_mode", None) == "fill_confirmed":
+        return cfg
+    return replace(cfg, entry_mode="fill_confirmed")
+
+
+def _arm_entry_after_fill(
+    pipeline: FalconDecisionPipeline,
+    *,
+    side_lots: int,
+    fill_price: float,
+    signal_atr: float,
+    signal: int,
+    domestic_mark: float | None,
+    overseas_close: float | None,
+    sl_atr_mult: float = 1.3,
+    tp_atr_mult: float = 2.3,
+) -> dict[str, float]:
+    """Lock SL/TP after confirmed fill.
+
+    When signals are priced overseas, map the domestic fill into signal space so
+    ``risk.check`` (overseas high/low) stays dimensionally consistent.
+
+    Returns domestic display levels for the cockpit (same units as fill_price).
+    """
+    entry_px = float(fill_price)
+    entry_atr = float(signal_atr)
+    ratio = 1.0
+    if (
+        overseas_close is not None
+        and overseas_close > 0
+        and domestic_mark is not None
+        and domestic_mark > 0
+        and abs(float(overseas_close) / float(domestic_mark) - 1.0) > 0.05
+    ):
+        ratio = float(overseas_close) / float(domestic_mark)
+        entry_px = float(fill_price) * ratio
+    pipeline.risk.on_entry(int(side_lots), entry_px, entry_atr, int(signal))
+
+    domestic_atr = float(signal_atr) / ratio if ratio > 0 else float(signal_atr)
+    fill = float(fill_price)
+    if side_lots > 0:
+        d_stop = fill - float(sl_atr_mult) * domestic_atr
+        d_take = fill + float(tp_atr_mult) * domestic_atr
+    else:
+        d_stop = fill + float(sl_atr_mult) * domestic_atr
+        d_take = fill - float(tp_atr_mult) * domestic_atr
+    return {
+        "display_entry_price": fill,
+        "display_stop_price": d_stop,
+        "display_take_price": d_take,
+    }
+
+
 def _domestic_mark(quote_px: float, *fallbacks: float) -> float | None:
     """Cockpit / fill mark must be domestic price — never overseas decision close."""
     if quote_px > 0:
@@ -155,6 +215,7 @@ def _persist_state(
     config_hash: str,
     last_price: float | None = None,
     signal_close: float | None = None,
+    display_levels: dict[str, float] | None = None,
 ) -> None:
     if session is None:
         return
@@ -166,6 +227,28 @@ def _persist_state(
     if signal_close is not None and float(signal_close) > 0:
         # Overseas (or other) decision bar close — never use as cockpit tip paint.
         extra["signal_close"] = float(signal_close)
+    if display_levels:
+        for key in (
+            "display_entry_price",
+            "display_stop_price",
+            "display_take_price",
+        ):
+            if key in display_levels and display_levels[key] is not None:
+                extra[key] = float(display_levels[key])
+    else:
+        # Heartbeat / later persists must not wipe cockpit domestic stop levels.
+        try:
+            prev = session.repo.load_strategy_state(session.instance_id)
+            prev_payload = dict(prev.payload or {}) if prev is not None else {}
+            for key in (
+                "display_entry_price",
+                "display_stop_price",
+                "display_take_price",
+            ):
+                if key in prev_payload and prev_payload[key] is not None:
+                    extra[key] = float(prev_payload[key])
+        except Exception:
+            pass
     session.save_state(
         symbol=symbol,
         current_target=pipeline.current_target,
@@ -182,6 +265,62 @@ def _persist_state(
     )
 
 
+def _legs_net(position) -> int:
+    """Net from long/short legs (more reliable than ``pos`` on some TqKq sync gaps)."""
+    long_today = int(getattr(position, "pos_long_today", 0) or 0)
+    long_his = int(getattr(position, "pos_long_his", 0) or 0)
+    short_today = int(getattr(position, "pos_short_today", 0) or 0)
+    short_his = int(getattr(position, "pos_short_his", 0) or 0)
+    if long_today == 0 and long_his == 0:
+        long_today = int(getattr(position, "volume_long_today", 0) or 0)
+        long_his = int(getattr(position, "volume_long_his", 0) or 0)
+    if short_today == 0 and short_his == 0:
+        short_today = int(getattr(position, "volume_short_today", 0) or 0)
+        short_his = int(getattr(position, "volume_short_his", 0) or 0)
+    long_total = int(getattr(position, "pos_long", 0) or 0) or (long_today + long_his)
+    short_total = int(getattr(position, "pos_short", 0) or 0) or (short_today + short_his)
+    return int(long_total) - int(short_total)
+
+
+def _broker_net(position) -> int:
+    """Broker confirmed net lots for this contract."""
+    try:
+        pos = int(getattr(position, "pos", 0) or 0)
+    except (TypeError, ValueError):
+        pos = 0
+    legs = _legs_net(position)
+    if pos != legs:
+        print(
+            f"[仓位] pos={pos} 与多空腿净仓={legs} 不一致，采用腿净仓",
+            flush=True,
+        )
+        return legs
+    return pos
+
+
+def refresh_broker_position(api: TqApi, trade_symbol: str, position, account):
+    """Re-fetch position when margin says we hold but ``pos`` still reads flat."""
+    net = _broker_net(position)
+    try:
+        margin = float(getattr(account, "margin", 0) or 0)
+    except (TypeError, ValueError):
+        margin = 0.0
+    if net != 0 or margin < 50_000:
+        return position, net
+    try:
+        position = api.get_position(trade_symbol)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[仓位] 重取失败: {exc}", flush=True)
+        return position, net
+    net2 = _broker_net(position)
+    if net2 != 0:
+        print(
+            f"[仓位] 保证金={margin:.0f} 但原净仓=0，重取后 net={net2}",
+            flush=True,
+        )
+    return position, net2
+
+
 def _tq_position_snapshot(
     symbol: str,
     position,
@@ -191,7 +330,7 @@ def _tq_position_snapshot(
     """Build PositionSnapshot from a tqsdk Position object."""
     from ignitequant.market.margin_rates import estimate_margin_for_symbol
 
-    net = int(getattr(position, "pos", 0) or 0)
+    net = _broker_net(position)
     long_today = int(getattr(position, "pos_long_today", 0) or 0)
     long_his = int(getattr(position, "pos_long_his", 0) or 0)
     short_today = int(getattr(position, "pos_short_today", 0) or 0)
@@ -340,14 +479,27 @@ def _try_confirm_fill(
     last_price: float,
     atr: float,
     signal: int,
+    pipeline: FalconDecisionPipeline | None = None,
+    trade_symbol: str = "",
+    config_hash: str = "",
+    last_bar_id: str = "",
+    domestic_mark: float | None = None,
+    overseas_close: float | None = None,
+    signal_atr: float | None = None,
+    sl_atr_mult: float = 1.3,
+    tp_atr_mult: float = 2.3,
 ) -> FillEvent | None:
-    """Confirm pending TargetPosTask fill once broker net matches intent."""
+    """Confirm pending TargetPosTask fill once broker net matches intent.
+
+    On success: arm SL/TP (opens), clear entry (flats), and immediately write
+    ``confirmed_net`` / ``pending_desired`` so cockpit Metrics match 当前持仓.
+    """
     if executor is None or position is None:
         return None
     if executor.active_intent is None:
         return None
     try:
-        net = int(position.pos)
+        net = _broker_net(position)
     except Exception:
         return None
     fill = executor.poll_position(net, last_price=last_price, atr=atr, signal=signal)
@@ -367,6 +519,52 @@ def _try_confirm_fill(
         f"intent={fill.intent_id} net={net}",
         flush=True,
     )
+
+    display_levels: dict[str, float] | None = None
+    if pipeline is not None:
+        desired = int(pipeline.current_target)
+        mark = domestic_mark if domestic_mark is not None else float(last_price)
+        atr_for_arm = float(signal_atr) if signal_atr is not None else float(atr)
+        if net != 0 and pipeline.risk.state.stop_price is None:
+            display_levels = _arm_entry_after_fill(
+                pipeline,
+                side_lots=net,
+                fill_price=float(fill.price),
+                signal_atr=atr_for_arm,
+                signal=signal,
+                domestic_mark=mark,
+                overseas_close=overseas_close,
+                sl_atr_mult=sl_atr_mult,
+                tp_atr_mult=tp_atr_mult,
+            )
+            print(
+                f"  风控锁定 entry={pipeline.risk.state.entry_price:.2f} "
+                f"sl={pipeline.risk.state.stop_price:.2f} "
+                f"tp={pipeline.risk.state.take_price:.2f} "
+                f"(display_sl={display_levels['display_stop_price']:.2f})",
+                flush=True,
+            )
+        elif net == 0 and (
+            pipeline.risk.state.entry_price is not None
+            or pipeline.risk.state.stop_price is not None
+        ):
+            pipeline.risk.on_flat()
+            print("  风控清仓状态已复位（净仓=0）", flush=True)
+
+        if trade_symbol:
+            pending = None if net == desired else desired
+            _persist_state(
+                persist,
+                pipeline,
+                symbol=trade_symbol,
+                net=net,
+                pending=pending,
+                last_bar_id=last_bar_id or "fill",
+                config_hash=config_hash,
+                last_price=float(last_price) if last_price else None,
+                signal_close=overseas_close,
+                display_levels=display_levels,
+            )
     return fill
 
 
@@ -381,16 +579,35 @@ def _wait_fill_briefly(
     signal: int,
     rounds: int = 8,
     timeout_s: float = 1.5,
+    pipeline: FalconDecisionPipeline | None = None,
+    trade_symbol: str = "",
+    config_hash: str = "",
+    last_bar_id: str = "",
+    domestic_mark: float | None = None,
+    overseas_close: float | None = None,
+    signal_atr: float | None = None,
+    sl_atr_mult: float = 1.3,
+    tp_atr_mult: float = 2.3,
 ) -> FillEvent | None:
     """Poll a few quote updates after submit — TqKq rarely fills synchronously."""
-    fill = _try_confirm_fill(
+    kwargs = dict(
         executor=executor,
         position=position,
         persist=persist,
         last_price=last_price,
         atr=atr,
         signal=signal,
+        pipeline=pipeline,
+        trade_symbol=trade_symbol,
+        config_hash=config_hash,
+        last_bar_id=last_bar_id,
+        domestic_mark=domestic_mark,
+        overseas_close=overseas_close,
+        signal_atr=signal_atr,
+        sl_atr_mult=sl_atr_mult,
+        tp_atr_mult=tp_atr_mult,
     )
+    fill = _try_confirm_fill(**kwargs)
     if fill is not None:
         return fill
     for _ in range(max(rounds, 0)):
@@ -402,14 +619,8 @@ def _wait_fill_briefly(
             px = float(last_price)
         except (TypeError, ValueError):
             px = last_price
-        fill = _try_confirm_fill(
-            executor=executor,
-            position=position,
-            persist=persist,
-            last_price=px,
-            atr=atr,
-            signal=signal,
-        )
+        kwargs["last_price"] = px
+        fill = _try_confirm_fill(**kwargs)
         if fill is not None:
             return fill
     return None
@@ -422,7 +633,7 @@ def main() -> None:
     if not user or not password:
         raise SystemExit("缺少 TQ_USER / TQ_PASS，请先配置项目根目录 .env")
 
-    cfg = load_active_decision_config()
+    cfg = _with_fill_confirmed_entry(load_active_decision_config())
     risk_engine = make_risk_engine(cfg)
     persist: PersistenceSession | None = None
     if ENABLE_PERSISTENCE:
@@ -441,7 +652,7 @@ def main() -> None:
         f"账户=TqKq | K线={KLINE_SECONDS // 60}分钟 | 仓位映射={LOT_BY_SIGNAL} | "
         f"pricing={signal_source.pricing_basis} "
         f"decision={signal_source.decision_symbol} exec={SIGNAL_SYMBOL} | "
-        f"config={cfg.config_version} | RiskEngine+Executor | "
+        f"config={cfg.config_version} entry={cfg.entry_mode} | RiskEngine+Executor | "
         f"persist={'ON ' + str(PERSIST_DB) if persist else 'OFF'} | "
         f"Web UI: http://127.0.0.1{WEB_GUI}",
         flush=True,
@@ -459,6 +670,8 @@ def main() -> None:
     last_seen_kline_ns = 0
     last_fill_atr = 1.0
     last_fill_signal = 0
+    last_signal_atr = 1.0
+    last_overseas_close: float | None = None
     executor: TargetPositionExecutor | None = None
     position = None
     account = api.get_account()
@@ -505,7 +718,7 @@ def main() -> None:
                 recovery = persist.recover(
                     BrokerFacts(
                         symbol=trade_symbol,
-                        net_position=int(position.pos),
+                        net_position=_broker_net(position),
                         equity=float(account.balance),
                         available=float(account.available),
                         margin=float(account.margin),
@@ -513,13 +726,20 @@ def main() -> None:
                 )
                 payload = recovery.restore_payload
                 pipeline.restore_runtime(
-                    current_target=int(payload.get("current_target", int(position.pos))),
+                    current_target=int(payload.get("current_target", _broker_net(position))),
                     cooldown_left=int(payload.get("cooldown_left", 0)),
                     entry_price=payload.get("entry_price"),
                     stop_price=payload.get("stop_price"),
                     take_price=payload.get("take_price"),
                     entry_signal=payload.get("entry_signal"),
                 )
+                # Never keep armed SL/TP when broker is flat — avoids ghost STOP.
+                if _broker_net(position) == 0 and (
+                    pipeline.risk.state.stop_price is not None
+                    or pipeline.risk.state.entry_price is not None
+                ):
+                    print("启动清除幽灵止损 | broker_net=0 但恢复了 entry/stop", flush=True)
+                    pipeline.risk.on_flat()
                 executor.restore_idempotency_keys(recovery.idempotency_keys)
                 print(
                     f"启动对账 | state={recovery.runtime_state} matched={recovery.report.matched} "
@@ -538,7 +758,7 @@ def main() -> None:
                     _tq_account_snapshot(
                         account,
                         symbol=trade_symbol,
-                        net_position=int(position.pos),
+                        net_position=_broker_net(position),
                         last_price=float(getattr(main_quote, "last_price", 0) or 0) or None,
                     )
                 )
@@ -553,7 +773,7 @@ def main() -> None:
                     print(f"[补录成交] 跳过: {exc}", flush=True)
                 # Retry flatten if a prior STOP/pending-0 left broker lots open.
                 pending0 = payload.get("pending_desired")
-                net_boot = int(position.pos)
+                net_boot = _broker_net(position)
                 pending_flat = False
                 if pending0 is not None:
                     try:
@@ -604,6 +824,13 @@ def main() -> None:
                             last_price=boot_px,
                             atr=0.0,
                             signal=0,
+                            pipeline=pipeline,
+                            trade_symbol=trade_symbol,
+                            config_hash=cfg.config_hash(),
+                            last_bar_id=decision_flat,
+                            domestic_mark=boot_px if boot_px > 0 else None,
+                            sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                            tp_atr_mult=float(cfg.risk.tp_atr_mult),
                         )
                     persist.snapshot_position(
                         _tq_position_snapshot(
@@ -626,7 +853,7 @@ def main() -> None:
                         pipeline=pipeline,
                         bars=completed,
                         last_bar_id=last_id or None,
-                        confirmed_net=int(position.pos),
+                        confirmed_net=_broker_net(position),
                         source="tq_startup_klines",
                     )
                     if cu.missed:
@@ -637,7 +864,7 @@ def main() -> None:
                         last_saved_bar_id = cu.last_bar_id_after or last_saved_bar_id
                         # 仅对最终目标做一次对齐下单（中间漏 K 只记决策）
                         want = int(pipeline.current_target)
-                        net_cu = int(position.pos)
+                        net_cu = _broker_net(position)
                         if want != net_cu and executor is not None:
                             rt_cu = persist.runtime
                             increasing = abs(want) > abs(net_cu)
@@ -709,7 +936,7 @@ def main() -> None:
             # without any order_intent — invisible in「委托与成交」.
             boot_actions = {"TARGET", "STOP_LOSS", "TAKE_PROFIT"}
             if result0.applied_action in boot_actions:
-                net0 = int(position.pos)
+                net0 = _broker_net(position)
                 pre0 = apply_pretrade(
                     result0,
                     net_position=net0,
@@ -778,6 +1005,7 @@ def main() -> None:
                             )
                         last_fill_atr = atr_of(result0)
                         last_fill_signal = int(result0.signal.legacy_signal)
+                        last_signal_atr = float(last_fill_atr)
                         if intent0 is not None:
                             _wait_fill_briefly(
                                 api,
@@ -787,8 +1015,16 @@ def main() -> None:
                                 last_price=_domestic_mark(float(getattr(main_quote, "last_price", 0) or 0)),
                                 atr=last_fill_atr,
                                 signal=last_fill_signal,
+                                pipeline=pipeline,
+                                trade_symbol=trade_symbol,
+                                config_hash=cfg.config_hash(),
+                                last_bar_id=result0.bar_id,
+                                domestic_mark=_domestic_mark(float(getattr(main_quote, "last_price", 0) or 0)),
+                                signal_atr=last_signal_atr,
+                                sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                                tp_atr_mult=float(cfg.risk.tp_atr_mult),
                             )
-                        confirmed0 = int(position.pos)
+                        confirmed0 = _broker_net(position)
                         _persist_state(
                             persist,
                             pipeline,
@@ -848,6 +1084,15 @@ def main() -> None:
                     last_price=q_px,
                     atr=last_fill_atr,
                     signal=last_fill_signal,
+                    pipeline=pipeline,
+                    trade_symbol=trade_symbol or "",
+                    config_hash=cfg.config_hash(),
+                    last_bar_id=last_saved_bar_id,
+                    domestic_mark=q_px,
+                    overseas_close=last_overseas_close,
+                    signal_atr=last_signal_atr,
+                    sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                    tp_atr_mult=float(cfg.risk.tp_atr_mult),
                 )
 
             try:
@@ -896,14 +1141,17 @@ def main() -> None:
             if not new_bar:
                 if now - last_heartbeat >= HEARTBEAT_SECONDS:
                     last_heartbeat = now
-                    net = int(position.pos) if position is not None else 0
+                    position, net = refresh_broker_position(
+                        api, trade_symbol, position, account
+                    )
                     pending = None
                     if executor is not None and executor.active_intent is not None:
                         pending = int(executor.active_intent.desired_position)
                     print(
                         f"[心跳] {datetime.datetime.now():%H:%M:%S} "
                         f"{trade_symbol or '-'} target={pipeline.current_target} net={net} "
-                        f"balance={account.balance:.2f} last={main_quote.last_price} "
+                        f"balance={account.balance:.2f} margin={float(getattr(account,'margin',0) or 0):.0f} "
+                        f"last={main_quote.last_price} "
                         f"rt={(persist.runtime.runtime_state if persist else 'N/A')}"
                         f"{'' if pending is None else f' pending={pending}'}",
                         flush=True,
@@ -922,8 +1170,14 @@ def main() -> None:
                         want = int(pipeline.current_target)
                         increasing = abs(want) > abs(net)
                         rt_hb = persist.runtime if persist is not None else healthy_runtime()
-                        # DEGRADED / kill-switch 时禁止心跳旁路加仓（减仓仍允许对齐）。
-                        if increasing and (
+                        # DEGRADED / kill-switch / 休市：禁止心跳旁路加仓（减仓仍允许对齐）。
+                        if increasing and trade_status == TRADE_STATUS_CLOSED:
+                            print(
+                                f"[心跳] 跳过加仓补齐 target={want} net={net} "
+                                f"(内盘休市 MARKET_CLOSED)",
+                                flush=True,
+                            )
+                        elif increasing and (
                             not rt_hb.reconciliation_matched
                             or rt_hb.kill_switch_active
                             or rt_hb.unknown_order_count > 0
@@ -945,6 +1199,7 @@ def main() -> None:
                                 urgency="HIGH",
                                 reason_codes=("TARGET_NET_RESYNC", "HEARTBEAT"),
                                 idempotency_key=f"hb-resync:{trade_symbol}:{want}:{net}",
+                                decision_price=q_px if q_px > 0 else None,
                             )
                             if intent_hb and persist is not None:
                                 persist.record_intent(intent_hb)
@@ -1028,13 +1283,13 @@ def main() -> None:
             if underlying != trade_symbol:
                 if executor is not None and (
                     pipeline.current_target != 0
-                    or (position is not None and int(position.pos) != 0)
+                    or (position is not None and _broker_net(position) != 0)
                 ):
                     print(
                         f"主力换月 {trade_symbol} -> {underlying}，先平旧仓",
                         flush=True,
                     )
-                    net_old = int(position.pos) if position is not None else 0
+                    net_old = _broker_net(position) if position is not None else 0
                     pipeline.force_flat()
                     intent = executor.set_target(
                         0,
@@ -1055,8 +1310,17 @@ def main() -> None:
                         signal=last_fill_signal,
                         rounds=12,
                         timeout_s=2.0,
+                        pipeline=pipeline,
+                        trade_symbol=trade_symbol,
+                        config_hash=cfg.config_hash(),
+                        last_bar_id=f"roll:{trade_symbol}",
+                        domestic_mark=q_px if q_px > 0 else None,
+                        overseas_close=last_overseas_close,
+                        signal_atr=last_signal_atr,
+                        sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                        tp_atr_mult=float(cfg.risk.tp_atr_mult),
                     )
-                    if int(position.pos) != 0:
+                    if _broker_net(position) != 0:
                         continue
                     executor.destroy()
                 trade_symbol = underlying
@@ -1074,13 +1338,18 @@ def main() -> None:
             dt = datetime.datetime.fromtimestamp(
                 int(decision_klines.iloc[-1]["datetime"]) // 1_000_000_000
             )
-            net_pos = int(position.pos)
+            position, net_pos = refresh_broker_position(
+                api, trade_symbol, position, account
+            )
             parts = score_parts(result)
             atr = atr_of(result)
             overseas_close = float(close_of(result)) if overseas_mode else None
+            last_signal_atr = float(atr)
+            last_overseas_close = overseas_close
             if overseas_mode and q_px > 0 and overseas_close and overseas_close > 0:
                 # Scale overseas ATR onto domestic last for fill/stop locking.
                 atr = scale_atr_to_entry(atr, overseas_close, q_px) or atr
+            last_fill_atr = atr
             bars_since_recon += 1
 
             if last_progress_day != dt.date():
@@ -1184,6 +1453,66 @@ def main() -> None:
                 )
                 last_saved_bar_id = result.bar_id
                 continue
+            # Already chasing the same desired volume — do NOT cancel/replace every bar
+            # (that was leaving 成交通知 + net=0 permanently).
+            if (
+                hold_like
+                and executor.active_intent is not None
+                and int(executor.active_intent.desired_position)
+                == int(pipeline.current_target)
+                and int(pipeline.current_target) != net_pos
+            ):
+                print(
+                    f"{dt} 等待成交 | target={pipeline.current_target} net={net_pos} "
+                    f"intent={executor.active_intent.intent_id}",
+                    flush=True,
+                )
+                fill_wait = _wait_fill_briefly(
+                    api,
+                    executor=executor,
+                    position=position,
+                    persist=persist,
+                    last_price=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0))
+                    or float(getattr(main_quote, "last_price", 0) or 0),
+                    atr=atr,
+                    signal=last_fill_signal,
+                    rounds=12,
+                    timeout_s=2.0,
+                    pipeline=pipeline,
+                    trade_symbol=trade_symbol,
+                    config_hash=cfg.config_hash(),
+                    last_bar_id=result.bar_id,
+                    domestic_mark=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0)),
+                    overseas_close=overseas_close,
+                    signal_atr=float(atr_of(result)),
+                    sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                    tp_atr_mult=float(cfg.risk.tp_atr_mult),
+                )
+                confirmed_w = _broker_net(position)
+                # Arm+persist already done inside _try_confirm_fill when fill lands.
+                if fill_wait is not None and confirmed_w != 0 and pipeline.risk.state.stop_price:
+                    print(
+                        f"  风控已锁定 entry={pipeline.risk.state.entry_price} "
+                        f"sl={pipeline.risk.state.stop_price} tp={pipeline.risk.state.take_price}",
+                        flush=True,
+                    )
+                _persist_state(
+                    persist,
+                    pipeline,
+                    symbol=trade_symbol,
+                    net=confirmed_w,
+                    pending=(
+                        None
+                        if confirmed_w == int(pipeline.current_target)
+                        else int(pipeline.current_target)
+                    ),
+                    last_bar_id=result.bar_id,
+                    config_hash=cfg.config_hash(),
+                    last_price=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0)),
+                    signal_close=close_of(result),
+                )
+                last_saved_bar_id = result.bar_id
+                continue
             if hold_like:
                 print(
                     f"{dt} 仓位脱节补齐 | target={pipeline.current_target} net={net_pos} "
@@ -1278,6 +1607,9 @@ def main() -> None:
                 f"{result.bar_id}:{desired}:"
                 f"{'RESYNC' if hold_like else result.applied_action}"
             )
+            decision_px = _domestic_mark(
+                q_px, float(getattr(main_quote, "last_price", 0) or 0)
+            )
             intent = executor.set_target(
                 desired,
                 decision_id=result.bar_id,
@@ -1289,6 +1621,7 @@ def main() -> None:
                     else pretrade.rule_hits
                 ),
                 idempotency_key=key,
+                decision_price=decision_px,
             )
             if intent is None:
                 print(f"{dt} 意图被抑制（换月/重复） key={key}", flush=True)
@@ -1312,6 +1645,7 @@ def main() -> None:
 
             last_fill_atr = atr
             last_fill_signal = int(result.signal.legacy_signal)
+            wait_rounds = 20 if result.applied_action == "TARGET" else 8
             fill = _wait_fill_briefly(
                 api,
                 executor=executor,
@@ -1320,14 +1654,36 @@ def main() -> None:
                 last_price=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0)) or close_of(result),
                 atr=atr,
                 signal=last_fill_signal,
+                rounds=wait_rounds,
+                timeout_s=2.0,
+                pipeline=pipeline,
+                trade_symbol=trade_symbol,
+                config_hash=cfg.config_hash(),
+                last_bar_id=result.bar_id,
+                domestic_mark=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0)),
+                overseas_close=overseas_close,
+                signal_atr=float(atr_of(result)),
+                sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                tp_atr_mult=float(cfg.risk.tp_atr_mult),
             )
-            confirmed = int(position.pos)
+            confirmed = _broker_net(position)
             pending = None if fill or confirmed == desired else desired
-            if fill and desired != 0 and executor.state.entry is not None:
+            if fill and desired != 0 and pipeline.risk.state.stop_price is not None:
                 print(
-                    f"  风控锁定 entry={fill.price:.2f} "
+                    f"  风控已锁定 entry={pipeline.risk.state.entry_price:.2f} "
                     f"sl={pipeline.risk.state.stop_price:.2f} "
                     f"tp={pipeline.risk.state.take_price:.2f}",
+                    flush=True,
+                )
+            elif (
+                cfg.entry_mode == "fill_confirmed"
+                and result.applied_action == "TARGET"
+                and desired != 0
+                and confirmed == 0
+            ):
+                print(
+                    f"  未成交，不锁定止损 | target={desired} net={confirmed} "
+                    f"(等待后续成交确认)",
                     flush=True,
                 )
             if (
@@ -1359,7 +1715,7 @@ def main() -> None:
                 f"退出前平仓: {trade_symbol} target {pipeline.current_target} -> 0",
                 flush=True,
             )
-            net = int(position.pos) if position is not None else 0
+            net = _broker_net(position) if position is not None else 0
             pipeline.force_flat()
             intent = executor.set_target(
                 0,
@@ -1375,7 +1731,7 @@ def main() -> None:
             except Exception:
                 pass
         if persist is not None and trade_symbol:
-            net = int(position.pos) if position is not None else 0
+            net = _broker_net(position) if position is not None else 0
             _persist_state(
                 persist,
                 pipeline,

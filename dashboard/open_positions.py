@@ -28,6 +28,11 @@ def open_positions_view(
     payload = state_payload if isinstance(state_payload, dict) else {}
     symbol = str(position.get("symbol") or "")
     avg = position.get("average_entry_price")
+    if avg is None and payload.get("display_entry_price") is not None:
+        try:
+            avg = float(payload["display_entry_price"])
+        except (TypeError, ValueError):
+            avg = None
     if avg is None and payload.get("entry_price") is not None:
         try:
             avg = float(payload["entry_price"])
@@ -71,7 +76,7 @@ def open_positions_view(
             "margin_source": "ref_product_margin" if margin_rate is not None else "broker",
             "source": position.get("source"),
             "as_of": position.get("as_of") or position.get("created_at"),
-            "stop_price": payload.get("stop_price"),
-            "take_price": payload.get("take_price"),
+            "stop_price": payload.get("display_stop_price", payload.get("stop_price")),
+            "take_price": payload.get("display_take_price", payload.get("take_price")),
         }
     ]

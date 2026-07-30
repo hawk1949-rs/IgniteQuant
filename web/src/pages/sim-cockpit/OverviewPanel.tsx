@@ -41,11 +41,14 @@ function money(n: number) {
 const INTENT_STATUS: Record<string, string> = {
   PENDING: '待处理',
   SUBMITTED: '已提交',
+  ACKNOWLEDGED: '已受理',
   FILLED: '已成交',
   PARTIAL: '部分成交',
   CANCELLED: '已撤销',
   REJECTED: '已拒绝',
   FAILED: '失败',
+  UNKNOWN: '未知',
+  CREATED: '已创建',
 }
 
 const SIDE_LABEL: Record<string, string> = {
@@ -741,7 +744,11 @@ export function OverviewPanel() {
                 />
               ) : (
                 <p className="m-0 text-sm text-muted">
-                  {net === 0 ? '当前无持仓。' : '等待持仓快照。'}
+                  {net === 0 && pendingDesired != null && pendingDesired !== 0
+                    ? `券商净仓为 0，开平仓委托待确认（目标 ${pendingDesired}）。成交前不算持仓，也不会进历史。`
+                    : net === 0
+                      ? '当前无持仓。'
+                      : '等待持仓快照。'}
                 </p>
               ),
             },
@@ -1180,9 +1187,14 @@ export function OverviewPanel() {
                         width: 88,
                         ellipsis: true,
                         render: (v: string | null | undefined) => {
+                          if (!v) return '—'
                           if (v === 'STOP_LOSS') return <Tag color="error">止损</Tag>
                           if (v === 'TAKE_PROFIT') return <Tag color="success">止盈</Tag>
-                          return v || '—'
+                          if (v === 'TARGET') return <Tag color="processing">调仓</Tag>
+                          if (v === 'BOOT_FLATTEN') return <Tag>启动补平</Tag>
+                          if (v === 'HOLD' || v === 'COOLDOWN_HOLD')
+                            return <Tag>{actionLabel(v)}</Tag>
+                          return actionLabel(v)
                         },
                       },
                       {
@@ -1232,7 +1244,7 @@ export function OverviewPanel() {
                         dataIndex: 'regime',
                         width: 88,
                         ellipsis: true,
-                        render: (v: string | null | undefined) => v || '—',
+                        render: (v: string | null | undefined) => regimeLabel(v),
                       },
                     ]}
                   />

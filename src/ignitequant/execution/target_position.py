@@ -164,12 +164,28 @@ class TargetPositionExecutor:
                 self.last_status = OrderStatus.ACKNOWLEDGED
             return None
 
+        qty = abs(int(intent.desired_position) - int(intent.current_position))
+        if qty <= 0:
+            qty = abs(int(net))
+        # Net already matched desired with zero delta (e.g. ghost STOP while flat):
+        # clear intent without inventing a qty=0 ledger fill.
+        if qty <= 0:
+            self.last_status = OrderStatus.FILLED
+            self.active_intent = None
+            self.events.append(
+                ExecutorEvent(
+                    "intent_cleared_flat",
+                    {"net": net, "desired": intent.desired_position},
+                )
+            )
+            return None
+
         fill = FillEvent(
             fill_id=f"fill-{uuid.uuid4().hex[:10]}",
             intent_id=intent.intent_id,
             symbol=self.symbol,
             price=float(last_price),
-            qty=abs(intent.desired_position - intent.current_position) or abs(net),
+            qty=qty,
             fee=0.0,
             side="BUY" if intent.desired_position > intent.current_position else "SELL",
             trade_time=datetime.now(timezone.utc),

@@ -39,6 +39,8 @@ FACTOR_VERSION = "falcon_indicators_legacy_v1"
 
 
 def _finite(value: Any) -> float | None:
+    if value is None:
+        return None
     number = float(value)
     if not math.isfinite(number):
         return None
@@ -179,6 +181,10 @@ class LegacyDecisionAdapter:
                     applied_action = "TARGET"
                     if self.current_target == 0:
                         self.risk.on_flat()
+                    elif self.config.entry_mode == "fill_confirmed":
+                        # Sim/live: arm SL/TP only after broker fill (AGENTS.md).
+                        # Intent-only on_entry creates phantom stops while net=0.
+                        pass
                     else:
                         self.risk.on_entry(
                             self.current_target,
