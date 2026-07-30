@@ -70,7 +70,11 @@ class LoginRequest(BaseModel):
 @app.get("/api/auth/status")
 def auth_status() -> dict[str, object]:
     cfg = load_auth_config()
-    return {"auth_required": cfg.enabled}
+    return {
+        "auth_required": cfg.enabled,
+        "local_fallback_user": cfg.env_username or None,
+        "local_fallback_ready": bool(cfg.env_username and cfg.env_password),
+    }
 
 
 @app.post("/api/auth/login")

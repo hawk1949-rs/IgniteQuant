@@ -63,7 +63,13 @@ type Ctx = {
   replay: SimReplay | null
   setReplayAt: (at: string | null) => void
   refresh: () => Promise<void>
+  loadMoreHistory: () => Promise<void>
+  historyLoading: boolean
 }
+
+const CHART_BAR_LIMIT = 100
+const CHART_BAR_CHUNK = 100
+const CHART_BAR_MAX = 1500
 
 const SimCockpitContext = createContext<Ctx | null>(null)
 
@@ -109,6 +115,47 @@ function readLs(key: string, fallback: string) {
   }
 }
 
+function mergePreserveHistory(
+  prev: SimBarsResponse | null,
+  next: SimBarsResponse,
+  maxBars = 1500,
+): SimBarsResponse {
+  if (!prev?.bars?.length) return next
+  if (!next.bars?.length) return next
+  const nextFirst = next.bars[0]?.time
+  const older = prev.bars.filter((b) => b.time < nextFirst)
+  if (!older.length) return next
+
+  const bars = [...older, ...next.bars].slice(-maxBars)
+  const metaMap = new Map((next.bar_meta || []).map((m) => [m.time, m]))
+  for (const m of prev.bar_meta || []) {
+    if (!metaMap.has(m.time)) metaMap.set(m.time, m)
+  }
+  const overlayKeys = ['ma7', 'ma14', 'ma52', 'signal'] as const
+  const overlays = {
+    ma7: [] as { time: number; value: number }[],
+    ma14: [] as { time: number; value: number }[],
+    ma52: [] as { time: number; value: number }[],
+    signal: [] as { time: number; value: number }[],
+  }
+  for (const key of overlayKeys) {
+    const map = new Map((next.overlays?.[key] || []).map((p) => [p.time, p]))
+    for (const p of prev.overlays?.[key] || []) {
+      if (!map.has(p.time)) map.set(p.time, p)
+    }
+    overlays[key] = [...map.values()].sort((a, b) => a.time - b.time)
+  }
+  return {
+    ...next,
+    bars,
+    bar_meta: bars.map((b) => metaMap.get(b.time) || { time: b.time, source: 'replay' }),
+    overlays,
+    has_more: prev.has_more ?? next.has_more,
+    markers: next.markers?.length ? next.markers : prev.markers,
+    price_lines: next.price_lines?.length ? next.price_lines : prev.price_lines,
+  }
+}
+
 export function SimCockpitProvider({ children }: { children: ReactNode }) {
   const [catalog, setCatalog] = useState<SimCatalog | null>(null)
   const [sessions, setSessions] = useState<SimSession[]>([])
@@ -136,6 +183,8 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
   const [starting, setStarting] = useState(false)
   const [replayAt, setReplayAt] = useState<string | null>(null)
   const [replay, setReplay] = useState<SimReplay | null>(null)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const historyInFlightRef = useRef(false)
 
   const selectInstance = useCallback(
     (id: string) => {
@@ -245,8 +294,8 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
           const [dec, intentRes, fillRes, barRes] = await Promise.all([
             fetchSimDecisions(id, { limit: 40 }),
             fetchSimIntents(id, 80),
-            fetchSimFills(id, 80),
-            fetchSimBars(id, { end: barEnd, limit: 400 }),
+            fetchSimFills(id, 200),
+            fetchSimBars(id, { end: barEnd, limit: CHART_BAR_LIMIT }),
           ])
           const cut = replayAt
           setDecisions((dec.decisions || []).filter((d) => !cut || (d.created_at || '') <= cut))
@@ -305,16 +354,21 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       }
 
       // Heavy path: K-lines + overseas HTTP. Do not await on the light quote path.
-      const marketBarsPromise = fetchSimMarketBars(symbolId, 400).catch(() => null)
-      const overseasPromise = fetchSimOverseasBars(symbolId, 400).catch(() => null)
+      const marketBarsPromise = fetchSimMarketBars(symbolId, {
+        limit: CHART_BAR_LIMIT,
+      }).catch(() => null)
+      const overseasPromise = fetchSimOverseasBars(symbolId, {
+        limit: CHART_BAR_LIMIT,
+        instanceId: id,
+      }).catch(() => null)
 
       const settled = await Promise.allSettled([
         fetchSimSummary(id),
         fetchSimMetrics(id),
         fetchSimDecisions(id, { limit: 40 }),
         fetchSimIntents(id, 80),
-        fetchSimFills(id, 80),
-        fetchSimBars(id, { limit: 400 }),
+        fetchSimFills(id, 200),
+        fetchSimBars(id, { limit: CHART_BAR_LIMIT }),
         marketBarsPromise,
         overseasPromise,
         fetchSimSessions(),
@@ -397,24 +451,30 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       const sessionMatchesSymbol = launcherSymbolId != null && launcherSymbolId === symbolId
 
       if (sessionMatchesSymbol && sessionBars?.bars?.length) {
-        setBars(withLiveTip(sessionBars, livePrice))
+        setBars((prev) => mergePreserveHistory(prev, withLiveTip(sessionBars, livePrice)))
       } else if (market?.bars?.length && market.symbol_id === symbolId) {
-        setBars({
-          instance_id: id,
-          signal_symbol: market.signal_symbol,
-          trade_symbol: market.trade_symbol,
-          bars: market.bars,
-          markers: [],
-          last_price: market.last_price,
-          updated_at: market.updated_at,
-          hint:
-            market.hint ||
-            (sessionMatchesSymbol
-              ? undefined
-              : `当前运行会话是 ${launcherSymbolId ?? '其他品种'}；以下为 ${symbolId} 的行情快照（非本会话成交标记）。`),
-          chart_context: market.chart_context,
-          market_session: market.market_session,
-        })
+        setBars((prev) =>
+          mergePreserveHistory(prev, {
+            instance_id: id,
+            signal_symbol: market.signal_symbol,
+            trade_symbol: market.trade_symbol,
+            bars: market.bars,
+            markers: [],
+            overlays: market.overlays,
+            bar_meta: market.bar_meta,
+            price_lines: market.price_lines,
+            has_more: market.has_more,
+            last_price: market.last_price,
+            updated_at: market.updated_at,
+            hint:
+              market.hint ||
+              (sessionMatchesSymbol
+                ? undefined
+                : `当前运行会话是 ${launcherSymbolId ?? '其他品种'}；以下为 ${symbolId} 的行情快照（非本会话成交标记）。`),
+            chart_context: market.chart_context,
+            market_session: market.market_session,
+          }),
+        )
       } else if (market && market.symbol_id === symbolId) {
         setBars({
           instance_id: id,
@@ -422,6 +482,10 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
           trade_symbol: market.trade_symbol,
           bars: [],
           markers: [],
+          overlays: market.overlays,
+          bar_meta: market.bar_meta,
+          price_lines: market.price_lines,
+          has_more: false,
           last_price: market.last_price,
           updated_at: market.updated_at,
           hint:
@@ -460,6 +524,61 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
     catalogLoadedRef.current = false
     await refreshHeavy()
   }, [refreshHeavy])
+
+  const mergeOlderBars = useCallback((prev: SimBarsResponse, older: SimBarsResponse): SimBarsResponse => {
+    const seen = new Set(prev.bars.map((b) => b.time))
+    const prependBars = (older.bars || []).filter((b) => !seen.has(b.time))
+    if (!prependBars.length) {
+      return { ...prev, has_more: Boolean(older.has_more) }
+    }
+    const mergedBars = [...prependBars, ...prev.bars].slice(-CHART_BAR_MAX)
+    const metaMap = new Map((prev.bar_meta || []).map((m) => [m.time, m]))
+    for (const m of older.bar_meta || []) metaMap.set(m.time, m)
+    const overlayKeys = ['ma7', 'ma14', 'ma52', 'signal'] as const
+    const overlays = { ...(prev.overlays || { ma7: [], ma14: [], ma52: [], signal: [] }) }
+    for (const key of overlayKeys) {
+      const map = new Map((overlays[key] || []).map((p) => [p.time, p]))
+      for (const p of older.overlays?.[key] || []) map.set(p.time, p)
+      overlays[key] = [...map.values()].sort((a, b) => a.time - b.time)
+    }
+    return {
+      ...prev,
+      bars: mergedBars,
+      bar_meta: mergedBars.map(
+        (b) => metaMap.get(b.time) || { time: b.time, source: 'replay' },
+      ),
+      overlays,
+      has_more: Boolean(older.has_more) && mergedBars.length < CHART_BAR_MAX,
+      hint: older.hint || prev.hint,
+    }
+  }, [])
+
+  const loadMoreHistory = useCallback(async () => {
+    if (historyInFlightRef.current || replayAt) return
+    const current = bars
+    if (!current?.bars?.length || current.has_more === false) return
+    const before = current.bars[0]?.time
+    if (before == null) return
+    historyInFlightRef.current = true
+    setHistoryLoading(true)
+    const gen = refreshGenRef.current
+    try {
+      const cat = catalogRef.current
+      const launcherSymbolId =
+        cat?.launchers?.find((l) => l.instance_id === instanceId)?.symbol_id ?? null
+      const sessionMatchesSymbol = launcherSymbolId != null && launcherSymbolId === symbolId
+      const older = sessionMatchesSymbol
+        ? await fetchSimBars(instanceId, { limit: CHART_BAR_CHUNK, before })
+        : await fetchSimMarketBars(symbolId, { limit: CHART_BAR_CHUNK, before })
+      if (gen !== refreshGenRef.current) return
+      setBars((prev) => (prev ? mergeOlderBars(prev, older) : older))
+    } catch {
+      /* keep current window */
+    } finally {
+      historyInFlightRef.current = false
+      setHistoryLoading(false)
+    }
+  }, [bars, instanceId, mergeOlderBars, replayAt, symbolId])
 
   useEffect(() => {
     // Invalidate in-flight responses when session/symbol/replay changes.
@@ -538,6 +657,8 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       replay,
       setReplayAt,
       refresh,
+      loadMoreHistory,
+      historyLoading,
     }),
     [
       catalog,
@@ -563,6 +684,8 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       replayAt,
       replay,
       refresh,
+      loadMoreHistory,
+      historyLoading,
     ],
   )
 

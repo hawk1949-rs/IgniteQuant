@@ -149,6 +149,11 @@ class LegacyDecisionAdapter:
         self.risk.tick_cooldown()
         risk_action = LegacyRiskAction.NONE
         applied_action = "HOLD"
+        # Preserve armed SL/TP across trigger()/on_flat() so exit decisions
+        # still serialize the levels that fired (cockpit fill enrichment).
+        exit_entry = self.risk.state.entry_price
+        exit_stop = self.risk.state.stop_price
+        exit_take = self.risk.state.take_price
 
         if trade:
             if self.current_target != 0:
@@ -159,6 +164,9 @@ class LegacyDecisionAdapter:
                     float(ind.close[-1]),
                 )
                 if risk_action != LegacyRiskAction.NONE:
+                    exit_entry = self.risk.state.entry_price
+                    exit_stop = self.risk.state.stop_price
+                    exit_take = self.risk.state.take_price
                     self.risk.trigger(risk_action)
                     self.current_target = 0
                     applied_action = risk_action.value
@@ -286,15 +294,21 @@ class LegacyDecisionAdapter:
             risk_snapshot_id=f"risksnap:{bar_id}",
             legacy_exit_action=LegacyExitAction(risk_action.value),
             cooldown_left=int(self.risk.state.cooldown_left),
-            entry_price=_finite(self.risk.state.entry_price)
-            if self.risk.state.entry_price is not None
-            else None,
-            stop_price=_finite(self.risk.state.stop_price)
-            if self.risk.state.stop_price is not None
-            else None,
-            take_price=_finite(self.risk.state.take_price)
-            if self.risk.state.take_price is not None
-            else None,
+            entry_price=_finite(
+                self.risk.state.entry_price
+                if self.risk.state.entry_price is not None
+                else exit_entry
+            ),
+            stop_price=_finite(
+                self.risk.state.stop_price
+                if self.risk.state.stop_price is not None
+                else exit_stop
+            ),
+            take_price=_finite(
+                self.risk.state.take_price
+                if self.risk.state.take_price is not None
+                else exit_take
+            ),
         )
 
         return PipelineResult(

@@ -24,8 +24,19 @@ from dashboard.catalog import STRATEGIES, SYMBOLS
 from dashboard import sim_cloud_read
 from dashboard.open_positions import open_positions_view as _open_positions_view
 from dashboard.position_history import (
+    account_realized_pnl as _account_realized_pnl,
     closed_rounds_summary as _closed_rounds_summary,
     iter_closed_rounds as _iter_closed_rounds,
+    iter_closed_rounds_from_broker as _iter_closed_rounds_from_broker,
+    make_unattributed_close_leg as _make_unattributed_close_leg,
+    prepare_fills_for_rounds as _prepare_fills_for_rounds,
+    rounds_to_open_close_legs as _rounds_to_open_close_legs,
+)
+from ignitequant.market.chart_series import (
+    DEFAULT_VISIBLE_BARS,
+    assemble_visible_bars,
+    build_chart_enrichment,
+    price_lines_from_strategy_payload,
 )
 from ignitequant.market.sim_klines import (
     find_snapshot_for_symbol,
@@ -832,6 +843,86 @@ def _chart_context_from_bars(bars: list[dict[str, Any]]) -> dict[str, Any] | Non
         return None
 
 
+def _empty_chart_enrichment() -> dict[str, Any]:
+    return {
+        "overlays": {"ma7": [], "ma14": [], "ma52": [], "signal": []},
+        "bar_meta": [],
+        "price_lines": [],
+    }
+
+
+def _load_decisions_for_chart(
+    conn: sqlite3.Connection,
+    instance_id: str,
+    *,
+    end_ts: datetime | None = None,
+    limit: int = 2000,
+) -> list[dict[str, Any]]:
+    q = """
+        SELECT bar_id, applied_action, target_after, legacy_signal, payload_json, created_at
+        FROM decision_event
+        WHERE instance_id = ?
+    """
+    params: list[Any] = [instance_id]
+    if end_ts is not None:
+        q += " AND created_at <= ?"
+        params.append(end_ts.isoformat())
+    q += " ORDER BY seq DESC LIMIT ?"
+    params.append(int(limit))
+    rows = conn.execute(q, params).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        payload = _loads(r["payload_json"])
+        factors = (payload.get("factors") or {}) if isinstance(payload, dict) else {}
+        out.append(
+            {
+                "bar_id": r["bar_id"],
+                "applied_action": r["applied_action"],
+                "target_after": int(r["target_after"]),
+                "legacy_signal": int(r["legacy_signal"]),
+                "created_at": r["created_at"],
+                "regime": factors.get("regime") if isinstance(factors, dict) else None,
+                "factor_values": (
+                    factors.get("values") if isinstance(factors, dict) else None
+                )
+                or {},
+                "score_parts": (
+                    payload.get("legacy_score_parts")
+                    if isinstance(payload, dict)
+                    else None
+                ),
+                "payload": payload,
+            }
+        )
+    return out
+
+
+def _enrich_visible_chart(
+    hot_bars: list[dict[str, Any]],
+    *,
+    signal_symbol: str,
+    limit: int,
+    before_sec: int | None,
+    decisions: list[dict[str, Any]] | None = None,
+    price_lines: list[dict[str, Any]] | None = None,
+    use_cache: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
+    visible, compute, source = assemble_visible_bars(
+        hot_bars,
+        signal_symbol=signal_symbol,
+        limit=limit,
+        before_sec=before_sec,
+        use_cache=use_cache,
+    )
+    enrichment = build_chart_enrichment(
+        visible,
+        compute,
+        decisions=decisions or [],
+        price_lines=price_lines or [],
+    )
+    return visible, enrichment, source
+
+
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
@@ -971,18 +1062,107 @@ def _signal_symbol_for_trade(symbol: str) -> str:
     return "KQ.m@SHFE.au"
 
 
-def _compute_metrics(conn: sqlite3.Connection, instance_id: str) -> dict[str, Any]:
+def _prior_inventory_for_fills(
+    conn: sqlite3.Connection, instance_id: str
+) -> tuple[int, float | None]:
+    """Broker net just before the first real fill (usually startup leftover)."""
+    row = conn.execute(
+        """
+        SELECT net_position, avg_entry_price
+        FROM position_snapshot_event
+        WHERE instance_id = ?
+          AND ABS(COALESCE(net_position, 0)) > 0
+          AND COALESCE(source, '') LIKE '%startup%'
+        ORDER BY seq ASC
+        LIMIT 1
+        """,
+        (instance_id,),
+    ).fetchone()
+    if row is None:
+        return 0, None
+    net = int(row["net_position"] or 0)
+    avg = None
+    if row["avg_entry_price"] is not None:
+        try:
+            avg = float(row["avg_entry_price"])
+        except (TypeError, ValueError):
+            avg = None
+    return net, avg
+
+
+def _load_fills_prepared(
+    conn: sqlite3.Connection, instance_id: str
+) -> list[dict[str, Any]]:
     fills = conn.execute(
         """
-        SELECT symbol, price, qty, fee, side, trade_time, created_at
+        SELECT symbol, price, qty, fee, side, trade_time, created_at, payload_json
         FROM trade_fill_event
         WHERE instance_id = ?
         ORDER BY seq ASC
         """,
         (instance_id,),
     ).fetchall()
-    fill_rows = [dict(f) for f in fills]
-    rounds = _iter_closed_rounds(fill_rows)
+    rows = []
+    for f in fills:
+        item = dict(f)
+        item["payload"] = _loads(item.pop("payload_json", None))
+        rows.append(item)
+    prior_net, prior_avg = _prior_inventory_for_fills(conn, instance_id)
+    return _prepare_fills_for_rounds(rows, prior_net=prior_net, prior_avg_price=prior_avg)
+
+
+def _load_broker_rounds(
+    conn: sqlite3.Connection, instance_id: str
+) -> tuple[list[dict[str, Any]], str]:
+    """Prefer 天勤 position snapshots; fall back to cleaned fills."""
+    pos_rows = conn.execute(
+        """
+        SELECT symbol, net_position, avg_entry_price, unrealized_pnl, source, as_of, created_at
+        FROM position_snapshot_event
+        WHERE instance_id = ?
+        ORDER BY seq ASC
+        """,
+        (instance_id,),
+    ).fetchall()
+    acct_rows = conn.execute(
+        """
+        SELECT equity, as_of, created_at
+        FROM account_snapshot_event
+        WHERE instance_id = ?
+        ORDER BY seq ASC
+        """,
+        (instance_id,),
+    ).fetchall()
+    fill_rows = conn.execute(
+        """
+        SELECT symbol, price, qty, fee, side, trade_time, created_at, payload_json
+        FROM trade_fill_event
+        WHERE instance_id = ?
+        ORDER BY seq ASC
+        """,
+        (instance_id,),
+    ).fetchall()
+    fills: list[dict[str, Any]] = []
+    for f in fill_rows:
+        item = dict(f)
+        item["payload"] = _loads(item.pop("payload_json", None))
+        fills.append(item)
+
+    broker_rounds = _iter_closed_rounds_from_broker(
+        [dict(r) for r in pos_rows],
+        account_snapshots=[dict(r) for r in acct_rows],
+        fills=fills,
+    )
+    if broker_rounds:
+        return broker_rounds, "broker_position"
+
+    prepared = _prepare_fills_for_rounds(fills)
+    return _iter_closed_rounds(prepared), "fills_fallback"
+
+
+def _compute_metrics(conn: sqlite3.Connection, instance_id: str) -> dict[str, Any]:
+    fill_rows = _load_fills_prepared(conn, instance_id)
+    rounds, rounds_source = _load_broker_rounds(conn, instance_id)
     summary = _closed_rounds_summary(rounds)
     # Residual open position after walking fills (for metrics.open_position).
     pos = 0
@@ -1015,45 +1195,224 @@ def _compute_metrics(conn: sqlite3.Connection, instance_id: str) -> dict[str, An
             max_dd = max(max_dd, (peak - eq) / peak)
 
     acct = _latest_account(conn, instance_id)
+    pos_snap = _latest_position(conn, instance_id)
+    unrealized = 0.0
     if acct is not None:
         current_equity = float(acct["equity"])
+        try:
+            unrealized = float(acct.get("unrealized_pnl") or 0)
+        except (TypeError, ValueError):
+            unrealized = 0.0
+    if unrealized == 0.0 and pos_snap is not None:
+        try:
+            unrealized = float(pos_snap.get("unrealized_pnl") or 0)
+        except (TypeError, ValueError):
+            pass
+    if pos_snap is not None:
+        try:
+            pos = int(pos_snap.get("net_position") or pos)
+        except (TypeError, ValueError):
+            pass
 
+    pnl = current_equity - DEFAULT_INIT_BALANCE
+    realized_account = _account_realized_pnl(
+        equity=current_equity,
+        init_balance=DEFAULT_INIT_BALANCE,
+        unrealized=unrealized,
+    )
+    realized_fills = float(summary["realized_pnl_proxy"])
     return {
         "equity": current_equity,
         "init_balance": DEFAULT_INIT_BALANCE,
-        "pnl": current_equity - DEFAULT_INIT_BALANCE,
-        "pnl_pct": (current_equity - DEFAULT_INIT_BALANCE) / DEFAULT_INIT_BALANCE,
-        "realized_pnl_proxy": summary["realized_pnl_proxy"],
+        "pnl": pnl,
+        "pnl_pct": pnl / DEFAULT_INIT_BALANCE,
+        "realized_pnl_proxy": realized_fills,
+        "realized_pnl_closed": realized_account,
+        "realized_pnl_fills": realized_fills,
+        "unrealized_pnl": unrealized,
+        "pnl_residual": realized_account - realized_fills,
         "trade_count": summary["trade_count"],
-        "fill_count": len(fills),
+        "fill_count": len(fill_rows),
         "wins": summary["wins"],
         "losses": summary["losses"],
         "win_rate": summary["win_rate"],
         "max_drawdown_pct": max_dd,
         "open_position": pos,
         "equity_curve": equity_curve[-200:],
+        "history_source": rounds_source,
+        "pnl_note": (
+            "账户盈亏/已实现以天勤权益为准。"
+            "持仓历史按开仓¥0 + 平仓价差；若缺本地开平记录会多一行「结转」对齐账户。"
+        ),
     }
 
 
-def _position_history_from_conn(
-    conn: sqlite3.Connection, instance_id: str, *, limit: int = 100
-) -> dict[str, Any]:
-    fills = conn.execute(
+def _enrich_fills_local(
+    conn: sqlite3.Connection, instance_id: str, items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Attach decision-time signal / stop / take onto fill rows via intent_id."""
+    from dashboard.fill_enrichment import (
+        apply_entry_stop_fallback,
+        enrichment_from_decision_payload,
+    )
+
+    if not items:
+        return items
+
+    intent_ids = [str(it["intent_id"]) for it in items if it.get("intent_id")]
+    intent_to_decision: dict[str, str] = {}
+    decisions: dict[str, dict[str, Any]] = {}
+    risks: dict[str, Any] = {}
+    if intent_ids:
+        placeholders = ",".join("?" for _ in intent_ids)
+        intent_rows = conn.execute(
+            f"""
+            SELECT intent_id, decision_id
+            FROM order_intent_event
+            WHERE instance_id = ? AND intent_id IN ({placeholders})
+            """,
+            [instance_id, *intent_ids],
+        ).fetchall()
+        intent_to_decision = {
+            str(r["intent_id"]): str(r["decision_id"])
+            for r in intent_rows
+            if r["decision_id"]
+        }
+        decision_ids = sorted(set(intent_to_decision.values()))
+        if decision_ids:
+            d_placeholders = ",".join("?" for _ in decision_ids)
+            dec_rows = conn.execute(
+                f"""
+                SELECT decision_id, legacy_signal, applied_action, payload_json
+                FROM decision_event
+                WHERE instance_id = ? AND decision_id IN ({d_placeholders})
+                """,
+                [instance_id, *decision_ids],
+            ).fetchall()
+            decisions = {
+                str(r["decision_id"]): {
+                    "legacy_signal": r["legacy_signal"],
+                    "applied_action": r["applied_action"],
+                    "payload": _loads(r["payload_json"]),
+                }
+                for r in dec_rows
+            }
+            risk_rows = conn.execute(
+                f"""
+                SELECT decision_id, payload_json
+                FROM risk_decision_event
+                WHERE instance_id = ? AND decision_id IN ({d_placeholders})
+                ORDER BY seq ASC
+                """,
+                [instance_id, *decision_ids],
+            ).fetchall()
+            for r in risk_rows:
+                risks[str(r["decision_id"])] = _loads(r["payload_json"])
+
+    out: list[dict[str, Any]] = []
+    for item in items:
+        enriched = dict(item)
+        did = intent_to_decision.get(str(item.get("intent_id") or ""))
+        dec = decisions.get(did or "") if did else None
+        if dec:
+            enriched.update(
+                enrichment_from_decision_payload(
+                    decision_id=did,
+                    legacy_signal=dec.get("legacy_signal"),
+                    applied_action=dec.get("applied_action"),
+                    payload=dec.get("payload"),
+                    risk_payload=risks.get(did or ""),
+                )
+            )
+        fill_payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        if fill_payload.get("source"):
+            enriched["fill_source"] = fill_payload.get("source")
+        out.append(enriched)
+
+    # Entry levels for fallback onto exit / resync fills with cleared stops.
+    entry_rows = conn.execute(
         """
-        SELECT symbol, price, qty, fee, side, trade_time, created_at
-        FROM trade_fill_event
+        SELECT decision_id, applied_action, payload_json, created_at
+        FROM decision_event
         WHERE instance_id = ?
+          AND applied_action IN ('TARGET', 'HOLD')
         ORDER BY seq ASC
         """,
         (instance_id,),
     ).fetchall()
-    rounds = _iter_closed_rounds([dict(f) for f in fills])
-    # Newest closed first for cockpit table.
-    rounds_desc = list(reversed(rounds))[:limit]
+    entry_levels: list[dict[str, Any]] = []
+    for r in entry_rows:
+        payload = _loads(r["payload_json"])
+        lvl = enrichment_from_decision_payload(
+            decision_id=str(r["decision_id"]),
+            legacy_signal=None,
+            applied_action=r["applied_action"],
+            payload=payload,
+            risk_payload=None,
+        )
+        if lvl.get("stop_price") is None:
+            continue
+        entry_levels.append(
+            {
+                "as_of": r["created_at"],
+                "stop_price": lvl.get("stop_price"),
+                "take_price": lvl.get("take_price"),
+                "entry_price": lvl.get("entry_price"),
+            }
+        )
+    return apply_entry_stop_fallback(out, entry_levels)
+
+def _position_history_from_conn(
+    conn: sqlite3.Connection, instance_id: str, *, limit: int = 100
+) -> dict[str, Any]:
+    rounds, source = _load_broker_rounds(conn, instance_id)
+    # Assign round_id for fill-fallback rounds too.
+    for i, r in enumerate(rounds):
+        if not r.get("round_id"):
+            r["round_id"] = f"{source}-{i}-{r.get('opened_at') or i}"
+    summary = _closed_rounds_summary(rounds)
+    legs = _rounds_to_open_close_legs(rounds, newest_first=True)
+    # limit applies to rounds; legs are 2× rounds (newest rounds first).
+    max_legs = max(int(limit) * 2, 0)
+    legs = legs[:max_legs]
+
+    rounds_price_pnl = float(summary["realized_pnl_proxy"])
+    acct = _latest_account(conn, instance_id)
+    equity = float(acct["equity"]) if acct is not None else DEFAULT_INIT_BALANCE
+    unrealized = 0.0
+    if acct is not None:
+        try:
+            unrealized = float(acct.get("unrealized_pnl") or 0)
+        except (TypeError, ValueError):
+            unrealized = 0.0
+    account_realized = _account_realized_pnl(
+        equity=equity,
+        init_balance=DEFAULT_INIT_BALANCE,
+        unrealized=unrealized,
+    )
+    as_of = None
+    if acct is not None:
+        as_of = acct.get("as_of") or acct.get("created_at")
+    residual_leg = _make_unattributed_close_leg(
+        account_realized=account_realized,
+        rounds_price_pnl=rounds_price_pnl,
+        as_of=str(as_of) if as_of else None,
+    )
+    if residual_leg is not None:
+        # Keep newest-first: 结转 explains the account gap at the top.
+        legs = [residual_leg, *legs]
+
     return {
         "instance_id": instance_id,
-        "count": len(rounds),
-        "positions": rounds_desc,
+        "count": len(legs),
+        "round_count": len(rounds),
+        "positions": legs,
+        "realized_pnl_total": rounds_price_pnl,
+        "account_realized_pnl": float(account_realized),
+        "unattributed_pnl": float(residual_leg["realized_pnl"]) if residual_leg else 0.0,
+        "history_source": source,
+        "history_format": "open_close_legs",
+        "fills_prepared": source != "broker_position",
     }
 
 
@@ -1492,7 +1851,10 @@ def session_catch_up_bars(instance_id: str) -> dict[str, Any]:
 @router.get("/overseas/bars")
 def overseas_bars(
     symbol_id: str = Query("au"),
-    limit: int = Query(400, ge=10, le=2000),
+    limit: int = Query(DEFAULT_VISIBLE_BARS, ge=10, le=2000),
+    instance_id: str | None = Query(
+        None, description="optional session id to overlay live decision signal/regime"
+    ),
 ) -> dict[str, Any]:
     pair = OVERSEAS_PAIRS.get(symbol_id)
     if not pair:
@@ -1501,11 +1863,35 @@ def overseas_bars(
             "supported": False,
             "bars": [],
             "last_price": None,
+            "overlays": {"ma7": [], "ma14": [], "ma52": [], "signal": []},
+            "bar_meta": [],
             "hint": "当前品种暂无配置外盘对照。",
         }
-    bars, source = _fetch_overseas_5m_bars(pair, limit=limit)
-    last_price = float(bars[-1]["close"]) if bars else None
-    last_open = int(bars[-1]["time"]) if bars else None
+    # Fetch extra bars for MA warmup, return last ``limit`` visible.
+    fetch_n = min(max(int(limit) + 80, 120), 2000)
+    bars_all, source = _fetch_overseas_5m_bars(pair, limit=fetch_n)
+    visible = list(bars_all[-limit:]) if bars_all else []
+    decisions: list[dict[str, Any]] = []
+    if instance_id and visible:
+        try:
+            path = _resolve_db(instance_id)
+            conn = _open_ro(path)
+            try:
+                decisions = _load_decisions_for_chart(conn, instance_id, limit=2000)
+            finally:
+                conn.close()
+        except HTTPException:
+            decisions = []
+        except Exception:
+            decisions = []
+    enrichment = build_chart_enrichment(
+        visible,
+        bars_all or visible,
+        decisions=decisions,
+        price_lines=None,
+    )
+    last_price = float(visible[-1]["close"]) if visible else None
+    last_open = int(visible[-1]["time"]) if visible else None
     now_ts = time.time()
     # Age past the bar open; also report how late we are vs an ideal live tip.
     lag_seconds = None
@@ -1515,13 +1901,15 @@ def overseas_bars(
         "symbol_id": symbol_id,
         "supported": True,
         "pair": pair,
-        "bars": bars,
+        "bars": visible,
+        "overlays": enrichment["overlays"],
+        "bar_meta": enrichment["bar_meta"],
         "last_price": last_price,
         "last_bar_open": last_open,
         "lag_seconds": lag_seconds,
         "source": source,
         "hint": None
-        if bars
+        if visible
         else (
             f"暂时无法拉取 {pair['display_symbol']} 外盘信号行情（Yahoo/东方财富均不可达）。"
             "外盘定价品种 fail-closed：无外盘K线时不开新仓。"
@@ -1542,25 +1930,28 @@ def overseas_bars(
 @router.get("/market/bars")
 def market_bars(
     symbol_id: str = Query("au"),
-    limit: int = Query(400, ge=10, le=2000),
+    limit: int = Query(DEFAULT_VISIBLE_BARS, ge=10, le=2000),
+    before: int | None = Query(None, description="unix seconds; return bars strictly before this"),
 ) -> dict[str, Any]:
-    """Sim Cockpit bars: Tq live JSON snapshot, then SQLite market_bar fallback."""
+    """Sim Cockpit bars: Tq live JSON snapshot, SQLite fallback, then market_cache history."""
     try:
         spec = INSTRUMENTS[symbol_id]
     except KeyError as exc:
         raise HTTPException(404, f"未知品种：{symbol_id}") from exc
 
+    # Pull a wider hot window so assemble_visible can trim + prepend cache.
+    hot_limit = min(max(limit + 80, 200), 2000)
     snap = find_snapshot_for_symbol(
         symbol_id,
         SIM_LAUNCHERS,
         runtime_dir=RUNTIME_DIR,
-        limit=limit,
+        limit=hot_limit,
     )
     if snap is None:
         # Also accept any runtime *.klines.json whose signal matches.
         for path in RUNTIME_DIR.glob("*.klines.json"):
             iid = path.name.replace(".klines.json", "")
-            candidate = load_klines_snapshot(iid, runtime_dir=RUNTIME_DIR, limit=limit)
+            candidate = load_klines_snapshot(iid, runtime_dir=RUNTIME_DIR, limit=hot_limit)
             if not candidate:
                 continue
             if candidate.get("signal_symbol") == spec.signal_symbol:
@@ -1585,7 +1976,7 @@ def market_bars(
 
                     repo = SqliteTradingRepository(conn)
                     bars_db = repo.list_market_bars(
-                        spec.signal_symbol, duration_sec=300, limit=limit
+                        spec.signal_symbol, duration_sec=300, limit=hot_limit
                     )
                 finally:
                     conn.close()
@@ -1604,7 +1995,22 @@ def market_bars(
                 break
 
     session = _shfe_precious_session_open()
-    if snap is None:
+    hot_bars = list((snap or {}).get("bars") or [])
+    visible, enrichment, assembled_source = _enrich_visible_chart(
+        hot_bars,
+        signal_symbol=spec.signal_symbol,
+        limit=limit,
+        before_sec=before,
+        decisions=None,
+        price_lines=None,
+        use_cache=True,
+    )
+    if assembled_source != "tqsdk_sim_live":
+        source = assembled_source
+    elif not hot_bars and visible:
+        source = assembled_source
+
+    if not visible:
         return {
             "symbol_id": symbol_id,
             "name": spec.name,
@@ -1612,36 +2018,47 @@ def market_bars(
             "trade_symbol": spec.signal_symbol,
             "bars": [],
             "markers": [],
+            **_empty_chart_enrichment(),
             "last_price": None,
             "last_price_source": None,
-            "hint": "暂无天勤模拟盘 K 线快照。请先启动对应模拟盘进程（启动后会写入实时 K 线）。",
+            "hint": "暂无天勤模拟盘 K 线快照，且本地 market_cache 也无可用历史。请先启动模拟盘或下载行情缓存。",
             "source": "tqsdk_sim_live",
             "chart_context": None,
             "market_session": session,
+            "has_more": False,
         }
 
-    bars = list(snap.get("bars") or [])
-    last_price = snap.get("last_price")
-    if last_price is None and bars:
-        last_price = float(bars[-1]["close"])
-    trade_symbol = str(snap.get("trade_symbol") or "")
-    if not trade_symbol and bars:
-        trade_symbol = str(bars[-1].get("underlying_symbol") or spec.signal_symbol)
+    last_price = (snap or {}).get("last_price") if snap else None
+    if last_price is None and visible:
+        last_price = float(visible[-1]["close"])
+    trade_symbol = str((snap or {}).get("trade_symbol") or "")
+    if not trade_symbol and visible:
+        trade_symbol = str(visible[-1].get("underlying_symbol") or spec.signal_symbol)
+
+    hint = None
+    if source == "sqlite_market_bar":
+        hint = "来自 SQLite market_bar（JSON 快照缺失时的回退）"
+    elif "market_cache" in source:
+        hint = "已拼接本地 market_cache 历史 K 线"
 
     return {
         "symbol_id": symbol_id,
         "name": spec.name,
-        "signal_symbol": str(snap.get("signal_symbol") or spec.signal_symbol),
+        "signal_symbol": str((snap or {}).get("signal_symbol") or spec.signal_symbol),
         "trade_symbol": trade_symbol,
-        "bars": bars,
+        "bars": visible,
         "markers": [],
+        "overlays": enrichment["overlays"],
+        "bar_meta": enrichment["bar_meta"],
+        "price_lines": enrichment["price_lines"],
         "last_price": float(last_price) if last_price is not None else None,
         "last_price_source": source,
-        "updated_at": snap.get("updated_at"),
-        "hint": None if source == "tqsdk_sim_live" else "来自 SQLite market_bar（JSON 快照缺失时的回退）",
+        "updated_at": (snap or {}).get("updated_at"),
+        "hint": hint,
         "source": source,
-        "chart_context": _chart_context_from_bars(bars),
+        "chart_context": _chart_context_from_bars(visible),
         "market_session": session,
+        "has_more": len(visible) >= limit,
     }
 
 
@@ -1771,6 +2188,7 @@ def session_fills(
             }
             for r in rows
         ]
+        items = _enrich_fills_local(conn, instance_id, items)
         return {"instance_id": instance_id, "count": len(items), "fills": items}
     finally:
         conn.close()
@@ -1799,9 +2217,11 @@ def session_bars(
     instance_id: str,
     symbol: str | None = None,
     end: str | None = None,
-    limit: int = Query(400, ge=10, le=2000),
+    limit: int = Query(DEFAULT_VISIBLE_BARS, ge=10, le=2000),
+    before: int | None = Query(None, description="unix seconds; return bars strictly before this"),
 ) -> dict[str, Any]:
-    """Bars for cockpit: Tq sim live snapshot only (no market_cache)."""
+    """Bars for cockpit: live snapshot + market_cache history + strategy overlays."""
+    hot_limit = min(max(limit + 80, 200), 2000)
     if sim_cloud_read.is_cloud():
         trade_symbol = symbol or "KQ.m@SHFE.au"
         last_price = None
@@ -1818,13 +2238,13 @@ def session_bars(
         except HTTPException:
             pass
         signal_symbol = _signal_symbol_for_trade(str(trade_symbol))
-        snap = load_klines_snapshot(instance_id, runtime_dir=RUNTIME_DIR, limit=limit)
-        bars: list[dict[str, Any]] = list((snap or {}).get("bars") or [])
-        if end and bars:
+        snap = load_klines_snapshot(instance_id, runtime_dir=RUNTIME_DIR, limit=hot_limit)
+        hot_bars: list[dict[str, Any]] = list((snap or {}).get("bars") or [])
+        if end and hot_bars:
             end_ts = _parse_ts(end)
             if end_ts is not None:
                 end_sec = int(end_ts.timestamp())
-                bars = [b for b in bars if int(b.get("time") or 0) <= end_sec]
+                hot_bars = [b for b in hot_bars if int(b.get("time") or 0) <= end_sec]
         markers: list[dict[str, Any]] = []
         try:
             fills = sim_cloud_read.session_fills_cloud(instance_id, limit=200, root=ROOT)
@@ -1848,67 +2268,65 @@ def session_bars(
                 )
         except HTTPException:
             pass
+        visible, enrichment, assembled_source = _enrich_visible_chart(
+            hot_bars,
+            signal_symbol=signal_symbol,
+            limit=limit,
+            before_sec=before,
+            decisions=None,
+            price_lines=None,
+            use_cache=True,
+        )
         return {
             "instance_id": instance_id,
             "signal_symbol": signal_symbol,
             "trade_symbol": trade_symbol,
-            "bars": bars,
+            "bars": visible,
             "markers": markers,
+            "overlays": enrichment["overlays"],
+            "bar_meta": enrichment["bar_meta"],
+            "price_lines": enrichment["price_lines"],
             "last_price": last_price,
             "last_price_source": "cloud_payload" if last_price else None,
             "last_price_as_of": None,
             "hint": (
                 None
-                if bars
+                if visible
                 else "云端只读模式：实时 K 线仅在交易机写入本地快照。可用 market_cache 归档，或在交易机打开座舱查看热 K 线。"
             ),
-            "source": "cloud_readonly",
+            "source": assembled_source if visible else "cloud_readonly",
             "data_source": "cloud",
+            "has_more": len(visible) >= limit,
+            "chart_context": _chart_context_from_bars(visible) if visible else None,
         }
     path = _resolve_db(instance_id)
     conn = _open_ro(path)
     try:
         state = conn.execute(
-            "SELECT symbol FROM strategy_state WHERE instance_id = ?",
+            "SELECT symbol, payload_json FROM strategy_state WHERE instance_id = ?",
             (instance_id,),
         ).fetchone()
         trade_symbol = symbol or (state["symbol"] if state else "") or "KQ.m@SHFE.au"
         signal_symbol = _signal_symbol_for_trade(trade_symbol)
         live = _live_quote(conn, instance_id)
 
-        snap = load_klines_snapshot(instance_id, runtime_dir=RUNTIME_DIR, limit=limit)
-        bars: list[dict[str, Any]] = list((snap or {}).get("bars") or [])
-        if end:
-            end_ts = _parse_ts(end)
-            if end_ts is not None:
-                end_sec = int(end_ts.timestamp())
-                bars = [b for b in bars if int(b.get("time") or 0) <= end_sec]
-
-        if snap is None or not bars:
-            return {
-                "instance_id": instance_id,
-                "signal_symbol": signal_symbol,
-                "trade_symbol": trade_symbol,
-                "bars": [],
-                "markers": [],
-                "last_price": live["last_price"],
-                "last_price_source": live["last_price_source"],
-                "last_price_as_of": live["last_price_as_of"],
-                "hint": "暂无天勤模拟盘 K 线快照。请确认模拟盘已启动；进程会在登录/每根 K 收盘时写入实时 K 线。",
-                "source": "tqsdk_sim_live",
-            }
+        snap = load_klines_snapshot(instance_id, runtime_dir=RUNTIME_DIR, limit=hot_limit)
+        hot_bars = list((snap or {}).get("bars") or [])
+        end_ts = _parse_ts(end)
+        if end_ts is not None and hot_bars:
+            end_sec = int(end_ts.timestamp())
+            hot_bars = [b for b in hot_bars if int(b.get("time") or 0) <= end_sec]
 
         fill_q = """
             SELECT price, qty, side, trade_time, created_at FROM trade_fill_event
             WHERE instance_id = ?
         """
         params: list[Any] = [instance_id]
-        end_ts = _parse_ts(end)
         if end_ts is not None:
             fill_q += " AND created_at <= ?"
             params.append(end_ts.isoformat())
         fill_q += " ORDER BY seq ASC"
-        markers: list[dict[str, Any]] = []
+        markers = []
         for f in conn.execute(fill_q, params).fetchall():
             ts = _parse_ts(f["trade_time"]) or _parse_ts(f["created_at"])
             if ts is None:
@@ -1955,24 +2373,63 @@ def session_bars(
                 }
             )
 
-        snap_price = snap.get("last_price")
-        if snap_price is None and bars:
-            snap_price = float(bars[-1]["close"])
+        decisions = _load_decisions_for_chart(conn, instance_id, end_ts=end_ts)
+        price_lines = price_lines_from_strategy_payload(
+            _loads(state["payload_json"]) if state is not None else {}
+        )
+        visible, enrichment, assembled_source = _enrich_visible_chart(
+            hot_bars,
+            signal_symbol=signal_symbol,
+            limit=limit,
+            before_sec=before,
+            decisions=decisions,
+            price_lines=price_lines,
+            use_cache=True,
+        )
+
+        if not visible:
+            return {
+                "instance_id": instance_id,
+                "signal_symbol": signal_symbol,
+                "trade_symbol": trade_symbol,
+                "bars": [],
+                "markers": markers,
+                **_empty_chart_enrichment(),
+                "last_price": live["last_price"],
+                "last_price_source": live["last_price_source"],
+                "last_price_as_of": live["last_price_as_of"],
+                "hint": "暂无天勤模拟盘 K 线快照，且本地 market_cache 也无可用历史。请确认模拟盘已启动或先下载行情缓存。",
+                "source": "tqsdk_sim_live",
+                "has_more": False,
+                "chart_context": None,
+            }
+
+        snap_price = (snap or {}).get("last_price") if snap else None
+        if snap_price is None and visible:
+            snap_price = float(visible[-1]["close"])
         last_price = live["last_price"] if live["last_price"] is not None else snap_price
-        trade_out = str(snap.get("trade_symbol") or trade_symbol)
+        trade_out = str((snap or {}).get("trade_symbol") or trade_symbol)
+        hint = None
+        if "market_cache" in assembled_source:
+            hint = "已拼接本地 market_cache 历史 K 线"
 
         return {
             "instance_id": instance_id,
-            "signal_symbol": str(snap.get("signal_symbol") or signal_symbol),
+            "signal_symbol": str((snap or {}).get("signal_symbol") or signal_symbol),
             "trade_symbol": trade_out,
-            "bars": bars,
+            "bars": visible,
             "markers": markers,
+            "overlays": enrichment["overlays"],
+            "bar_meta": enrichment["bar_meta"],
+            "price_lines": enrichment["price_lines"],
             "last_price": float(last_price) if last_price is not None else None,
-            "last_price_source": live["last_price_source"] or "tqsdk_sim_live",
-            "last_price_as_of": live["last_price_as_of"] or snap.get("updated_at"),
-            "hint": None,
-            "source": "tqsdk_sim_live",
-            "updated_at": snap.get("updated_at"),
+            "last_price_source": live["last_price_source"] or assembled_source,
+            "last_price_as_of": live["last_price_as_of"] or ((snap or {}).get("updated_at")),
+            "hint": hint,
+            "source": assembled_source,
+            "updated_at": (snap or {}).get("updated_at"),
+            "has_more": len(visible) >= limit,
+            "chart_context": _chart_context_from_bars(visible),
         }
     finally:
         conn.close()

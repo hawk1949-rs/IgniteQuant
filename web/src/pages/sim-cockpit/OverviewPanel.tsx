@@ -26,8 +26,7 @@ import { useSimTablePagination } from './tablePagination'
 import { HeartbeatBoard } from './HeartbeatBoard'
 import {
   CHART_TIMEFRAMES,
-  aggregateBars,
-  aggregateMarkers,
+  aggregateChartBundle,
   type ChartTimeframe,
 } from './chartTimeframe'
 
@@ -145,6 +144,8 @@ export function OverviewPanel() {
     warn,
     loading,
     refresh,
+    loadMoreHistory,
+    historyLoading,
     replayAt,
     replay,
     starting,
@@ -175,6 +176,15 @@ export function OverviewPanel() {
     bars?.last_price ??
     (bars?.bars?.length ? bars.bars[bars.bars.length - 1].close : null)
   const pnl = metrics?.pnl ?? 0
+  const realizedClosed =
+    metrics?.realized_pnl_closed ??
+    (pnl - Number(metrics?.unrealized_pnl || 0))
+  const historyClosePnl = positionHistory
+    .filter((r) => (r.action || 'CLOSE') === 'CLOSE')
+    .reduce((s, r) => s + Number(r.realized_pnl || 0), 0)
+  const historyRoundCount = new Set(
+    positionHistory.map((r) => r.round_id).filter(Boolean),
+  ).size || Math.ceil(positionHistory.length / 2)
   // Prefer live strategy_state.confirmed_net (heartbeat); position snapshot was historically boot-only.
   const confirmedNet = summary?.payload?.confirmed_net
   const net =
@@ -200,22 +210,43 @@ export function OverviewPanel() {
   const intentsPagination = useSimTablePagination('intents', 10, intents.length)
   const fillsPagination = useSimTablePagination('fills', 10, fills.length)
   const historyPagination = useSimTablePagination('position-history', 10, positionHistory.length)
+  const backfillFills = fills.filter(
+    (f) => f.fill_source === 'intent_chain_backfill' || f.fill_id?.startsWith('fill-backfill-'),
+  )
+  const liveFills = fills.length - backfillFills.length
   const [chartTf, setChartTf] = useState<ChartTimeframe>('5m')
   const [positionTab, setPositionTab] = useState('current')
 
-  const domesticChart = useMemo(() => {
-    const raw = bars?.bars || []
-    const agg = aggregateBars(raw, chartTf)
-    return {
-      bars: agg,
-      markers: aggregateMarkers(bars?.markers, agg),
-    }
-  }, [bars?.bars, bars?.markers, chartTf])
+  const domesticChart = useMemo(
+    () =>
+      aggregateChartBundle({
+        bars: bars?.bars,
+        markers: bars?.markers,
+        overlays: bars?.overlays,
+        barMeta: bars?.bar_meta,
+        priceLines: bars?.price_lines,
+        tf: chartTf,
+      }),
+    [
+      bars?.bars,
+      bars?.markers,
+      bars?.overlays,
+      bars?.bar_meta,
+      bars?.price_lines,
+      chartTf,
+    ],
+  )
 
-  const overseasChart = useMemo(() => {
-    const raw = overseas?.bars || []
-    return { bars: aggregateBars(raw, chartTf) }
-  }, [overseas?.bars, chartTf])
+  const overseasChart = useMemo(
+    () =>
+      aggregateChartBundle({
+        bars: overseas?.bars,
+        overlays: overseas?.overlays,
+        barMeta: overseas?.bar_meta,
+        tf: chartTf,
+      }),
+    [overseas?.bars, overseas?.overlays, overseas?.bar_meta, chartTf],
+  )
 
   const tfLabel = CHART_TIMEFRAMES.find((t) => t.value === chartTf)?.label || chartTf
 
@@ -537,7 +568,7 @@ export function OverviewPanel() {
       <HeartbeatBoard />
 
       {/* 指标条 */}
-      <section className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line/40 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-10">
+      <section className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line/40 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-11">
         {[
           <Metric key="sym" label="交易合约" value={summary?.symbol || '—'} />,
           <Metric
@@ -577,10 +608,17 @@ export function OverviewPanel() {
           />,
           <Metric
             key="pnl"
-            label="盈亏"
+            label="账户盈亏"
             value={money(pnl)}
             tone={pnl > 0 ? 'good' : pnl < 0 ? 'bad' : 'none'}
-            tip="相对初始资金 100 万的权益差"
+            tip="权益−初始100万。当前无仓时，应与「已实现」一致。"
+          />,
+          <Metric
+            key="realized"
+            label="已实现"
+            value={money(realizedClosed)}
+            tone={realizedClosed > 0 ? 'good' : realizedClosed < 0 ? 'bad' : 'none'}
+            tip="账户口径：账户盈亏−浮动盈亏。不是历史表原始加总；补记成交已排除。"
           />,
           <Metric
             key="wr"
@@ -606,10 +644,17 @@ export function OverviewPanel() {
         title="持仓"
         extra={
           <span className="text-faint">
-            当前 {openPositions.length} · 历史 {positionHistory.length}
+            当前 {openPositions.length} · 历史 {historyRoundCount} 回合 / {positionHistory.length} 笔
           </span>
         }
       >
+        <Alert
+          className="mb-2"
+          type="info"
+          showIcon
+          banner
+          message="历史按开仓/平仓记录：开仓盈亏为 0，平仓盈亏为开平价差。账户总盈亏仍看顶部「已实现」。"
+        />
         <Tabs
           size="small"
           activeKey={positionTab}
@@ -702,64 +747,112 @@ export function OverviewPanel() {
             },
             {
               key: 'history',
-              label: `历史${positionHistory.length ? ` ${positionHistory.length}` : ''}`,
+              label: `历史 ${historyRoundCount} 回合`,
               children: positionHistory.length ? (
                 <Table
                   size="small"
                   pagination={historyPagination}
-                  rowKey={(r, i) =>
-                    `${r.symbol}-${r.closed_at || ''}-${r.opened_at || ''}-${i}`
-                  }
+                  rowKey={(r, i) => r.leg_id || `${r.action}-${r.trade_time || ''}-${i}`}
                   dataSource={positionHistory}
+                  summary={() => {
+                    const fees = positionHistory.reduce(
+                      (s, r) => s + Number(r.fees || 0),
+                      0,
+                    )
+                    return (
+                      <Table.Summary fixed>
+                        <Table.Summary.Row>
+                          <Table.Summary.Cell index={0} colSpan={6}>
+                            <span className="text-faint">
+                              平仓价差+结转 ¥{money(historyClosePnl)} = 账户已实现 ¥
+                              {money(realizedClosed)}
+                            </span>
+                          </Table.Summary.Cell>
+                          <Table.Summary.Cell index={6}>
+                            <span
+                              className={
+                                realizedClosed > 0
+                                  ? 'font-semibold text-emerald-500'
+                                  : realizedClosed < 0
+                                    ? 'font-semibold text-rose-500'
+                                    : 'font-semibold'
+                              }
+                            >
+                              ¥{money(realizedClosed)}
+                            </span>
+                          </Table.Summary.Cell>
+                          <Table.Summary.Cell index={7}>
+                            ¥{money(fees)}
+                          </Table.Summary.Cell>
+                        </Table.Summary.Row>
+                      </Table.Summary>
+                    )
+                  }}
                   columns={[
                     {
-                      title: '合约',
-                      dataIndex: 'symbol',
-                      render: (v: string) => <span className="font-medium">{v}</span>,
+                      title: '时间',
+                      dataIndex: 'trade_time',
+                      width: 148,
+                      render: (v: string | null | undefined, r) => (
+                        <span className="text-[11px] tabular-nums">
+                          {formatLocalDateTime(v || r.closed_at || r.opened_at || '')}
+                        </span>
+                      ),
+                    },
+                    {
+                      title: '开平',
+                      dataIndex: 'action_label',
+                      width: 64,
+                      render: (v: string | undefined, r) => {
+                        const label = v || (r.action === 'OPEN' ? '开仓' : '平仓')
+                        const color =
+                          r.source === 'account_residual' || label === '结转'
+                            ? 'gold'
+                            : r.action === 'OPEN'
+                              ? 'blue'
+                              : 'default'
+                        return <Tag color={color}>{label}</Tag>
+                      },
                     },
                     {
                       title: '方向',
                       dataIndex: 'side_label',
-                      width: 64,
+                      width: 56,
                       render: (v: string, r) => (
                         <Tag color={r.side === 'LONG' ? 'success' : 'error'}>
                           {v || r.side}
                         </Tag>
                       ),
                     },
-                    { title: '手数', dataIndex: 'lots', width: 64 },
                     {
-                      title: '开仓均价',
-                      dataIndex: 'entry_price',
-                      render: (v: number) => Number(v).toFixed(2),
+                      title: '合约',
+                      dataIndex: 'symbol',
+                      ellipsis: true,
+                      render: (v: string) => <span className="font-medium">{v}</span>,
+                    },
+                    { title: '手数', dataIndex: 'lots', width: 56 },
+                    {
+                      title: '价格',
+                      dataIndex: 'price',
+                      width: 80,
+                      render: (v: number | undefined, r) =>
+                        Number(v ?? r.entry_price ?? r.exit_price ?? 0).toFixed(2),
                     },
                     {
-                      title: '平仓均价',
-                      dataIndex: 'exit_price',
-                      render: (v: number) => Number(v).toFixed(2),
-                    },
-                    {
-                      title: '开仓时间',
-                      dataIndex: 'opened_at',
-                      render: (v: string | null | undefined) =>
-                        v ? formatLocalDateTime(v) : '—',
-                    },
-                    {
-                      title: '平仓时间',
-                      dataIndex: 'closed_at',
-                      render: (v: string | null | undefined) =>
-                        v ? formatLocalDateTime(v) : '—',
-                    },
-                    {
-                      title: '已实现盈亏',
+                      title: '盈亏',
                       dataIndex: 'realized_pnl',
-                      render: (v: number) => {
+                      width: 100,
+                      render: (v: number, r) => {
                         const n = Number(v || 0)
+                        if (r.action === 'OPEN' && r.source !== 'account_residual') {
+                          return <span className="text-faint">¥0</span>
+                        }
                         return (
                           <span
                             className={
                               n > 0 ? 'text-emerald-500' : n < 0 ? 'text-rose-500' : ''
                             }
+                            title={r.note || undefined}
                           >
                             ¥{money(n)}
                           </span>
@@ -769,15 +862,13 @@ export function OverviewPanel() {
                     {
                       title: '手续费',
                       dataIndex: 'fees',
-                      width: 88,
+                      width: 72,
                       render: (v: number) => `¥${money(Number(v || 0))}`,
                     },
                   ]}
                 />
               ) : (
-                <p className="m-0 text-sm text-muted">
-                  暂无已平仓回合（需完整开平成交）。
-                </p>
+                <p className="m-0 text-sm text-muted">暂无已平仓记录。</p>
               ),
             },
           ]}
@@ -817,7 +908,13 @@ export function OverviewPanel() {
               key={`dom-${symbolId}-${chartTf}`}
               bars={domesticChart.bars}
               markers={domesticChart.markers}
+              overlays={domesticChart.overlays}
+              barMeta={domesticChart.barMeta}
+              priceLines={domesticChart.priceLines}
               height={420}
+              onLoadMore={() => {
+                void loadMoreHistory()
+              }}
             />
           ) : (
             <p className="py-16 text-center text-sm text-muted">暂无内盘 K 线</p>
@@ -825,6 +922,8 @@ export function OverviewPanel() {
           <p className="mt-1.5 text-[11px] text-faint">
             周期 {tfLabel}
             {chartTf !== '5m' ? '（由 5 分钟 K 线合成）' : ''} · {domesticChart.bars.length} 根
+            {historyLoading ? ' · 加载更早历史…' : ''}
+            {bars?.has_more ? ' · 向左拖动可加载更多' : ''}
           </p>
         </Section>
 
@@ -858,6 +957,8 @@ export function OverviewPanel() {
               <MiniCandleChart
                 key={`os-${symbolId}-${chartTf}`}
                 bars={overseasChart.bars}
+                overlays={overseasChart.overlays}
+                barMeta={overseasChart.barMeta}
                 height={420}
               />
             ) : (
@@ -965,6 +1066,13 @@ export function OverviewPanel() {
         </Section>
 
         <Section title="委托与成交">
+          <Alert
+            className="mb-2"
+            type="info"
+            showIcon
+            banner
+            message={`成交 ${fills.length} 笔（真实约 ${liveFills}，补记 ${backfillFills.length}）。补记是系统事后写的流水，不进天勤权益；看账户盈亏请忽略「补记」行。历史回合 ≈ 真实成交开平配对，不是 1:1 对照成交条数。`}
+          />
           <Tabs
             size="small"
             items={[
@@ -1011,7 +1119,7 @@ export function OverviewPanel() {
                     rowKey="fill_id"
                     pagination={fillsPagination}
                     dataSource={fills}
-                    scroll={{ x: 480 }}
+                    scroll={{ x: 1000 }}
                     columns={[
                       {
                         title: '时间',
@@ -1023,6 +1131,22 @@ export function OverviewPanel() {
                           </span>
                         ),
                       },
+                      {
+                        title: '来源',
+                        key: 'fill_source',
+                        width: 64,
+                        render: (_: unknown, r) => {
+                          const src =
+                            r.fill_source ||
+                            (r.fill_id?.startsWith('fill-backfill-')
+                              ? 'intent_chain_backfill'
+                              : null)
+                          if (src === 'intent_chain_backfill') {
+                            return <Tag color="warning">补记</Tag>
+                          }
+                          return <Tag>真实</Tag>
+                        },
+                      },
                       { title: '合约', dataIndex: 'symbol', width: 110, ellipsis: true },
                       {
                         title: '方向',
@@ -1030,9 +1154,86 @@ export function OverviewPanel() {
                         width: 48,
                         render: (v: string) => sideLabel(v),
                       },
-                      { title: '价格', dataIndex: 'price', width: 80 },
-                      { title: '手', dataIndex: 'qty', width: 44 },
-                      { title: '费', dataIndex: 'fee', width: 56 },
+                      {
+                        title: '价格',
+                        dataIndex: 'price',
+                        width: 72,
+                        render: (v: number) => Number(v).toFixed(2),
+                      },
+                      { title: '手', dataIndex: 'qty', width: 40 },
+                      {
+                        title: '费',
+                        dataIndex: 'fee',
+                        width: 52,
+                        render: (v: number) => Number(v || 0).toFixed(1),
+                      },
+                      {
+                        title: '信号',
+                        dataIndex: 'legacy_signal',
+                        width: 48,
+                        render: (v: number | null | undefined) =>
+                          v == null ? '—' : String(v),
+                      },
+                      {
+                        title: '动作',
+                        dataIndex: 'applied_action',
+                        width: 88,
+                        ellipsis: true,
+                        render: (v: string | null | undefined) => {
+                          if (v === 'STOP_LOSS') return <Tag color="error">止损</Tag>
+                          if (v === 'TAKE_PROFIT') return <Tag color="success">止盈</Tag>
+                          return v || '—'
+                        },
+                      },
+                      {
+                        title: '入场目标',
+                        dataIndex: 'entry_price',
+                        width: 72,
+                        render: (v: number | null | undefined, r) => {
+                          if (
+                            r.applied_action === 'STOP_LOSS' ||
+                            r.applied_action === 'TAKE_PROFIT'
+                          ) {
+                            return '—'
+                          }
+                          return v != null ? Number(v).toFixed(2) : '—'
+                        },
+                      },
+                      {
+                        title: '止损',
+                        dataIndex: 'stop_price',
+                        width: 72,
+                        render: (v: number | null | undefined, r) => {
+                          if (
+                            r.applied_action === 'STOP_LOSS' ||
+                            r.applied_action === 'TAKE_PROFIT'
+                          ) {
+                            return '—'
+                          }
+                          return v != null ? Number(v).toFixed(2) : '—'
+                        },
+                      },
+                      {
+                        title: '止盈',
+                        dataIndex: 'take_price',
+                        width: 72,
+                        render: (v: number | null | undefined, r) => {
+                          if (
+                            r.applied_action === 'STOP_LOSS' ||
+                            r.applied_action === 'TAKE_PROFIT'
+                          ) {
+                            return '—'
+                          }
+                          return v != null ? Number(v).toFixed(2) : '—'
+                        },
+                      },
+                      {
+                        title: '状态',
+                        dataIndex: 'regime',
+                        width: 88,
+                        ellipsis: true,
+                        render: (v: string | null | undefined) => v || '—',
+                      },
                     ]}
                   />
                 ),

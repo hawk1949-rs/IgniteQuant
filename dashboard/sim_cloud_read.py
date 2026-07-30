@@ -10,8 +10,12 @@ from typing import Any, Callable
 from fastapi import HTTPException
 
 from dashboard.position_history import (
+    account_realized_pnl,
     closed_rounds_summary,
     iter_closed_rounds,
+    make_unattributed_close_leg,
+    prepare_fills_for_rounds,
+    rounds_to_open_close_legs,
 )
 from ignitequant.persistence.cloud_sync import database_url as _database_url
 
@@ -498,22 +502,70 @@ def session_intents_cloud(
 def session_fills_cloud(
     instance_id: str, *, limit: int = 100, root=None
 ) -> dict[str, Any]:
+    from dashboard.fill_enrichment import (
+        apply_entry_stop_fallback,
+        enrichment_from_decision_payload,
+    )
     url = require_pg_url(root=root)
     conn, cur_factory = _connect(url)
     try:
-        with conn.cursor(cursor_factory=cur_factory) as cur:
-            cur.execute(
-                """
-                SELECT * FROM sim_fill_projection
-                WHERE instance_key = %s
-                ORDER BY occurred_at DESC LIMIT %s
-                """,
-                (instance_id, limit),
-            )
-            rows = cur.fetchall()
-        items = [
-            {
-                "fill_id": r["fill_id"],
+        rows: list[Any] = []
+        try:
+            with conn.cursor(cursor_factory=cur_factory) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        f.fill_id,
+                        f.intent_id,
+                        f.symbol,
+                        f.price,
+                        f.qty,
+                        f.fee,
+                        f.side,
+                        f.trade_time,
+                        f.payload_json,
+                        f.occurred_at,
+                        f.created_at,
+                        i.decision_id,
+                        d.legacy_signal,
+                        d.applied_action,
+                        d.payload_json AS decision_payload_json
+                    FROM sim_fill_projection f
+                    LEFT JOIN sim_intent_projection i
+                      ON i.instance_key = f.instance_key AND i.intent_id = f.intent_id
+                    LEFT JOIN sim_decision_projection d
+                      ON d.instance_key = f.instance_key AND d.decision_id = i.decision_id
+                    WHERE f.instance_key = %s
+                    ORDER BY f.occurred_at DESC
+                    LIMIT %s
+                    """,
+                    (instance_id, limit),
+                )
+                rows = cur.fetchall()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            with conn.cursor(cursor_factory=cur_factory) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        fill_id, intent_id, symbol, price, qty, fee, side,
+                        trade_time, payload_json, occurred_at, created_at
+                    FROM sim_fill_projection
+                    WHERE instance_key = %s
+                    ORDER BY occurred_at DESC
+                    LIMIT %s
+                    """,
+                    (instance_id, limit),
+                )
+                rows = cur.fetchall()
+        items: list[dict[str, Any]] = []
+        entry_levels: list[dict[str, Any]] = []
+        for r in rows:
+            item: dict[str, Any] = {
+                "fill_id": r.get("fill_id"),
                 "intent_id": r.get("intent_id"),
                 "symbol": r.get("symbol"),
                 "price": float(r["price"] or 0),
@@ -524,8 +576,31 @@ def session_fills_cloud(
                 "payload": _loads(r.get("payload_json")),
                 "created_at": _iso(r.get("occurred_at") or r.get("created_at")),
             }
-            for r in rows
-        ]
+            if r.get("decision_id") is not None or r.get("legacy_signal") is not None:
+                enriched = enrichment_from_decision_payload(
+                    decision_id=r.get("decision_id"),
+                    legacy_signal=r.get("legacy_signal"),
+                    applied_action=r.get("applied_action"),
+                    payload=_loads(r.get("decision_payload_json")),
+                )
+                item.update(enriched)
+                if (
+                    str(r.get("applied_action") or "") in {"TARGET", "HOLD"}
+                    and enriched.get("stop_price") is not None
+                ):
+                    entry_levels.append(
+                        {
+                            "as_of": item.get("trade_time") or item.get("created_at"),
+                            "stop_price": enriched.get("stop_price"),
+                            "take_price": enriched.get("take_price"),
+                            "entry_price": enriched.get("entry_price"),
+                        }
+                    )
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            if payload.get("source"):
+                item["fill_source"] = payload.get("source")
+            items.append(item)
+        items = apply_entry_stop_fallback(items, entry_levels)
         return {
             "instance_id": instance_id,
             "count": len(items),
@@ -536,52 +611,158 @@ def session_fills_cloud(
         conn.close()
 
 
-def _metrics_from_fills(fills: list[dict[str, Any]], equity: float | None) -> dict[str, Any]:
+def _metrics_from_fills(
+    fills: list[dict[str, Any]],
+    equity: float | None,
+    *,
+    unrealized: float | None = None,
+    prior_net: int | None = None,
+    prior_avg_price: float | None = None,
+    broker_net: int | None = None,
+) -> dict[str, Any]:
     """Approximate local _compute_metrics from cloud fill rows (ASC order)."""
-    rounds = iter_closed_rounds(fills)
+    prepared = prepare_fills_for_rounds(
+        fills, prior_net=prior_net, prior_avg_price=prior_avg_price
+    )
+    rounds = iter_closed_rounds(prepared)
     summary = closed_rounds_summary(rounds)
-    realized = float(summary["realized_pnl_proxy"])
-    current_equity = float(equity) if equity is not None else DEFAULT_INIT_BALANCE + realized
+    realized_fills = float(summary["realized_pnl_proxy"])
+    current_equity = (
+        float(equity) if equity is not None else DEFAULT_INIT_BALANCE + realized_fills
+    )
+    pnl = current_equity - DEFAULT_INIT_BALANCE
+    upnl = float(unrealized or 0)
+    realized_account = account_realized_pnl(
+        equity=current_equity,
+        init_balance=DEFAULT_INIT_BALANCE,
+        unrealized=upnl,
+    )
+    # Residual open position after walking fills.
+    pos = 0
+    for f in prepared:
+        side = str(f.get("side") or "").upper()
+        qty = abs(int(f.get("qty") or 0))
+        if side in {"SELL", "SHORT"} or ("SELL" in side or "SHORT" in side):
+            pos -= qty
+        else:
+            pos += qty
+    if broker_net is not None:
+        pos = int(broker_net)
     return {
+        "equity": current_equity,
+        "current_equity": current_equity,
+        "init_balance": DEFAULT_INIT_BALANCE,
+        "pnl": pnl,
+        "pnl_pct": pnl / DEFAULT_INIT_BALANCE,
+        "realized_pnl": realized_account,
+        "realized_pnl_proxy": realized_fills,
+        "realized_pnl_closed": realized_account,
+        "realized_pnl_fills": realized_fills,
+        "unrealized_pnl": upnl,
+        "pnl_residual": realized_account - realized_fills,
         "trade_count": summary["trade_count"],
+        "fill_count": len(prepared),
         "win_count": summary["wins"],
         "loss_count": summary["losses"],
         "wins": summary["wins"],
         "losses": summary["losses"],
-        "win_rate": summary["win_rate"] if summary["trade_count"] else None,
-        "realized_pnl": realized,
-        "current_equity": current_equity,
+        "win_rate": summary["win_rate"] if summary["trade_count"] else 0.0,
         "max_drawdown": None,
-        "max_drawdown_pct": None,
+        "max_drawdown_pct": 0.0,
+        "open_position": pos,
         "equity_curve": [
             {"t": None, "equity": current_equity},
         ],
         "approx": True,
         "data_source": "cloud",
+        "pnl_note": (
+            "账户盈亏=权益−初始100万；已实现=账户盈亏−浮动（与权益一致）。"
+            "历史表按开仓¥0+平仓价差；缺记录时用「结转」对齐账户已实现。"
+        ),
     }
 
 
 def session_position_history_cloud(
     instance_id: str, *, limit: int = 100, root=None
 ) -> dict[str, Any]:
+    # Cloud projections keep only latest position on sim_instance; no full
+    # snapshot series. Fall back to cleaned live fills (exclude backfill).
     fills_body = session_fills_cloud(instance_id, limit=2000, root=root)
     fills_asc = list(reversed(fills_body.get("fills") or []))
-    rounds = iter_closed_rounds(fills_asc)
-    rounds_desc = list(reversed(rounds))[:limit]
+    prepared = prepare_fills_for_rounds(fills_asc, prior_net=0)
+    rounds = iter_closed_rounds(prepared)
+    for i, r in enumerate(rounds):
+        r["round_id"] = f"fills-{i}-{r.get('opened_at') or i}"
+    legs = rounds_to_open_close_legs(rounds, newest_first=True)[: max(limit * 2, 0)]
+    stats = closed_rounds_summary(rounds)
+    rounds_price_pnl = float(stats["realized_pnl_proxy"])
+
+    summary = session_summary_cloud(instance_id, root=root)
+    equity = DEFAULT_INIT_BALANCE
+    unrealized = 0.0
+    as_of = None
+    if isinstance(summary.get("account"), dict):
+        try:
+            equity = float(summary["account"].get("equity") or DEFAULT_INIT_BALANCE)
+        except (TypeError, ValueError):
+            equity = DEFAULT_INIT_BALANCE
+        try:
+            unrealized = float(summary["account"].get("unrealized_pnl") or 0)
+        except (TypeError, ValueError):
+            unrealized = 0.0
+        as_of = summary["account"].get("as_of") or summary["account"].get("updated_at")
+    account_realized = account_realized_pnl(
+        equity=equity, init_balance=DEFAULT_INIT_BALANCE, unrealized=unrealized
+    )
+    residual_leg = make_unattributed_close_leg(
+        account_realized=account_realized,
+        rounds_price_pnl=rounds_price_pnl,
+        as_of=str(as_of) if as_of else None,
+    )
+    if residual_leg is not None:
+        legs = [residual_leg, *legs]
+
     return {
         "instance_id": instance_id,
-        "count": len(rounds),
-        "positions": rounds_desc,
+        "count": len(legs),
+        "round_count": len(rounds),
+        "positions": legs,
+        "realized_pnl_total": rounds_price_pnl,
+        "account_realized_pnl": float(account_realized),
+        "unattributed_pnl": float(residual_leg["realized_pnl"]) if residual_leg else 0.0,
+        "history_source": "fills_fallback",
+        "history_format": "open_close_legs",
+        "fills_prepared": True,
         "data_source": "cloud",
     }
 
 
 def session_metrics_cloud(instance_id: str, *, root=None) -> dict[str, Any]:
-    fills_body = session_fills_cloud(instance_id, limit=500, root=root)
+    fills_body = session_fills_cloud(instance_id, limit=2000, root=root)
     fills_asc = list(reversed(fills_body["fills"]))
     summary = session_summary_cloud(instance_id, root=root)
     equity = None
+    unrealized = None
+    broker_net = None
     if isinstance(summary.get("account"), dict):
         equity = summary["account"].get("equity")
-    metrics = _metrics_from_fills(fills_asc, equity)
+        unrealized = summary["account"].get("unrealized_pnl")
+    if isinstance(summary.get("position"), dict):
+        if unrealized is None:
+            unrealized = summary["position"].get("unrealized_pnl")
+        try:
+            broker_net = int(summary["position"].get("net_position") or 0)
+        except (TypeError, ValueError):
+            broker_net = None
+    if unrealized is None:
+        for row in summary.get("open_positions") or []:
+            if isinstance(row, dict) and row.get("unrealized_pnl") is not None:
+                unrealized = float(row.get("unrealized_pnl") or 0)
+                break
+    metrics = _metrics_from_fills(
+        fills_asc,
+        equity,
+        unrealized=unrealized,
+        broker_net=broker_net,
+    )
     return {"instance_id": instance_id, **metrics}

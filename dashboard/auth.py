@@ -20,6 +20,7 @@ import os
 import secrets
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from fastapi import HTTPException, Request, Response
@@ -28,6 +29,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger(__name__)
 
+_ROOT = Path(__file__).resolve().parents[1]
 _PUBLIC_PREFIXES = (
     "/api/auth/login",
     "/api/auth/status",
@@ -39,6 +41,43 @@ _PUBLIC_PREFIXES = (
 
 _warned_open = False
 _PBKDF2_ITERS = 120_000
+_enabled_cache: tuple[float, bool] | None = None
+_ENABLED_CACHE_TTL = 30.0
+_dotenv_loaded = False
+
+
+def _ensure_dotenv() -> None:
+    """Load project `.env` into os.environ.
+
+    Most keys use setdefault (shell wins). Cockpit login keys always take
+    values from `.env` when present, so local fallback matches the file.
+    """
+    global _dotenv_loaded
+    if _dotenv_loaded:
+        return
+    path = _ROOT / ".env"
+    if path.is_file():
+        try:
+            force_keys = {
+                "COCKPIT_USER",
+                "COCKPIT_PASSWORD",
+                "COCKPIT_AUTH_SECRET",
+                "COCKPIT_TOKEN_TTL_HOURS",
+            }
+            for raw in path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key in force_keys:
+                    os.environ[key] = value
+                else:
+                    os.environ.setdefault(key, value)
+        except OSError as exc:
+            logger.warning("读取 .env 失败: %s", exc)
+    _dotenv_loaded = True
 
 
 @dataclass(frozen=True)
@@ -82,6 +121,7 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 def _database_url() -> str:
+    _ensure_dotenv()
     return (
         os.environ.get("RDS_DATABASE_URL", "").strip()
         or os.environ.get("DATABASE_URL", "").strip()
@@ -98,7 +138,8 @@ def _connect_pg():
         logger.warning("psycopg2 未安装，无法读取 cockpit_users")
         return None
     try:
-        return psycopg2.connect(url, connect_timeout=8)
+        # Keep auth snappy when RDS is unreachable from home network.
+        return psycopg2.connect(url, connect_timeout=2)
     except Exception as exc:
         logger.warning("连接数据库失败，无法读取 cockpit_users: %s", exc)
         return None
@@ -160,26 +201,23 @@ def user_exists(username: str) -> bool:
     return bool(user and user.is_active)
 
 
-_warned_open = False
-_PBKDF2_ITERS = 120_000
-_enabled_cache: tuple[float, bool] | None = None
-_ENABLED_CACHE_TTL = 30.0
-
-
 def _auth_enabled_now(env_user: str, env_password: str) -> bool:
     global _enabled_cache
     now = time.time()
+    # Local fallback alone is enough to enable auth; don't block on RDS.
+    if env_user and env_password:
+        _enabled_cache = (now, True)
+        return True
     if _enabled_cache and now - _enabled_cache[0] < _ENABLED_CACHE_TTL:
-        cached = _enabled_cache[1]
-        if cached or not (env_user and env_password):
-            return cached or bool(env_user and env_password)
+        return _enabled_cache[1]
     db_users = count_active_users()
-    enabled = db_users > 0 or bool(env_user and env_password)
+    enabled = db_users > 0
     _enabled_cache = (now, enabled)
     return enabled
 
 
 def load_auth_config() -> AuthConfig:
+    _ensure_dotenv()
     env_user = (os.getenv("COCKPIT_USER") or "").strip()
     env_password = os.getenv("COCKPIT_PASSWORD") or ""
     ttl_hours = float(os.getenv("COCKPIT_TOKEN_TTL_HOURS") or "168")
@@ -235,10 +273,10 @@ def verify_token(cfg: AuthConfig, token: str) -> str | None:
         username, exp_s = body.decode("utf-8").split(".", 1)
         if int(exp_s) < int(time.time()):
             return None
-        # 表用户或环境兜底账号均有效
-        if user_exists(username):
-            return username
+        # Prefer local env account (no RDS round-trip) when username matches.
         if cfg.env_username and hmac.compare_digest(username, cfg.env_username):
+            return username
+        if user_exists(username):
             return username
         return None
     except Exception:
@@ -252,17 +290,19 @@ def authenticate(cfg: AuthConfig, username: str, password: str) -> tuple[str, in
             detail="未配置座舱账号（请写入 cockpit_users 或 COCKPIT_USER/PASSWORD）",
         )
     uname = username.strip()
-    user = fetch_user(uname)
-    if user is not None:
-        if not user.is_active or not verify_password(password, user.password_hash):
-            raise HTTPException(status_code=401, detail="用户名或密码错误")
-        return issue_token(cfg, user.username)
 
+    # Local .env fallback first — avoids waiting on unreachable RDS.
     if cfg.env_username and cfg.env_password:
         user_ok = hmac.compare_digest(uname, cfg.env_username)
         pass_ok = hmac.compare_digest(password, cfg.env_password)
         if user_ok and pass_ok:
             return issue_token(cfg, cfg.env_username)
+
+    user = fetch_user(uname)
+    if user is not None:
+        if not user.is_active or not verify_password(password, user.password_hash):
+            raise HTTPException(status_code=401, detail="用户名或密码错误")
+        return issue_token(cfg, user.username)
 
     raise HTTPException(status_code=401, detail="用户名或密码错误")
 

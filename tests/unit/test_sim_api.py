@@ -78,7 +78,12 @@ def runtime_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "reason_codes": [],
         },
         "signal": {"legacy_signal": 1, "reason_codes": ["SCORE"]},
-        "target": {"desired_position": 1},
+        "target": {"desired_position": 1, "planned_entry_price": 870.0},
+        "risk_decision": {
+            "entry_price": 870.0,
+            "stop_price": 860.0,
+            "take_price": 900.0,
+        },
         "legacy_score_parts": [0, 0, 1, 0],
     }
     conn.execute(
@@ -116,7 +121,13 @@ def runtime_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             1,
             1,
             "[]",
-            "{}",
+            json.dumps(
+                {
+                    "entry_price": 870.0,
+                    "stop_price": 860.0,
+                    "take_price": 900.0,
+                }
+            ),
             now,
         ),
     )
@@ -174,7 +185,21 @@ def runtime_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture()
-def client(runtime_db: Path) -> TestClient:
+def client(runtime_db: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    monkeypatch.setenv("SIM_DATA_SOURCE", "local")
+    monkeypatch.delenv("COCKPIT_USER", raising=False)
+    monkeypatch.delenv("COCKPIT_PASSWORD", raising=False)
+    monkeypatch.setenv("COCKPIT_AUTH_SECRET", "unit-test-secret")
+    import dashboard.auth as auth
+
+    auth._enabled_cache = None
+    auth._warned_open = False
+
+    async def _open_dispatch(self, request, call_next):  # noqa: ANN001
+        return await call_next(request)
+
+    monkeypatch.setattr(auth.CockpitAuthMiddleware, "dispatch", _open_dispatch)
+
     from dashboard.api import app
 
     return TestClient(app)
@@ -303,6 +328,20 @@ def test_sim_metrics_and_decisions(client: TestClient) -> None:
     fills = client.get("/api/sim/sessions/falcon_au_sim/fills").json()
     assert fills["count"] == 1
     assert fills["fills"][0]["side"] == "BUY"
+    f0 = fills["fills"][0]
+    assert f0["legacy_signal"] == 1
+    assert f0["applied_action"] == "TARGET"
+    assert f0["stop_price"] == pytest.approx(860.0)
+    assert f0["take_price"] == pytest.approx(900.0)
+    assert f0["entry_price"] == pytest.approx(870.0)
+
+    metrics = client.get("/api/sim/sessions/falcon_au_sim/metrics").json()
+    assert metrics["pnl"] == pytest.approx(1200.0)
+    assert "realized_pnl_closed" in metrics
+    assert "pnl_note" in metrics
+    assert metrics["unrealized_pnl"] == pytest.approx(10_000.0)
+    # 已实现（账户口径）= 账户盈亏 − 浮动
+    assert metrics["realized_pnl_closed"] == pytest.approx(1200.0 - 10_000.0)
 
 
 def test_sim_replay(client: TestClient) -> None:
@@ -355,8 +394,14 @@ def test_sim_market_and_overseas_endpoints(client: TestClient) -> None:
     assert body["symbol_id"] == "au"
     assert body["signal_symbol"] == "KQ.m@SHFE.au"
     assert "bars" in body
-    # Cockpit no longer serves market_cache; empty until sim writes live snapshot.
-    assert body.get("source") == "tqsdk_sim_live"
+    assert "overlays" in body
+    assert "bar_meta" in body
+    assert body.get("source") in {
+        "tqsdk_sim_live",
+        "sqlite_market_bar",
+        "market_cache",
+        "tqsdk_sim_live+market_cache",
+    }
 
     overseas = client.get("/api/sim/overseas/bars", params={"symbol_id": "rb"})
     assert overseas.status_code == 200
@@ -399,15 +444,25 @@ def test_sim_live_klines_snapshot(client: TestClient, runtime_db: Path) -> None:
         runtime_dir=sim_api.RUNTIME_DIR,
     )
 
-    market = client.get("/api/sim/market/bars", params={"symbol_id": "au"}).json()
-    assert len(market["bars"]) == 4  # includes forming stub for cockpit
-    assert market["last_price"] == pytest.approx(880.35)
-    assert market["source"] == "tqsdk_sim_live"
+    market = client.get(
+        "/api/sim/market/bars", params={"symbol_id": "au", "limit": 10}
+    ).json()
+    assert market["source"] in {"tqsdk_sim_live", "tqsdk_sim_live+market_cache"}
     assert market["trade_symbol"] == "SHFE.au2608"
+    assert market["last_price"] == pytest.approx(880.35)
+    # Live snapshot has 4 rows; may be padded/merged with cache depending on store.
+    assert len(market["bars"]) >= 4
+    live_closes = {round(float(b["close"]), 2) for b in market["bars"][-4:]}
+    assert 880.35 in live_closes
 
-    session = client.get("/api/sim/sessions/falcon_au_sim/bars").json()
-    assert len(session["bars"]) == 4
-    assert session["source"] == "tqsdk_sim_live"
+    session = client.get(
+        "/api/sim/sessions/falcon_au_sim/bars", params={"limit": 10}
+    ).json()
+    assert len(session["bars"]) >= 4
+    assert session["source"] in {"tqsdk_sim_live", "tqsdk_sim_live+market_cache"}
+    assert "overlays" in session
+    assert "bar_meta" in session
+    assert len(session["bar_meta"]) == len(session["bars"])
     # Prefer decision/sim live quote (fixture close=880) over snapshot tip.
     assert session["last_price"] == pytest.approx(880.0)
 

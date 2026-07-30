@@ -162,6 +162,14 @@ class PersistenceSession:
                     "risk_action": risk.action.value if risk.action else None,
                     "requested_position": risk.requested_position,
                     "approved_position": risk.approved_position,
+                    "entry_price": risk.entry_price,
+                    "stop_price": risk.stop_price,
+                    "take_price": risk.take_price,
+                    "target": {
+                        "desired_position": result.target.desired_position,
+                        "planned_entry_price": result.target.planned_entry_price,
+                        "planned_stop_price": result.target.planned_stop_price,
+                    },
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 },
             )

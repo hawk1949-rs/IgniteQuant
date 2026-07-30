@@ -352,6 +352,11 @@ export type SimMetrics = {
   max_drawdown_pct: number
   open_position: number
   equity_curve: { t: string; equity: number }[]
+  realized_pnl_closed?: number
+  realized_pnl_proxy?: number
+  unrealized_pnl?: number
+  pnl_residual?: number
+  pnl_note?: string
 }
 
 export type SimDecision = {
@@ -401,19 +406,38 @@ export type SimFill = {
   side: string
   trade_time: string
   created_at: string
+  decision_id?: string | null
+  legacy_signal?: number | null
+  applied_action?: string | null
+  regime?: string | null
+  reason_codes?: string[] | null
+  entry_price?: number | null
+  stop_price?: number | null
+  take_price?: number | null
+  target_before?: number | null
+  target_after?: number | null
+  fill_source?: string | null
 }
 
 export type SimPositionHistoryRow = {
+  leg_id?: string
+  round_id?: string
+  action?: 'OPEN' | 'CLOSE' | string
+  action_label?: string
   symbol: string
   side: 'LONG' | 'SHORT' | string
   side_label?: string
   lots: number
-  entry_price: number
-  exit_price: number
+  price?: number
+  entry_price?: number
+  exit_price?: number | null
   opened_at?: string | null
   closed_at?: string | null
+  trade_time?: string | null
   realized_pnl: number
   fees: number
+  source?: string
+  note?: string
 }
 
 export type SimChartContext = {
@@ -424,6 +448,34 @@ export type SimChartContext = {
   adx?: number | null
   bar_time?: number
   conflict?: boolean
+}
+
+export type SimBarMeta = {
+  time: number
+  signal?: number | null
+  score_parts?: number[] | null
+  regime?: string | null
+  ma7?: number | null
+  ma14?: number | null
+  ma52?: number | null
+  atr?: number | null
+  adx?: number | null
+  source?: 'live' | 'replay' | string
+  applied_action?: string | null
+  target_after?: number | null
+}
+
+export type SimChartOverlays = {
+  ma7: { time: number; value: number }[]
+  ma14: { time: number; value: number }[]
+  ma52: { time: number; value: number }[]
+  signal: { time: number; value: number }[]
+}
+
+export type SimPriceLine = {
+  price: number
+  title: string
+  color: string
 }
 
 export type SimBarsResponse = {
@@ -450,6 +502,11 @@ export type SimBarsResponse = {
     price?: number | null
     qty?: number
   }[]
+  overlays?: SimChartOverlays
+  bar_meta?: SimBarMeta[]
+  price_lines?: SimPriceLine[]
+  has_more?: boolean
+  source?: string | null
   last_price?: number | null
   last_price_source?: string | null
   last_price_as_of?: string | null
@@ -482,6 +539,8 @@ export type SimOverseasBars = {
     close: number
     volume: number
   }[]
+  overlays?: SimChartOverlays
+  bar_meta?: SimBarMeta[]
   last_price?: number | null
   last_bar_open?: number | null
   lag_seconds?: number | null
@@ -591,12 +650,13 @@ export function catchUpSimBars(instanceId: string) {
 
 export function fetchSimBars(
   instanceId: string,
-  opts?: { symbol?: string; end?: string; limit?: number },
+  opts?: { symbol?: string; end?: string; limit?: number; before?: number },
 ) {
   const q = new URLSearchParams()
   if (opts?.symbol) q.set('symbol', opts.symbol)
   if (opts?.end) q.set('end', opts.end)
   if (opts?.limit) q.set('limit', String(opts.limit))
+  if (opts?.before != null) q.set('before', String(opts.before))
   const suffix = q.toString() ? `?${q}` : ''
   return request<SimBarsResponse>(
     `/api/sim/sessions/${encodeURIComponent(instanceId)}/bars${suffix}`,
@@ -620,14 +680,29 @@ export function startSimSession(instanceId: string) {
   }>(`/api/sim/sessions/${encodeURIComponent(instanceId)}/start`, { method: 'POST' })
 }
 
-export function fetchSimOverseasBars(symbolId: string, limit = 400) {
-  return request<SimOverseasBars>(
-    `/api/sim/overseas/bars?symbol_id=${encodeURIComponent(symbolId)}&limit=${limit}`,
-  )
+export function fetchSimOverseasBars(
+  symbolId: string,
+  opts?: { limit?: number; instanceId?: string },
+) {
+  const limit = typeof opts === 'number' ? opts : (opts?.limit ?? 100)
+  const instanceId = typeof opts === 'number' ? undefined : opts?.instanceId
+  const q = new URLSearchParams()
+  q.set('symbol_id', symbolId)
+  q.set('limit', String(limit))
+  if (instanceId) q.set('instance_id', instanceId)
+  return request<SimOverseasBars>(`/api/sim/overseas/bars?${q}`)
 }
 
-export function fetchSimMarketBars(symbolId: string, limit = 400) {
+export function fetchSimMarketBars(
+  symbolId: string,
+  opts?: { limit?: number; before?: number },
+) {
+  const limit = opts?.limit ?? 100
+  const q = new URLSearchParams()
+  q.set('symbol_id', symbolId)
+  q.set('limit', String(limit))
+  if (opts?.before != null) q.set('before', String(opts.before))
   return request<SimBarsResponse & { symbol_id?: string; name?: string }>(
-    `/api/sim/market/bars?symbol_id=${encodeURIComponent(symbolId)}&limit=${limit}`,
+    `/api/sim/market/bars?${q}`,
   )
 }

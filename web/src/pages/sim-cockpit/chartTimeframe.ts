@@ -1,5 +1,7 @@
 /** Chart timeframe helpers for Sim Cockpit candle panels. */
 
+import type { SimBarMeta, SimChartOverlays, SimPriceLine } from '../../lib/api'
+
 export type ChartTimeframe = '5m' | '15m' | '1h' | '1d'
 
 export const CHART_TIMEFRAMES: { value: ChartTimeframe; label: string }[] = [
@@ -96,4 +98,80 @@ export function aggregateMarkers(
       return best == null ? null : { ...m, time: best }
     })
     .filter(Boolean) as ChartMarker[]
+}
+
+/** Keep last overlay point inside each aggregated bucket. */
+export function aggregateOverlaySeries(
+  points: { time: number; value: number }[] | undefined,
+  bars: OhlcBar[],
+): { time: number; value: number }[] {
+  if (!points?.length || !bars.length) return []
+  const out: { time: number; value: number }[] = []
+  let pi = 0
+  for (const bar of bars) {
+    let last: { time: number; value: number } | null = null
+    while (pi < points.length && points[pi].time <= bar.time) {
+      last = points[pi]
+      pi += 1
+    }
+    if (last) out.push({ time: bar.time, value: last.value })
+  }
+  return out
+}
+
+export function aggregateOverlays(
+  overlays: SimChartOverlays | null | undefined,
+  bars: OhlcBar[],
+  tf: ChartTimeframe,
+): SimChartOverlays | null {
+  if (!overlays) return null
+  if (tf === '5m') return overlays
+  return {
+    ma7: aggregateOverlaySeries(overlays.ma7, bars),
+    ma14: aggregateOverlaySeries(overlays.ma14, bars),
+    ma52: aggregateOverlaySeries(overlays.ma52, bars),
+    signal: aggregateOverlaySeries(overlays.signal, bars),
+  }
+}
+
+/** Use the last 5m meta inside each aggregated bar. */
+export function aggregateBarMeta(
+  meta: SimBarMeta[] | null | undefined,
+  bars: OhlcBar[],
+  tf: ChartTimeframe,
+): SimBarMeta[] {
+  if (!meta?.length || !bars.length) return []
+  if (tf === '5m') return meta
+  const byBucket = new Map<number, SimBarMeta>()
+  for (const m of meta) {
+    const bucket = bucketStart(m.time, tf)
+    byBucket.set(bucket, { ...m, time: bucket })
+  }
+  return bars.map((b) => byBucket.get(b.time) || { time: b.time, source: 'replay' })
+}
+
+export type AggregatedChart = {
+  bars: OhlcBar[]
+  markers: ChartMarker[]
+  overlays: SimChartOverlays | null
+  barMeta: SimBarMeta[]
+  priceLines: SimPriceLine[]
+}
+
+export function aggregateChartBundle(input: {
+  bars?: OhlcBar[] | null
+  markers?: ChartMarker[] | null
+  overlays?: SimChartOverlays | null
+  barMeta?: SimBarMeta[] | null
+  priceLines?: SimPriceLine[] | null
+  tf: ChartTimeframe
+}): AggregatedChart {
+  const aggBars = aggregateBars(input.bars || [], input.tf)
+  return {
+    bars: aggBars,
+    markers: aggregateMarkers(input.markers || undefined, aggBars),
+    overlays: aggregateOverlays(input.overlays, aggBars, input.tf),
+    barMeta: aggregateBarMeta(input.barMeta, aggBars, input.tf),
+    priceLines: input.priceLines || [],
+  }
 }
