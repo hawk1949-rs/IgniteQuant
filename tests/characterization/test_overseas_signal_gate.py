@@ -36,7 +36,7 @@ def _synthetic_overseas_bars(n: int = 420) -> pd.DataFrame:
             }
         )
         price = c
-    return bars_dicts_to_dataframe(rows, underlying_symbol="GC=F")
+    return bars_dicts_to_dataframe(rows, underlying_symbol="XAUUSD")
 
 
 def _cfg() -> DecisionConfig:
@@ -45,7 +45,7 @@ def _cfg() -> DecisionConfig:
         decision_mode=base.decision_mode,
         entry_mode=base.entry_mode,
         config_version=base.config_version,
-        symbol="GC=F",
+        symbol="XAUUSD",
         factor=base.factor,
         signal=base.signal,
         sizing=base.sizing,

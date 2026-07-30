@@ -14,13 +14,14 @@ def test_au_ag_overseas_pricing() -> None:
     assert au.overseas_id == "gc"
     src = resolve_signal_source(au)
     assert src.pricing_basis == "overseas"
-    assert src.decision_symbol == "GC=F"
+    assert src.decision_symbol == "XAUUSD"
     assert src.domestic_signal_symbol == "KQ.m@SHFE.au"
-    assert src.yahoo_symbol == "GC=F"
-    assert src.eastmoney_secid == "101.GC00Y"
+    assert src.yahoo_symbol == "XAUUSD=X"
+    assert src.eastmoney_secid == "122.XAU"
 
     ag = resolve_signal_source(instrument_by_id("ag"))
-    assert ag.decision_symbol == "SI=F"
+    assert ag.decision_symbol == "XAGUSD"
+    assert ag.eastmoney_secid == "122.XAG"
 
 
 def test_rb_fg_remain_domestic() -> None:

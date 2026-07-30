@@ -26,31 +26,32 @@ class OverseasPair:
     overseas_id: str
 
 
-# COMEX / NYMEX continuous futures via Yahoo + Eastmoney mirrors.
+# Overseas gold/silver: live signal clock prefers London spot (东财 122.XAU/XAG).
+# COMEX continuous (GC00Y) trades at a futures premium and must not be labeled as XAUUSD.
 OVERSEAS_INSTRUMENTS: dict[str, OverseasInstrumentSpec] = {
     "gc": OverseasInstrumentSpec(
         id="gc",
-        name="COMEX黄金",
-        signal_symbol="GC=F",
-        exchange="COMEX",
-        yahoo_symbol="GC=F",
-        eastmoney_secid="101.GC00Y",
-        display_symbol="XAUUSD/GC",
+        name="伦敦金（现货黄金）",
+        signal_symbol="XAUUSD",
+        exchange="OTC",
+        yahoo_symbol="XAUUSD=X",
+        eastmoney_secid="122.XAU",
+        display_symbol="XAUUSD",
         multiplier=100.0,
-        tick_size=0.1,
-        note="COMEX Gold continuous; 对照沪金 au",
+        tick_size=0.01,
+        note="伦敦金现货（东财 122.XAU）；对照沪金 au。非 COMEX 期货 GC00Y。",
     ),
     "si": OverseasInstrumentSpec(
         id="si",
-        name="COMEX白银",
-        signal_symbol="SI=F",
-        exchange="COMEX",
-        yahoo_symbol="SI=F",
-        eastmoney_secid="101.SI00Y",
-        display_symbol="XAGUSD/SI",
+        name="伦敦银（现货白银）",
+        signal_symbol="XAGUSD",
+        exchange="OTC",
+        yahoo_symbol="XAGUSD=X",
+        eastmoney_secid="122.XAG",
+        display_symbol="XAGUSD",
         multiplier=5000.0,
-        tick_size=0.005,
-        note="COMEX Silver continuous; 对照沪银 ag",
+        tick_size=0.001,
+        note="伦敦银现货（东财 122.XAG）；对照沪银 ag。非 COMEX 期货 SI00Y。",
     ),
     "hg": OverseasInstrumentSpec(
         id="hg",
@@ -120,20 +121,20 @@ def cockpit_overseas_pair(domestic_id: str) -> dict[str, str] | None:
     legacy = {
         "gc": {
             "id": "xauusd",
-            "name": "国际黄金 XAUUSD",
+            "name": "伦敦金（现货黄金）",
             "display_symbol": "XAUUSD",
             "note": (
-                "外盘对照：以 COMEX 黄金期货（GC00Y / GC=F）近似 XAUUSD；"
-                "非天勤/MT5 实盘账户。历史归档见 market_bar_archive symbol=GC=F。"
+                "外盘信号时钟：伦敦金现货（东财 122.XAU / XAUUSD）；"
+                "不是 COMEX 期货 GC00Y（期货相对现货常有升水）。"
             ),
         },
         "si": {
             "id": "xagusd",
-            "name": "国际白银 XAGUSD",
+            "name": "伦敦银（现货白银）",
             "display_symbol": "XAGUSD",
             "note": (
-                "外盘对照：以 COMEX 白银期货（SI00Y / SI=F）近似 XAGUSD；"
-                "非天勤/MT5 实盘账户。历史归档见 market_bar_archive symbol=SI=F。"
+                "外盘信号时钟：伦敦银现货（东财 122.XAG / XAGUSD）；"
+                "不是 COMEX 期货 SI00Y。"
             ),
         },
     }.get(spec.id, {})
