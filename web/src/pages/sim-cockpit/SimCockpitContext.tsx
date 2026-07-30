@@ -20,6 +20,7 @@ import {
   fetchSimReplay,
   fetchSimSessions,
   fetchSimSummary,
+  fetchSimPositionHistory,
   repairSimFills,
   type SimBarsResponse,
   type SimCatalog,
@@ -28,6 +29,7 @@ import {
   type SimIntent,
   type SimMetrics,
   type SimOverseasBars,
+  type SimPositionHistoryRow,
   type SimSession,
   type SimSummary,
   type SimReplay,
@@ -49,6 +51,7 @@ type Ctx = {
   decisions: SimDecision[]
   intents: SimIntent[]
   fills: SimFill[]
+  positionHistory: SimPositionHistoryRow[]
   bars: SimBarsResponse | null
   overseas: SimOverseasBars | null
   error: string | null
@@ -118,6 +121,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
   const [decisions, setDecisions] = useState<SimDecision[]>([])
   const [intents, setIntents] = useState<SimIntent[]>([])
   const [fills, setFills] = useState<SimFill[]>([])
+  const [positionHistory, setPositionHistory] = useState<SimPositionHistoryRow[]>([])
   const [bars, setBars] = useState<SimBarsResponse | null>(null)
   const [overseas, setOverseas] = useState<SimOverseasBars | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -314,9 +318,11 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
         marketBarsPromise,
         overseasPromise,
         fetchSimSessions(),
+        fetchSimPositionHistory(id, 100),
       ])
 
-      const [sumR, metR, decR, intentR, fillR, barR, marketR, overseasR, sessR] = settled
+      const [sumR, metR, decR, intentR, fillR, barR, marketR, overseasR, sessR, histR] =
+        settled
       if (stale()) return
 
       const partial: string[] = []
@@ -344,6 +350,9 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
 
       if (fillR.status === 'fulfilled') setFills(fillR.value.fills || [])
       else partial.push('成交记录')
+
+      if (histR.status === 'fulfilled') setPositionHistory(histR.value.positions || [])
+      else partial.push('历史持仓')
 
       if (sessR.status === 'fulfilled') setSessions(sessR.value.sessions || [])
 
@@ -517,6 +526,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       decisions,
       intents,
       fills,
+      positionHistory,
       bars,
       overseas,
       error,
@@ -543,6 +553,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       decisions,
       intents,
       fills,
+      positionHistory,
       bars,
       overseas,
       error,

@@ -138,6 +138,7 @@ export function OverviewPanel() {
     decisions,
     intents,
     fills,
+    positionHistory,
     bars,
     overseas,
     error,
@@ -198,7 +199,9 @@ export function OverviewPanel() {
   const decisionsPagination = useSimTablePagination('decisions', 10, decisions.length)
   const intentsPagination = useSimTablePagination('intents', 10, intents.length)
   const fillsPagination = useSimTablePagination('fills', 10, fills.length)
+  const historyPagination = useSimTablePagination('position-history', 10, positionHistory.length)
   const [chartTf, setChartTf] = useState<ChartTimeframe>('5m')
+  const [positionTab, setPositionTab] = useState('current')
 
   const domesticChart = useMemo(() => {
     const raw = bars?.bars || []
@@ -598,90 +601,187 @@ export function OverviewPanel() {
         ))}
       </section>
 
-      {/* 当前持仓合约 */}
+      {/* 持仓：当前 / 历史 */}
       <Section
-        title="当前持仓"
+        title="持仓"
         extra={
-          openPositions.length
-            ? `${openPositions.length} 张合约`
-            : net === 0
-              ? '空仓'
-              : '等待持仓快照'
+          <span className="text-faint">
+            当前 {openPositions.length} · 历史 {positionHistory.length}
+          </span>
         }
       >
-        {openPositions.length ? (
-          <Table
-            size="small"
-            pagination={false}
-            rowKey={(r) => `${r.symbol}-${r.side}`}
-            dataSource={openPositions}
-            columns={[
-              {
-                title: '合约',
-                dataIndex: 'symbol',
-                render: (v: string) => <span className="font-medium">{v}</span>,
-              },
-              {
-                title: '方向',
-                dataIndex: 'side_label',
-                width: 64,
-                render: (v: string, r) => (
-                  <Tag color={r.side === 'LONG' ? 'success' : 'error'}>{v || r.side}</Tag>
-                ),
-              },
-              { title: '手数', dataIndex: 'lots', width: 64 },
-              {
-                title: '开仓均价',
-                dataIndex: 'average_entry_price',
-                render: (v: number | null | undefined) =>
-                  v != null ? Number(v).toFixed(2) : '—',
-              },
-              {
-                title: '最新价',
-                dataIndex: 'last_price',
-                render: (v: number | null | undefined) =>
-                  v != null ? Number(v).toFixed(2) : '—',
-              },
-              {
-                title: '浮动盈亏',
-                dataIndex: 'unrealized_pnl',
-                render: (v: number) => {
-                  const n = Number(v || 0)
-                  return (
-                    <span className={n > 0 ? 'text-emerald-500' : n < 0 ? 'text-rose-500' : ''}>
-                      ¥{money(n)}
-                    </span>
-                  )
-                },
-              },
-              {
-                title: '保证金',
-                dataIndex: 'margin',
-                render: (v: number, r) => {
-                  const pct =
-                    r.margin_rate_pct != null
-                      ? ` · ${Number(r.margin_rate_pct).toFixed(0)}%`
-                      : ''
-                  return v > 0 ? `¥${money(v)}${pct}` : '—'
-                },
-              },
-              {
-                title: '止损/止盈',
-                key: 'stops',
-                render: (_: unknown, r) => {
-                  const stop = r.stop_price
-                  const take = r.take_price
-                  if (stop == null && take == null) return '—'
-                  const s = stop != null ? Number(stop).toFixed(2) : '—'
-                  const t = take != null ? Number(take).toFixed(2) : '—'
-                  return `${s} / ${t}`
-                },
-              },
-            ]}
-          />
-        ) : (
-          <p className="m-0 text-sm text-muted">当前无持仓。</p>
-        )}
+        <Tabs
+          size="small"
+          activeKey={positionTab}
+          onChange={setPositionTab}
+          items={[
+            {
+              key: 'current',
+              label: `当前${openPositions.length ? ` ${openPositions.length}` : ''}`,
+              children: openPositions.length ? (
+                <Table
+                  size="small"
+                  pagination={false}
+                  rowKey={(r) => `${r.symbol}-${r.side}`}
+                  dataSource={openPositions}
+                  columns={[
+                    {
+                      title: '合约',
+                      dataIndex: 'symbol',
+                      render: (v: string) => <span className="font-medium">{v}</span>,
+                    },
+                    {
+                      title: '方向',
+                      dataIndex: 'side_label',
+                      width: 64,
+                      render: (v: string, r) => (
+                        <Tag color={r.side === 'LONG' ? 'success' : 'error'}>
+                          {v || r.side}
+                        </Tag>
+                      ),
+                    },
+                    { title: '手数', dataIndex: 'lots', width: 64 },
+                    {
+                      title: '开仓均价',
+                      dataIndex: 'average_entry_price',
+                      render: (v: number | null | undefined) =>
+                        v != null ? Number(v).toFixed(2) : '—',
+                    },
+                    {
+                      title: '最新价',
+                      dataIndex: 'last_price',
+                      render: (v: number | null | undefined) =>
+                        v != null ? Number(v).toFixed(2) : '—',
+                    },
+                    {
+                      title: '浮动盈亏',
+                      dataIndex: 'unrealized_pnl',
+                      render: (v: number) => {
+                        const n = Number(v || 0)
+                        return (
+                          <span
+                            className={
+                              n > 0 ? 'text-emerald-500' : n < 0 ? 'text-rose-500' : ''
+                            }
+                          >
+                            ¥{money(n)}
+                          </span>
+                        )
+                      },
+                    },
+                    {
+                      title: '保证金',
+                      dataIndex: 'margin',
+                      render: (v: number, r) => {
+                        const pctTxt =
+                          r.margin_rate_pct != null
+                            ? ` · ${Number(r.margin_rate_pct).toFixed(0)}%`
+                            : ''
+                        return v > 0 ? `¥${money(v)}${pctTxt}` : '—'
+                      },
+                    },
+                    {
+                      title: '止损/止盈',
+                      key: 'stops',
+                      render: (_: unknown, r) => {
+                        const stop = r.stop_price
+                        const take = r.take_price
+                        if (stop == null && take == null) return '—'
+                        const s = stop != null ? Number(stop).toFixed(2) : '—'
+                        const t = take != null ? Number(take).toFixed(2) : '—'
+                        return `${s} / ${t}`
+                      },
+                    },
+                  ]}
+                />
+              ) : (
+                <p className="m-0 text-sm text-muted">
+                  {net === 0 ? '当前无持仓。' : '等待持仓快照。'}
+                </p>
+              ),
+            },
+            {
+              key: 'history',
+              label: `历史${positionHistory.length ? ` ${positionHistory.length}` : ''}`,
+              children: positionHistory.length ? (
+                <Table
+                  size="small"
+                  pagination={historyPagination}
+                  rowKey={(r, i) =>
+                    `${r.symbol}-${r.closed_at || ''}-${r.opened_at || ''}-${i}`
+                  }
+                  dataSource={positionHistory}
+                  columns={[
+                    {
+                      title: '合约',
+                      dataIndex: 'symbol',
+                      render: (v: string) => <span className="font-medium">{v}</span>,
+                    },
+                    {
+                      title: '方向',
+                      dataIndex: 'side_label',
+                      width: 64,
+                      render: (v: string, r) => (
+                        <Tag color={r.side === 'LONG' ? 'success' : 'error'}>
+                          {v || r.side}
+                        </Tag>
+                      ),
+                    },
+                    { title: '手数', dataIndex: 'lots', width: 64 },
+                    {
+                      title: '开仓均价',
+                      dataIndex: 'entry_price',
+                      render: (v: number) => Number(v).toFixed(2),
+                    },
+                    {
+                      title: '平仓均价',
+                      dataIndex: 'exit_price',
+                      render: (v: number) => Number(v).toFixed(2),
+                    },
+                    {
+                      title: '开仓时间',
+                      dataIndex: 'opened_at',
+                      render: (v: string | null | undefined) =>
+                        v ? formatLocalDateTime(v) : '—',
+                    },
+                    {
+                      title: '平仓时间',
+                      dataIndex: 'closed_at',
+                      render: (v: string | null | undefined) =>
+                        v ? formatLocalDateTime(v) : '—',
+                    },
+                    {
+                      title: '已实现盈亏',
+                      dataIndex: 'realized_pnl',
+                      render: (v: number) => {
+                        const n = Number(v || 0)
+                        return (
+                          <span
+                            className={
+                              n > 0 ? 'text-emerald-500' : n < 0 ? 'text-rose-500' : ''
+                            }
+                          >
+                            ¥{money(n)}
+                          </span>
+                        )
+                      },
+                    },
+                    {
+                      title: '手续费',
+                      dataIndex: 'fees',
+                      width: 88,
+                      render: (v: number) => `¥${money(Number(v || 0))}`,
+                    },
+                  ]}
+                />
+              ) : (
+                <p className="m-0 text-sm text-muted">
+                  暂无已平仓回合（需完整开平成交）。
+                </p>
+              ),
+            },
+          ]}
+        />
       </Section>
 
       {/* 双图 */}

@@ -9,6 +9,10 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 
+from dashboard.position_history import (
+    closed_rounds_summary,
+    iter_closed_rounds,
+)
 from ignitequant.persistence.cloud_sync import database_url as _database_url
 
 
@@ -534,57 +538,17 @@ def session_fills_cloud(
 
 def _metrics_from_fills(fills: list[dict[str, Any]], equity: float | None) -> dict[str, Any]:
     """Approximate local _compute_metrics from cloud fill rows (ASC order)."""
-    pos = 0
-    avg = 0.0
-    closed: list[float] = []
-    realized = 0.0
-    for f in fills:
-        side = str(f.get("side") or "").upper()
-        qty = abs(int(f.get("qty") or 0))
-        price = float(f.get("price") or 0)
-        fee = float(f.get("fee") or 0)
-        signed = qty if side in {"BUY", "LONG"} else -qty
-        if side in {"SELL", "SHORT"}:
-            signed = -qty
-        if side not in {"BUY", "SELL", "LONG", "SHORT"}:
-            signed = qty
-            if "SELL" in side or "SHORT" in side:
-                signed = -qty
-        new_pos = pos + signed
-        if pos == 0:
-            pos = signed
-            avg = price
-            realized -= fee
-            continue
-        if (pos > 0 and signed < 0) or (pos < 0 and signed > 0):
-            close_qty = min(abs(pos), abs(signed))
-            direction = 1 if pos > 0 else -1
-            pnl = (price - avg) * close_qty * direction * 1000.0 - fee * (close_qty / max(qty, 1))
-            closed.append(pnl)
-            realized += pnl
-            if abs(signed) < abs(pos):
-                pos = pos + signed
-            elif abs(signed) == abs(pos):
-                pos = 0
-                avg = 0.0
-            else:
-                remain = abs(signed) - abs(pos)
-                pos = remain if signed > 0 else -remain
-                avg = price
-        else:
-            new_abs = abs(pos) + qty
-            avg = (avg * abs(pos) + price * qty) / max(new_abs, 1)
-            pos = new_pos
-            realized -= fee
-
+    rounds = iter_closed_rounds(fills)
+    summary = closed_rounds_summary(rounds)
+    realized = float(summary["realized_pnl_proxy"])
     current_equity = float(equity) if equity is not None else DEFAULT_INIT_BALANCE + realized
-    wins = [x for x in closed if x > 0]
-    losses = [x for x in closed if x <= 0]
     return {
-        "trade_count": len(closed),
-        "win_count": len(wins),
-        "loss_count": len(losses),
-        "win_rate": (len(wins) / len(closed)) if closed else None,
+        "trade_count": summary["trade_count"],
+        "win_count": summary["wins"],
+        "loss_count": summary["losses"],
+        "wins": summary["wins"],
+        "losses": summary["losses"],
+        "win_rate": summary["win_rate"] if summary["trade_count"] else None,
         "realized_pnl": realized,
         "current_equity": current_equity,
         "max_drawdown": None,
@@ -593,6 +557,21 @@ def _metrics_from_fills(fills: list[dict[str, Any]], equity: float | None) -> di
             {"t": None, "equity": current_equity},
         ],
         "approx": True,
+        "data_source": "cloud",
+    }
+
+
+def session_position_history_cloud(
+    instance_id: str, *, limit: int = 100, root=None
+) -> dict[str, Any]:
+    fills_body = session_fills_cloud(instance_id, limit=2000, root=root)
+    fills_asc = list(reversed(fills_body.get("fills") or []))
+    rounds = iter_closed_rounds(fills_asc)
+    rounds_desc = list(reversed(rounds))[:limit]
+    return {
+        "instance_id": instance_id,
+        "count": len(rounds),
+        "positions": rounds_desc,
         "data_source": "cloud",
     }
 

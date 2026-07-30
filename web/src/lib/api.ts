@@ -403,6 +403,19 @@ export type SimFill = {
   created_at: string
 }
 
+export type SimPositionHistoryRow = {
+  symbol: string
+  side: 'LONG' | 'SHORT' | string
+  side_label?: string
+  lots: number
+  entry_price: number
+  exit_price: number
+  opened_at?: string | null
+  closed_at?: string | null
+  realized_pnl: number
+  fees: number
+}
+
 export type SimChartContext = {
   regime?: string
   short_bias?: string
@@ -542,6 +555,12 @@ export function fetchSimIntents(instanceId: string, limit = 100) {
 export function fetchSimFills(instanceId: string, limit = 100) {
   return request<{ fills: SimFill[]; count: number }>(
     `/api/sim/sessions/${encodeURIComponent(instanceId)}/fills?limit=${limit}`,
+  )
+}
+
+export function fetchSimPositionHistory(instanceId: string, limit = 100) {
+  return request<{ positions: SimPositionHistoryRow[]; count: number }>(
+    `/api/sim/sessions/${encodeURIComponent(instanceId)}/position-history?limit=${limit}`,
   )
 }
 

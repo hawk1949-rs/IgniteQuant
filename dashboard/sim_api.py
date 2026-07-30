@@ -23,6 +23,10 @@ from dashboard.safe_path import resolve_runtime_db
 from dashboard.catalog import STRATEGIES, SYMBOLS
 from dashboard import sim_cloud_read
 from dashboard.open_positions import open_positions_view as _open_positions_view
+from dashboard.position_history import (
+    closed_rounds_summary as _closed_rounds_summary,
+    iter_closed_rounds as _iter_closed_rounds,
+)
 from ignitequant.market.sim_klines import (
     find_snapshot_for_symbol,
     load_klines_snapshot,
@@ -970,64 +974,25 @@ def _signal_symbol_for_trade(symbol: str) -> str:
 def _compute_metrics(conn: sqlite3.Connection, instance_id: str) -> dict[str, Any]:
     fills = conn.execute(
         """
-        SELECT price, qty, fee, side, trade_time, created_at
+        SELECT symbol, price, qty, fee, side, trade_time, created_at
         FROM trade_fill_event
         WHERE instance_id = ?
         ORDER BY seq ASC
         """,
         (instance_id,),
     ).fetchall()
-
-    # Round-trip PnL: walk inventory; when flat after a fill, close a trade.
+    fill_rows = [dict(f) for f in fills]
+    rounds = _iter_closed_rounds(fill_rows)
+    summary = _closed_rounds_summary(rounds)
+    # Residual open position after walking fills (for metrics.open_position).
     pos = 0
-    avg = 0.0
-    closed: list[float] = []
-    realized = 0.0
-    for f in fills:
-        side = str(f["side"] or "").upper()
-        qty = abs(int(f["qty"]))
-        price = float(f["price"])
-        fee = float(f["fee"] or 0)
-        signed = qty if side in {"BUY", "LONG"} else -qty
-        if side in {"SELL", "SHORT"}:
-            signed = -qty
-        # Some runners may store OPEN/CLOSE; treat positive qty with side.
-        if side not in {"BUY", "SELL", "LONG", "SHORT"}:
-            signed = qty  # fallback
-            if "SELL" in side or "SHORT" in side:
-                signed = -qty
-
-        new_pos = pos + signed
-        if pos == 0:
-            pos = signed
-            avg = price
-            realized -= fee
-            continue
-
-        # Reducing or flipping
-        if (pos > 0 and signed < 0) or (pos < 0 and signed > 0):
-            close_qty = min(abs(pos), abs(signed))
-            direction = 1 if pos > 0 else -1
-            # AU multiplier 1000 — keep price-diff * qty as relative PnL proxy;
-            # prefer equity snapshots for display equity.
-            pnl = (price - avg) * close_qty * direction * 1000.0 - fee * (close_qty / max(qty, 1))
-            closed.append(pnl)
-            realized += pnl
-            if abs(signed) < abs(pos):
-                pos = pos + signed
-            elif abs(signed) == abs(pos):
-                pos = 0
-                avg = 0.0
-            else:
-                remain = abs(signed) - abs(pos)
-                pos = remain if signed > 0 else -remain
-                avg = price
+    for f in fill_rows:
+        side = str(f.get("side") or "").upper()
+        qty = abs(int(f.get("qty") or 0))
+        if side in {"SELL", "SHORT"} or ("SELL" in side or "SHORT" in side):
+            pos -= qty
         else:
-            # Adding
-            new_abs = abs(pos) + qty
-            avg = (avg * abs(pos) + price * qty) / max(new_abs, 1)
-            pos = new_pos
-            realized -= fee
+            pos += qty
 
     equities = conn.execute(
         """
@@ -1049,11 +1014,6 @@ def _compute_metrics(conn: sqlite3.Connection, instance_id: str) -> dict[str, An
         if peak > 0:
             max_dd = max(max_dd, (peak - eq) / peak)
 
-    wins = sum(1 for p in closed if p > 0)
-    losses = sum(1 for p in closed if p <= 0)
-    n = len(closed)
-    win_rate = (wins / n) if n else 0.0
-
     acct = _latest_account(conn, instance_id)
     if acct is not None:
         current_equity = float(acct["equity"])
@@ -1063,15 +1023,37 @@ def _compute_metrics(conn: sqlite3.Connection, instance_id: str) -> dict[str, An
         "init_balance": DEFAULT_INIT_BALANCE,
         "pnl": current_equity - DEFAULT_INIT_BALANCE,
         "pnl_pct": (current_equity - DEFAULT_INIT_BALANCE) / DEFAULT_INIT_BALANCE,
-        "realized_pnl_proxy": realized,
-        "trade_count": n,
+        "realized_pnl_proxy": summary["realized_pnl_proxy"],
+        "trade_count": summary["trade_count"],
         "fill_count": len(fills),
-        "wins": wins,
-        "losses": losses,
-        "win_rate": win_rate,
+        "wins": summary["wins"],
+        "losses": summary["losses"],
+        "win_rate": summary["win_rate"],
         "max_drawdown_pct": max_dd,
         "open_position": pos,
         "equity_curve": equity_curve[-200:],
+    }
+
+
+def _position_history_from_conn(
+    conn: sqlite3.Connection, instance_id: str, *, limit: int = 100
+) -> dict[str, Any]:
+    fills = conn.execute(
+        """
+        SELECT symbol, price, qty, fee, side, trade_time, created_at
+        FROM trade_fill_event
+        WHERE instance_id = ?
+        ORDER BY seq ASC
+        """,
+        (instance_id,),
+    ).fetchall()
+    rounds = _iter_closed_rounds([dict(f) for f in fills])
+    # Newest closed first for cockpit table.
+    rounds_desc = list(reversed(rounds))[:limit]
+    return {
+        "instance_id": instance_id,
+        "count": len(rounds),
+        "positions": rounds_desc,
     }
 
 
@@ -1790,6 +1772,24 @@ def session_fills(
             for r in rows
         ]
         return {"instance_id": instance_id, "count": len(items), "fills": items}
+    finally:
+        conn.close()
+
+
+@router.get("/sessions/{instance_id}/position-history")
+def session_position_history(
+    instance_id: str,
+    limit: int = Query(100, ge=1, le=500),
+) -> dict[str, Any]:
+    """Closed round-trip positions (flat cycles) for cockpit history tab."""
+    if sim_cloud_read.is_cloud():
+        return sim_cloud_read.session_position_history_cloud(
+            instance_id, limit=limit, root=ROOT
+        )
+    path = _resolve_db(instance_id)
+    conn = _open_ro(path)
+    try:
+        return _position_history_from_conn(conn, instance_id, limit=limit)
     finally:
         conn.close()
 
