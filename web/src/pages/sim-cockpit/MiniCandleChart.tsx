@@ -229,7 +229,9 @@ export function MiniCandleChart({
     const series = chart.addSeries(CandlestickSeries, {
       upColor: '#30d158',
       downColor: '#ff453a',
-      borderVisible: false,
+      borderVisible: true,
+      borderUpColor: '#1faa45',
+      borderDownColor: '#d70015',
       wickUpColor: '#30d158',
       wickDownColor: '#ff453a',
     })
@@ -469,9 +471,9 @@ export function MiniCandleChart({
       <div ref={containerRef} className="w-full overflow-hidden rounded-xl" />
       <div
         ref={tooltipRef}
-        className="pointer-events-none absolute z-10 hidden min-w-[220px] rounded-lg border border-white/10 bg-[#0f1a2c]/95 px-2.5 py-2 text-[11px] leading-5 text-slate-200 shadow-lg backdrop-blur"
+        className="pointer-events-none absolute z-10 hidden min-w-[220px] rounded-lg border border-white/10 bg-[#0f1a2c]/95 px-2.5 py-2 text-xs leading-5 text-slate-200 shadow-lg backdrop-blur"
       />
-      <div className="mt-1 flex flex-wrap gap-3 px-1 text-[10px] text-faint">
+      <div className="mt-1 flex flex-wrap gap-3 px-1 text-xs text-faint">
         <span className="inline-flex items-center gap-1">
           <i className="inline-block h-0.5 w-3 bg-[#64d2ff]" /> MA7
         </span>

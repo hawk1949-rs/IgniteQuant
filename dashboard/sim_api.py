@@ -737,32 +737,40 @@ def _fetch_yahoo_5m_bars(yahoo_symbol: str, *, limit: int = 400) -> list[dict[st
 
 
 # Cockpit polls overseas often; upstream HTTP is ~1–3s. Short TTL avoids blocking every refresh.
+# Always pull a deep window so /overseas/bars can paginate with ``before`` without re-hitting
+# Eastmoney/Yahoo for every scroll chunk.
 _OVERSEAS_BARS_TTL_S = 15.0
+_OVERSEAS_FETCH_DEPTH = 1200
 _overseas_bars_cache: dict[str, tuple[float, list[dict[str, Any]], str | None]] = {}
 _overseas_bars_lock = threading.Lock()
 
 
 def _fetch_overseas_5m_bars(
-    pair: dict[str, str], *, limit: int = 400
+    pair: dict[str, str], *, limit: int = _OVERSEAS_FETCH_DEPTH
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Prefer Eastmoney (reachable in CN); fall back to Yahoo. TTL-cached for cockpit."""
+    fetch_n = min(max(int(limit), 120), 2000)
     cache_key = (
-        f"{pair.get('overseas_id')}|{pair.get('eastmoney_secid')}|{pair.get('yahoo_symbol')}|{limit}"
+        f"{pair.get('overseas_id')}|{pair.get('eastmoney_secid')}|{pair.get('yahoo_symbol')}"
     )
     now = time.monotonic()
     with _overseas_bars_lock:
         hit = _overseas_bars_cache.get(cache_key)
         if hit is not None and now - hit[0] < _OVERSEAS_BARS_TTL_S:
-            return hit[1], hit[2]
+            cached_bars, source = hit[1], hit[2]
+            return (
+                (cached_bars[-fetch_n:] if fetch_n < len(cached_bars) else cached_bars),
+                source,
+            )
     bars, source = _fetch_overseas_5m_bars_impl(
         eastmoney_secid=pair.get("eastmoney_secid") or "",
         yahoo_symbol=pair.get("yahoo_symbol") or "",
         overseas_id=pair.get("overseas_id") or "",
-        limit=limit,
+        limit=max(fetch_n, _OVERSEAS_FETCH_DEPTH),
     )
     with _overseas_bars_lock:
         _overseas_bars_cache[cache_key] = (time.monotonic(), bars, source)
-    return bars, source
+    return (bars[-fetch_n:] if fetch_n < len(bars) else bars), source
 
 
 def _status_from_updated(updated_at: str | None) -> str:
@@ -1852,6 +1860,9 @@ def session_catch_up_bars(instance_id: str) -> dict[str, Any]:
 def overseas_bars(
     symbol_id: str = Query("au"),
     limit: int = Query(DEFAULT_VISIBLE_BARS, ge=10, le=2000),
+    before: int | None = Query(
+        None, description="unix seconds; return bars strictly before this open time"
+    ),
     instance_id: str | None = Query(
         None, description="optional session id to overlay live decision signal/regime"
     ),
@@ -1865,12 +1876,19 @@ def overseas_bars(
             "last_price": None,
             "overlays": {"ma7": [], "ma14": [], "ma52": [], "signal": []},
             "bar_meta": [],
+            "has_more": False,
             "hint": "当前品种暂无配置外盘对照。",
         }
-    # Fetch extra bars for MA warmup, return last ``limit`` visible.
-    fetch_n = min(max(int(limit) + 80, 120), 2000)
-    bars_all, source = _fetch_overseas_5m_bars(pair, limit=fetch_n)
-    visible = list(bars_all[-limit:]) if bars_all else []
+    # Deep fetch once (TTL-cached); slice for visible window / before pagination.
+    bars_all, source = _fetch_overseas_5m_bars(pair, limit=_OVERSEAS_FETCH_DEPTH)
+    pool = list(bars_all) if bars_all else []
+    if before is not None:
+        before_i = int(before)
+        pool = [b for b in pool if int(b["time"]) < before_i]
+    visible = list(pool[-limit:]) if pool else []
+    has_more = len(pool) > len(visible)
+    # Warmup extras for MA when not paginating older history.
+    compute = list(bars_all) if bars_all and before is None else (pool or visible)
     decisions: list[dict[str, Any]] = []
     if instance_id and visible:
         try:
@@ -1886,7 +1904,7 @@ def overseas_bars(
             decisions = []
     enrichment = build_chart_enrichment(
         visible,
-        bars_all or visible,
+        compute or visible,
         decisions=decisions,
         price_lines=None,
     )
@@ -1895,7 +1913,7 @@ def overseas_bars(
     now_ts = time.time()
     # Age past the bar open; also report how late we are vs an ideal live tip.
     lag_seconds = None
-    if last_open is not None:
+    if last_open is not None and before is None:
         lag_seconds = max(0.0, now_ts - float(last_open) - 300.0)
     return {
         "symbol_id": symbol_id,
@@ -1904,6 +1922,7 @@ def overseas_bars(
         "bars": visible,
         "overlays": enrichment["overlays"],
         "bar_meta": enrichment["bar_meta"],
+        "has_more": has_more,
         "last_price": last_price,
         "last_bar_open": last_open,
         "lag_seconds": lag_seconds,

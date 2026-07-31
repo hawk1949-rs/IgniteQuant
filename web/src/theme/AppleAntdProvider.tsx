@@ -85,6 +85,11 @@ const appleDarkTokens = {
       rowHoverBg: 'rgba(10, 132, 255, 0.14)',
       borderColor: 'rgba(180, 200, 230, 0.32)',
       colorText: '#F5F5F7',
+      // Align small tables with cockpit meta (text-xs = 12px); avoid 11/14 mix.
+      fontSize: 12,
+      cellFontSize: 12,
+      cellFontSizeMD: 12,
+      cellFontSizeSM: 12,
     },
     Switch: {
       colorPrimary: '#0A84FF',

@@ -84,7 +84,7 @@ function SimCockpitInner({ onBackHome }: Props) {
               <button
                 type="button"
                 onClick={onBackHome}
-                className="mb-1.5 text-[11px] font-medium text-blue hover:opacity-80"
+                className="mb-1.5 text-xs font-medium text-blue hover:opacity-80"
               >
                 ← 返回首页
               </button>
@@ -122,7 +122,7 @@ function SimCockpitInner({ onBackHome }: Props) {
                   <p className="text-sm font-medium leading-none">{item.label}</p>
                   <p
                     className={cn(
-                      'mt-1 text-[10px] leading-none',
+                      'mt-1 text-xs leading-none',
                       active ? 'text-white/75' : 'text-faint',
                     )}
                   >

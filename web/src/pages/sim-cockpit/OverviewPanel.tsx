@@ -14,6 +14,7 @@ import { useSimCockpit } from './SimCockpitContext'
 import { MiniCandleChart } from './MiniCandleChart'
 import {
   actionLabel,
+  decisionReasonText,
   qualityLabel,
   regimeLabel,
   riskActionLabel,
@@ -96,7 +97,7 @@ function Metric({
   )
   return (
     <div className="min-w-0">
-      <p className="text-[11px] leading-none text-faint">{labelNode}</p>
+      <p className="text-xs leading-none text-faint">{labelNode}</p>
       <p className={`mt-1 truncate text-sm font-semibold tabular-nums ${color}`}>{value}</p>
     </div>
   )
@@ -149,6 +150,8 @@ export function OverviewPanel() {
     refresh,
     loadMoreHistory,
     historyLoading,
+    loadMoreOverseasHistory,
+    overseasHistoryLoading,
     replayAt,
     replay,
     starting,
@@ -360,7 +363,7 @@ export function OverviewPanel() {
       <section className="rounded-xl border border-line bg-panel/90 px-3.5 py-3.5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <p className="text-[11px] font-medium tracking-wide text-faint">品种</p>
+            <p className="text-xs font-medium tracking-wide text-faint">品种</p>
             <div className="mt-2 flex flex-wrap gap-2">
               {symbolOptions.map((s) => {
                 const active = s.id === symbolId
@@ -376,7 +379,7 @@ export function OverviewPanel() {
                     }`}
                   >
                     <span className="block text-sm font-semibold leading-none">{s.name}</span>
-                    <span className="mt-1 block text-[11px] tabular-nums text-faint">
+                    <span className="mt-1 block text-xs tabular-nums text-faint">
                       {s.signal_symbol || s.id}
                     </span>
                   </button>
@@ -385,11 +388,11 @@ export function OverviewPanel() {
             </div>
           </div>
           <div className="shrink-0 text-right">
-            <p className="text-[11px] text-faint">当前对照</p>
+            <p className="text-xs text-faint">当前对照</p>
             <p className="mt-1 text-base font-semibold text-ink">
               {selectedSymbol?.name || symbolId}
             </p>
-            <p className="mt-0.5 text-[11px] tabular-nums text-faint">
+            <p className="mt-0.5 text-xs tabular-nums text-faint">
               {selectedSymbol?.signal_symbol || '—'}
               {selectedSymbol?.overseas_pair
                 ? ` · 外盘 ${selectedSymbol.overseas_pair.display_symbol}`
@@ -402,7 +405,7 @@ export function OverviewPanel() {
       {/* 运行配置（次要） */}
       <section className="rounded-xl border border-line/80 bg-panel/70 px-3.5 py-2.5">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <p className="text-[11px] font-medium tracking-wide text-faint">运行配置</p>
+          <p className="text-xs font-medium tracking-wide text-faint">运行配置</p>
           <div className="flex flex-wrap items-center gap-1.5">
             <Tag
               className="m-0"
@@ -490,7 +493,7 @@ export function OverviewPanel() {
               </Tag>
             ) : null}
             <Tooltip title="品种切换只改图表对照；内盘实时 K 线与成交标记来自当前「运行会话」对应品种的天勤快照。会话是沪金时，选螺纹钢不会继续画沪金图。">
-              <span className="cursor-help text-[11px] text-faint underline decoration-dotted">
+              <span className="cursor-help text-xs text-faint underline decoration-dotted">
                 说明
               </span>
             </Tooltip>
@@ -801,7 +804,7 @@ export function OverviewPanel() {
                       dataIndex: 'trade_time',
                       width: 148,
                       render: (v: string | null | undefined, r) => (
-                        <span className="text-[11px] tabular-nums">
+                        <span className="text-xs tabular-nums">
                           {formatLocalDateTime(v || r.closed_at || r.opened_at || '')}
                         </span>
                       ),
@@ -926,7 +929,7 @@ export function OverviewPanel() {
           ) : (
             <p className="py-16 text-center text-sm text-muted">暂无内盘 K 线</p>
           )}
-          <p className="mt-1.5 text-[11px] text-faint">
+          <p className="mt-1.5 text-xs text-faint">
             周期 {tfLabel}
             {chartTf !== '5m' ? '（由 5 分钟 K 线合成）' : ''} · {domesticChart.bars.length} 根
             {historyLoading ? ' · 加载更早历史…' : ''}
@@ -967,17 +970,22 @@ export function OverviewPanel() {
                 overlays={overseasChart.overlays}
                 barMeta={overseasChart.barMeta}
                 height={420}
+                onLoadMore={() => {
+                  void loadMoreOverseasHistory()
+                }}
               />
             ) : (
               <p className="py-16 text-center text-sm text-muted">暂无外盘数据</p>
             )}
-            <p className="mt-1.5 text-[11px] text-faint">
+            <p className="mt-1.5 text-xs text-faint">
               周期 {tfLabel}
               {chartTf !== '5m' ? '（由 5 分钟 K 线合成）' : ''} · {overseasChart.bars.length}{' '}
               根
+              {overseasHistoryLoading ? ' · 加载更早历史…' : ''}
+              {overseas?.has_more ? ' · 向左拖动可加载更多' : ''}
             </p>
             {overseas.pair?.note ? (
-              <p className="mt-1 text-[11px] leading-relaxed text-faint">{overseas.pair.note}</p>
+              <p className="mt-1 text-xs leading-relaxed text-faint">{overseas.pair.note}</p>
             ) : null}
           </Section>
         ) : null}
@@ -1003,7 +1011,7 @@ export function OverviewPanel() {
                   key={p.step}
                   className="rounded-lg border border-line/60 bg-surface/40 px-2.5 py-2"
                 >
-                  <p className="text-[11px] font-medium text-blue">
+                  <p className="text-xs font-medium text-blue">
                     {i + 1}. {p.step}
                   </p>
                   <p className="mt-0.5 truncate text-xs text-ink" title={p.detail}>
@@ -1020,7 +1028,7 @@ export function OverviewPanel() {
             rowKey="decision_id"
             pagination={decisionsPagination}
             dataSource={decisions}
-            scroll={{ x: 520 }}
+            scroll={{ x: 640 }}
             locale={{ emptyText: '暂无决策记录' }}
             columns={[
               {
@@ -1028,7 +1036,7 @@ export function OverviewPanel() {
                 dataIndex: 'created_at',
                 width: 148,
                 render: (v: string) => (
-                  <span className="text-[11px] tabular-nums">{formatLocalDateTime(v)}</span>
+                  <span className="text-xs tabular-nums">{formatLocalDateTime(v)}</span>
                 ),
               },
               {
@@ -1068,6 +1076,24 @@ export function OverviewPanel() {
                 width: 64,
                 render: (_, r) => riskActionLabel(r.risk?.action),
               },
+              {
+                title: (
+                  <Tooltip title="下单相关理由：风控拒绝/缩量/停机，或止损止盈等；不含指标来源标签">
+                    <span className="cursor-help underline decoration-dotted">理由</span>
+                  </Tooltip>
+                ),
+                key: 'reason',
+                width: 120,
+                ellipsis: true,
+                render: (_, r) => {
+                  const text = decisionReasonText(r)
+                  return (
+                    <span className="text-xs text-muted" title={text}>
+                      {text}
+                    </span>
+                  )
+                },
+              },
             ]}
           />
         </Section>
@@ -1099,7 +1125,7 @@ export function OverviewPanel() {
                         dataIndex: 'created_at',
                         width: 148,
                         render: (v: string) => (
-                          <span className="text-[11px] tabular-nums">
+                          <span className="text-xs tabular-nums">
                             {formatLocalDateTime(v)}
                           </span>
                         ),
@@ -1133,7 +1159,7 @@ export function OverviewPanel() {
                         dataIndex: 'trade_time',
                         width: 148,
                         render: (v: string) => (
-                          <span className="text-[11px] tabular-nums">
+                          <span className="text-xs tabular-nums">
                             {formatLocalDateTime(v)}
                           </span>
                         ),
@@ -1261,7 +1287,7 @@ export function OverviewPanel() {
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-[11px] text-faint">{label}</span>
+      <span className="text-xs text-faint">{label}</span>
       {children}
     </label>
   )

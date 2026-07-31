@@ -129,7 +129,7 @@ function Cell({
     <div className="rounded-lg border border-line/70 bg-surface/40 px-3 py-2.5">
       <div className="flex items-center justify-between gap-2">
         <Tooltip title={tip}>
-          <p className="cursor-help text-[11px] text-faint underline decoration-dotted">
+          <p className="cursor-help text-xs text-faint underline decoration-dotted">
             {title}
           </p>
         </Tooltip>
@@ -141,10 +141,10 @@ function Cell({
         </div>
       </div>
       <p className="mt-1.5 text-sm font-semibold tabular-nums text-ink">{formatAge(ageSec)}</p>
-      <p className="mt-0.5 truncate text-[11px] tabular-nums text-muted">
+      <p className="mt-0.5 truncate text-xs tabular-nums text-muted">
         {asOf ? formatLocalDateTime(asOf) : '尚无时间戳'}
       </p>
-      {detail ? <p className="mt-1 truncate text-[11px] text-faint">{detail}</p> : null}
+      {detail ? <p className="mt-1 truncate text-xs text-faint">{detail}</p> : null}
     </div>
   )
 }
@@ -247,9 +247,9 @@ export function HeartbeatBoard() {
           <Tag className="m-0" color={healthColor(overall)}>
             总览 {healthLabel(overall)}
           </Tag>
-          {loading ? <span className="text-[11px] text-faint">刷新中…</span> : null}
+          {loading ? <span className="text-xs text-faint">刷新中…</span> : null}
         </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
           <span>
             会话{' '}
             <span className="text-ink">
@@ -360,8 +360,8 @@ export function HeartbeatBoard() {
           }
         />
         <div className="rounded-lg border border-line/70 bg-surface/40 px-3 py-2.5">
-          <p className="text-[11px] text-faint">判定规则</p>
-          <ul className="mt-1.5 space-y-1 text-[11px] leading-relaxed text-muted">
+          <p className="text-xs text-faint">判定规则</p>
+          <ul className="mt-1.5 space-y-1 text-xs leading-relaxed text-muted">
             <li>
               <span className="text-good">正常</span>：心跳 / 报价 ≤ {OK_SEC}s（进程在线）
             </li>

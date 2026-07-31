@@ -541,6 +541,7 @@ export type SimOverseasBars = {
   }[]
   overlays?: SimChartOverlays
   bar_meta?: SimBarMeta[]
+  has_more?: boolean
   last_price?: number | null
   last_bar_open?: number | null
   lag_seconds?: number | null
@@ -682,14 +683,16 @@ export function startSimSession(instanceId: string) {
 
 export function fetchSimOverseasBars(
   symbolId: string,
-  opts?: { limit?: number; instanceId?: string },
+  opts?: { limit?: number; instanceId?: string; before?: number },
 ) {
-  const limit = typeof opts === 'number' ? opts : (opts?.limit ?? 100)
+  const limit = typeof opts === 'number' ? opts : (opts?.limit ?? 300)
   const instanceId = typeof opts === 'number' ? undefined : opts?.instanceId
+  const before = typeof opts === 'number' ? undefined : opts?.before
   const q = new URLSearchParams()
   q.set('symbol_id', symbolId)
   q.set('limit', String(limit))
   if (instanceId) q.set('instance_id', instanceId)
+  if (before != null) q.set('before', String(before))
   return request<SimOverseasBars>(`/api/sim/overseas/bars?${q}`)
 }
 

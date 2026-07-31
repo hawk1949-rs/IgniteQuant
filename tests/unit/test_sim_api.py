@@ -411,6 +411,26 @@ def test_sim_market_and_overseas_endpoints(client: TestClient) -> None:
     assert au_pair.status_code == 200
     assert au_pair.json()["supported"] is True
     assert au_pair.json()["pair"]["display_symbol"] == "XAUUSD"
+    assert "has_more" in au_pair.json()
+
+    paged = client.get(
+        "/api/sim/overseas/bars",
+        params={"symbol_id": "au", "limit": 20},
+    )
+    assert paged.status_code == 200
+    page_body = paged.json()
+    if page_body.get("bars"):
+        first_t = int(page_body["bars"][0]["time"])
+        older = client.get(
+            "/api/sim/overseas/bars",
+            params={"symbol_id": "au", "limit": 20, "before": first_t},
+        )
+        assert older.status_code == 200
+        older_body = older.json()
+        assert "has_more" in older_body
+        if older_body.get("bars"):
+            assert all(int(b["time"]) < first_t for b in older_body["bars"])
+            assert older_body["bars"][-1]["time"] < first_t
 
 
 def test_sim_live_klines_snapshot(client: TestClient, runtime_db: Path) -> None:

@@ -44,6 +44,14 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/*
+  Sim cockpit type scale (keep hierarchy, avoid 10/11/12 mix on same tier):
+  - Page title: text-xl / text-2xl
+  - Section title: text-[13px] semibold
+  - Body / primary value: text-sm (14px)
+  - Meta / caption / table / footer: text-xs (12px)
+*/
+
 /* Ant Design：提高可读性，少用半透明毛玻璃（对比度差） */
 .ant-card {
   border-color: rgba(180, 200, 230, 0.38) !important;
