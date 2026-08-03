@@ -1259,7 +1259,7 @@ def _enrich_fills_local(
     conn: sqlite3.Connection, instance_id: str, items: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Attach decision-time signal / stop / take onto fill rows via intent_id."""
-    from dashboard.fill_enrichment import (
+    from dashboard.fills_enrichment import (
         apply_entry_stop_fallback,
         enrichment_from_decision_payload,
     )
@@ -1268,25 +1268,35 @@ def _enrich_fills_local(
         return items
 
     intent_ids = [str(it["intent_id"]) for it in items if it.get("intent_id")]
-    intent_to_decision: dict[str, str] = {}
+    intent_meta: dict[str, dict[str, Any]] = {}
     decisions: dict[str, dict[str, Any]] = {}
     risks: dict[str, Any] = {}
     if intent_ids:
         placeholders = ",".join("?" for _ in intent_ids)
         intent_rows = conn.execute(
             f"""
-            SELECT intent_id, decision_id
+            SELECT intent_id, decision_id, current_position, desired_position,
+                   reason_codes_json
             FROM order_intent_event
             WHERE instance_id = ? AND intent_id IN ({placeholders})
             """,
             [instance_id, *intent_ids],
         ).fetchall()
-        intent_to_decision = {
-            str(r["intent_id"]): str(r["decision_id"])
-            for r in intent_rows
-            if r["decision_id"]
-        }
-        decision_ids = sorted(set(intent_to_decision.values()))
+        for r in intent_rows:
+            reasons = _loads(r["reason_codes_json"]) if "reason_codes_json" in r.keys() else []
+            intent_meta[str(r["intent_id"])] = {
+                "decision_id": str(r["decision_id"]) if r["decision_id"] else None,
+                "current_position": r["current_position"],
+                "desired_position": r["desired_position"],
+                "reason_codes": reasons if isinstance(reasons, list) else [],
+            }
+        decision_ids = sorted(
+            {
+                str(m["decision_id"])
+                for m in intent_meta.values()
+                if m.get("decision_id")
+            }
+        )
         if decision_ids:
             d_placeholders = ",".join("?" for _ in decision_ids)
             dec_rows = conn.execute(
@@ -1320,30 +1330,43 @@ def _enrich_fills_local(
     out: list[dict[str, Any]] = []
     for item in items:
         enriched = dict(item)
-        did = intent_to_decision.get(str(item.get("intent_id") or ""))
+        meta = intent_meta.get(str(item.get("intent_id") or ""), {})
+        did = meta.get("decision_id")
+        if meta:
+            enriched["current_position"] = meta.get("current_position")
+            enriched["desired_position"] = meta.get("desired_position")
         dec = decisions.get(did or "") if did else None
-        if dec:
-            enriched.update(
-                enrichment_from_decision_payload(
-                    decision_id=did,
-                    legacy_signal=dec.get("legacy_signal"),
-                    applied_action=dec.get("applied_action"),
-                    payload=dec.get("payload"),
-                    risk_payload=risks.get(did or ""),
-                )
+        fill_payload = (
+            item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        )
+        enriched.update(
+            enrichment_from_decision_payload(
+                decision_id=did,
+                legacy_signal=(dec or {}).get("legacy_signal"),
+                applied_action=(dec or {}).get("applied_action"),
+                payload=(dec or {}).get("payload") or {},
+                risk_payload=risks.get(did or "") if did else None,
+                fill_price=item.get("price"),
+                fill_payload=fill_payload,
+                desired_position=meta.get("desired_position"),
+                current_position=meta.get("current_position"),
+                intent_reason_codes=meta.get("reason_codes"),
             )
-        fill_payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        )
         if fill_payload.get("source"):
             enriched["fill_source"] = fill_payload.get("source")
         out.append(enriched)
 
-    # Entry levels for fallback onto exit / resync fills with cleared stops.
+    # Only real opens with armed stops — never HOLD (stale overseas levels).
     entry_rows = conn.execute(
         """
-        SELECT decision_id, applied_action, payload_json, created_at
+        SELECT decision_id, applied_action, payload_json, created_at,
+               target_before, target_after
         FROM decision_event
         WHERE instance_id = ?
-          AND applied_action IN ('TARGET', 'HOLD')
+          AND applied_action = 'TARGET'
+          AND target_after IS NOT NULL
+          AND target_after != 0
         ORDER BY seq ASC
         """,
         (instance_id,),
@@ -1369,6 +1392,7 @@ def _enrich_fills_local(
             }
         )
     return apply_entry_stop_fallback(out, entry_levels)
+
 
 def _position_history_from_conn(
     conn: sqlite3.Connection, instance_id: str, *, limit: int = 100

@@ -50,6 +50,7 @@ class TargetPositionExecutor:
     _task: Any = None
     _seen_keys: set[str] = field(default_factory=set)
     _pinned_last: float | None = None
+    _urgency: str = "NORMAL"
 
     def pin_last(self, last_price: float) -> None:
         """Pin the next order to ``last ± tick`` (call on each decision bar)."""
@@ -80,6 +81,7 @@ class TargetPositionExecutor:
                 ask=ask,
                 bid=bid,
                 last=last,
+                urgency=self._urgency,
             )
 
         return _price
@@ -121,6 +123,8 @@ class TargetPositionExecutor:
 
         if decision_price is not None:
             self.pin_last(decision_price)
+
+        self._urgency = str(urgency or "NORMAL").upper()
 
         key = idempotency_key or f"{self.symbol}:{decision_id}:{desired}"
         if key in self._seen_keys and self.active_intent and self.active_intent.desired_position == desired:

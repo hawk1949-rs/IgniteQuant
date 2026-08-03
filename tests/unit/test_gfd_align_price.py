@@ -44,6 +44,28 @@ def test_align_handles_nan_book() -> None:
     )
 
 
+def test_align_high_urgency_chases_through_book() -> None:
+    # HIGH BUY should sit above ask by chase ticks.
+    assert align_limit_price(
+        "BUY",
+        pinned_last=800.0,
+        tick=0.02,
+        ask=800.10,
+        bid=800.08,
+        last=800.0,
+        urgency="HIGH",
+    ) == 800.16
+    assert align_limit_price(
+        "SELL",
+        pinned_last=800.0,
+        tick=0.02,
+        ask=799.96,
+        bid=799.90,
+        last=800.0,
+        urgency="HIGH",
+    ) == 799.84
+
+
 def test_is_gfd_day_end_cancel() -> None:
     exc = Exception(
         "遇到错单: SHFE.au2504 BUY CLOSETODAY 1手 685.160000 "

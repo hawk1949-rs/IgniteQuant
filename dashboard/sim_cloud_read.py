@@ -527,6 +527,9 @@ def session_fills_cloud(
                         f.occurred_at,
                         f.created_at,
                         i.decision_id,
+                        i.current_position,
+                        i.desired_position,
+                        i.reason_codes_json,
                         d.legacy_signal,
                         d.applied_action,
                         d.payload_json AS decision_payload_json
@@ -575,28 +578,42 @@ def session_fills_cloud(
                 "trade_time": _iso(r.get("trade_time")),
                 "payload": _loads(r.get("payload_json")),
                 "created_at": _iso(r.get("occurred_at") or r.get("created_at")),
+                "current_position": r.get("current_position"),
+                "desired_position": r.get("desired_position"),
             }
-            if r.get("decision_id") is not None or r.get("legacy_signal") is not None:
-                enriched = enrichment_from_decision_payload(
-                    decision_id=r.get("decision_id"),
-                    legacy_signal=r.get("legacy_signal"),
-                    applied_action=r.get("applied_action"),
-                    payload=_loads(r.get("decision_payload_json")),
-                )
-                item.update(enriched)
-                if (
-                    str(r.get("applied_action") or "") in {"TARGET", "HOLD"}
-                    and enriched.get("stop_price") is not None
-                ):
-                    entry_levels.append(
-                        {
-                            "as_of": item.get("trade_time") or item.get("created_at"),
-                            "stop_price": enriched.get("stop_price"),
-                            "take_price": enriched.get("take_price"),
-                            "entry_price": enriched.get("entry_price"),
-                        }
-                    )
             payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            reasons = _loads(r.get("reason_codes_json"))
+            if not isinstance(reasons, list):
+                reasons = []
+            enriched = enrichment_from_decision_payload(
+                decision_id=r.get("decision_id"),
+                legacy_signal=r.get("legacy_signal"),
+                applied_action=r.get("applied_action"),
+                payload=_loads(r.get("decision_payload_json")),
+                fill_price=item.get("price"),
+                fill_payload=payload,
+                desired_position=r.get("desired_position"),
+                current_position=r.get("current_position"),
+                intent_reason_codes=reasons,
+            )
+            item.update(enriched)
+            # Collect open TARGET levels only (never HOLD).
+            if (
+                str(r.get("applied_action") or "") == "TARGET"
+                and enriched.get("stop_price") is not None
+                and not (
+                    enriched.get("desired_position") == 0
+                    or item.get("desired_position") == 0
+                )
+            ):
+                entry_levels.append(
+                    {
+                        "as_of": item.get("trade_time") or item.get("created_at"),
+                        "stop_price": enriched.get("stop_price"),
+                        "take_price": enriched.get("take_price"),
+                        "entry_price": enriched.get("entry_price"),
+                    }
+                )
             if payload.get("source"):
                 item["fill_source"] = payload.get("source")
             items.append(item)

@@ -46,6 +46,45 @@ def _decision_close_price(
         return None
 
 
+def _latest_avg_entry_price(
+    conn: sqlite3.Connection, instance_id: str, *, desired_net: int
+) -> float | None:
+    """Prefer broker avg entry when backfilling fills (avoid overseas decision close)."""
+    row = conn.execute(
+        """
+        SELECT avg_entry_price, net_position FROM position_snapshot_event
+        WHERE instance_id = ? AND net_position = ?
+        ORDER BY seq DESC LIMIT 1
+        """,
+        (instance_id, int(desired_net)),
+    ).fetchone()
+    if row is None or row["avg_entry_price"] is None:
+        return None
+    try:
+        price = float(row["avg_entry_price"])
+        return price if price > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _fill_price_for_repair(
+    conn: sqlite3.Connection,
+    instance_id: str,
+    *,
+    decision_id: str,
+    desired_net: int,
+) -> float | None:
+    avg = _latest_avg_entry_price(conn, instance_id, desired_net=desired_net)
+    close = _decision_close_price(conn, instance_id, decision_id)
+    if avg is not None and close is not None and close > 0:
+        # Domestic AU ~800–1000 vs overseas ~4000: prefer avg when scales diverge.
+        if abs(close / avg - 1.0) > 0.2:
+            return avg
+    if avg is not None:
+        return avg
+    return close
+
+
 def repair_missing_fills(db_path: Path | str, instance_id: str) -> int:
     """Persist fills for intents that clearly reached desired net (async TargetPosTask)."""
     path = Path(db_path)
@@ -116,7 +155,12 @@ def repair_missing_fills(db_path: Path | str, instance_id: str) -> int:
             if not reached:
                 continue
 
-            price = _decision_close_price(conn, instance_id, str(intent["decision_id"] or ""))
+            price = _fill_price_for_repair(
+                conn,
+                instance_id,
+                decision_id=str(intent["decision_id"] or ""),
+                desired_net=desired,
+            )
             if price is None:
                 continue
             qty = abs(desired - cur)

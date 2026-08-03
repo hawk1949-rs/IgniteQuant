@@ -1218,19 +1218,29 @@ export function OverviewPanel() {
                           if (v === 'TAKE_PROFIT') return <Tag color="success">止盈</Tag>
                           if (v === 'TARGET') return <Tag color="processing">调仓</Tag>
                           if (v === 'BOOT_FLATTEN') return <Tag>启动补平</Tag>
+                          if (v === 'FLAT_EXIT' || v === 'EXIT' || v === 'FLAT')
+                            return <Tag color="warning">平仓</Tag>
                           if (v === 'HOLD' || v === 'COOLDOWN_HOLD')
                             return <Tag>{actionLabel(v)}</Tag>
                           return actionLabel(v)
                         },
                       },
                       {
-                        title: '入场目标',
+                        title: (
+                          <Tooltip title="外盘信号空间的入场/止损/止盈；成交价列为内盘真实成交">
+                            入场(信号)
+                          </Tooltip>
+                        ),
                         dataIndex: 'entry_price',
-                        width: 72,
+                        width: 88,
                         render: (v: number | null | undefined, r) => {
                           if (
                             r.applied_action === 'STOP_LOSS' ||
-                            r.applied_action === 'TAKE_PROFIT'
+                            r.applied_action === 'TAKE_PROFIT' ||
+                            r.applied_action === 'BOOT_FLATTEN' ||
+                            r.applied_action === 'FLAT_EXIT' ||
+                            r.applied_action === 'EXIT' ||
+                            r.applied_action === 'FLAT'
                           ) {
                             return '—'
                           }
@@ -1238,13 +1248,19 @@ export function OverviewPanel() {
                         },
                       },
                       {
-                        title: '止损',
+                        title: (
+                          <Tooltip title="外盘信号空间止损价">止损(信号)</Tooltip>
+                        ),
                         dataIndex: 'stop_price',
-                        width: 72,
+                        width: 88,
                         render: (v: number | null | undefined, r) => {
                           if (
                             r.applied_action === 'STOP_LOSS' ||
-                            r.applied_action === 'TAKE_PROFIT'
+                            r.applied_action === 'TAKE_PROFIT' ||
+                            r.applied_action === 'BOOT_FLATTEN' ||
+                            r.applied_action === 'FLAT_EXIT' ||
+                            r.applied_action === 'EXIT' ||
+                            r.applied_action === 'FLAT'
                           ) {
                             return '—'
                           }
@@ -1252,13 +1268,19 @@ export function OverviewPanel() {
                         },
                       },
                       {
-                        title: '止盈',
+                        title: (
+                          <Tooltip title="外盘信号空间止盈价">止盈(信号)</Tooltip>
+                        ),
                         dataIndex: 'take_price',
-                        width: 72,
+                        width: 88,
                         render: (v: number | null | undefined, r) => {
                           if (
                             r.applied_action === 'STOP_LOSS' ||
-                            r.applied_action === 'TAKE_PROFIT'
+                            r.applied_action === 'TAKE_PROFIT' ||
+                            r.applied_action === 'BOOT_FLATTEN' ||
+                            r.applied_action === 'FLAT_EXIT' ||
+                            r.applied_action === 'EXIT' ||
+                            r.applied_action === 'FLAT'
                           ) {
                             return '—'
                           }

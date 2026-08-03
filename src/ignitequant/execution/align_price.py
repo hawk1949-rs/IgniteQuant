@@ -21,6 +21,8 @@ def align_limit_price(
     ask: float | None,
     bid: float | None,
     last: float | None,
+    urgency: str = "NORMAL",
+    chase_ticks: int = 0,
 ) -> float:
     """Limit that prefers decision open±tick but always crosses the book when possible.
 
@@ -28,19 +30,26 @@ def align_limit_price(
     open±tick that never updates leaves GFD orders alive until settle, and
     TargetPosTask treats the day-end cancel as a fatal 错单. Prefer the pin when it
     is already marketable; otherwise chase ask/bid so the order fills in-session.
+
+    ``urgency=HIGH`` (exits / resync) chases several ticks through the book so the
+    domestic leg fills quickly after an overseas signal trigger.
     """
     ref = pinned_last if pinned_last is not None else last
     if ref is None or not math.isfinite(float(ref)):
         ref = 0.0
     ref = float(ref)
     tick = float(tick)
+    urg = str(urgency or "NORMAL").upper()
+    extra = int(chase_ticks)
+    if urg == "HIGH" and extra <= 0:
+        extra = 3
     d = direction.upper()
     if d == "BUY":
         pinned = ref + tick
         if ask is not None and math.isfinite(float(ask)):
-            return max(pinned, float(ask))
-        return pinned
+            return max(pinned, float(ask) + extra * tick)
+        return pinned + extra * tick
     pinned = ref - tick
     if bid is not None and math.isfinite(float(bid)):
-        return min(pinned, float(bid))
-    return pinned
+        return min(pinned, float(bid) - extra * tick)
+    return pinned - extra * tick

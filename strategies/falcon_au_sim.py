@@ -298,14 +298,51 @@ def _broker_net(position) -> int:
     return pos
 
 
-def refresh_broker_position(api: TqApi, trade_symbol: str, position, account):
-    """Re-fetch position when margin says we hold but ``pos`` still reads flat."""
+def _broker_avg_entry_price(position, net: int) -> float | None:
+    """Average open price for the broker net side (domestic units)."""
+    if net == 0 or position is None:
+        return None
+    raw = (
+        getattr(position, "open_price_long", None)
+        if net > 0
+        else getattr(position, "open_price_short", None)
+    )
+    try:
+        price = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return price if price > 0 else None
+
+
+# Occupied margin while net still reads flat → re-fetch. AU 1 lot is often ~40–50k;
+# the previous 50_000 floor skipped real shorts (e.g. margin≈44596).
+MARGIN_FLAT_REFRESH_HINT = 3_000.0
+
+
+def refresh_broker_position(
+    api: TqApi,
+    trade_symbol: str,
+    position,
+    account,
+    *,
+    pending_desired: int | None = None,
+):
+    """Re-fetch position when margin/pending says we hold but ``pos`` still reads flat."""
     net = _broker_net(position)
     try:
         margin = float(getattr(account, "margin", 0) or 0)
     except (TypeError, ValueError):
         margin = 0.0
-    if net != 0 or margin < 50_000:
+    pending_open = False
+    if pending_desired is not None:
+        try:
+            pending_open = int(pending_desired) != 0
+        except (TypeError, ValueError):
+            pending_open = False
+    should_refresh = net == 0 and (
+        margin >= MARGIN_FLAT_REFRESH_HINT or pending_open
+    )
+    if not should_refresh:
         return position, net
     try:
         position = api.get_position(trade_symbol)
@@ -315,10 +352,78 @@ def refresh_broker_position(api: TqApi, trade_symbol: str, position, account):
     net2 = _broker_net(position)
     if net2 != 0:
         print(
-            f"[仓位] 保证金={margin:.0f} 但原净仓=0，重取后 net={net2}",
+            f"[仓位] 保证金={margin:.0f} pending={pending_desired} "
+            f"但原净仓=0，重取后 net={net2}",
             flush=True,
         )
     return position, net2
+
+
+def _fallback_signal_atr(
+    *,
+    fill_price: float,
+    preferred: float | None = None,
+    domestic_mark: float | None = None,
+    overseas_close: float | None = None,
+) -> float:
+    """ATR for orphan re-arm when no recent signal ATR is available."""
+    if preferred is not None and preferred > 0:
+        return float(preferred)
+    domestic_atr = max(0.8, float(fill_price) * 0.0012)
+    if (
+        overseas_close is not None
+        and overseas_close > 0
+        and domestic_mark is not None
+        and domestic_mark > 0
+        and abs(float(overseas_close) / float(domestic_mark) - 1.0) > 0.05
+    ):
+        return domestic_atr * (float(overseas_close) / float(domestic_mark))
+    return domestic_atr
+
+
+def _maybe_rearm_orphan_stops(
+    pipeline: FalconDecisionPipeline,
+    *,
+    net: int,
+    fill_price: float,
+    signal_atr: float,
+    signal: int,
+    domestic_mark: float | None,
+    overseas_close: float | None,
+    sl_atr_mult: float = 1.3,
+    tp_atr_mult: float = 2.3,
+) -> dict[str, float] | None:
+    """Arm SL/TP when broker already holds but runtime lost entry levels."""
+    if net == 0 or pipeline.risk.state.stop_price is not None:
+        return None
+    if fill_price <= 0:
+        return None
+    atr = _fallback_signal_atr(
+        fill_price=fill_price,
+        preferred=signal_atr,
+        domestic_mark=domestic_mark,
+        overseas_close=overseas_close,
+    )
+    entry_signal = int(signal) if signal else (1 if net > 0 else -1)
+    levels = _arm_entry_after_fill(
+        pipeline,
+        side_lots=net,
+        fill_price=float(fill_price),
+        signal_atr=atr,
+        signal=entry_signal,
+        domestic_mark=domestic_mark,
+        overseas_close=overseas_close,
+        sl_atr_mult=sl_atr_mult,
+        tp_atr_mult=tp_atr_mult,
+    )
+    print(
+        f"  孤儿仓补锁 entry={pipeline.risk.state.entry_price:.2f} "
+        f"sl={pipeline.risk.state.stop_price:.2f} "
+        f"tp={pipeline.risk.state.take_price:.2f} "
+        f"(display_sl={levels['display_stop_price']:.2f} net={net})",
+        flush=True,
+    )
+    return levels
 
 
 def _tq_position_snapshot(
@@ -672,6 +777,7 @@ def main() -> None:
     last_fill_signal = 0
     last_signal_atr = 1.0
     last_overseas_close: float | None = None
+    orphan_rearmed_on_boot = False
     executor: TargetPositionExecutor | None = None
     position = None
     account = api.get_account()
@@ -714,6 +820,8 @@ def main() -> None:
                 persist=persist,
             )
 
+            payload: dict = {}
+            pending_boot_i: int | None = None
             if persist is not None:
                 recovery = persist.recover(
                     BrokerFacts(
@@ -732,6 +840,21 @@ def main() -> None:
                     stop_price=payload.get("stop_price"),
                     take_price=payload.get("take_price"),
                     entry_signal=payload.get("entry_signal"),
+                )
+                # Stale flat pos with occupied margin / pending target → re-fetch.
+                pending_boot = payload.get("pending_desired")
+                try:
+                    pending_boot_i = (
+                        int(pending_boot) if pending_boot is not None else None
+                    )
+                except (TypeError, ValueError):
+                    pending_boot_i = None
+                position, _ = refresh_broker_position(
+                    api,
+                    trade_symbol,
+                    position,
+                    account,
+                    pending_desired=pending_boot_i,
                 )
                 # Never keep armed SL/TP when broker is flat — avoids ghost STOP.
                 if _broker_net(position) == 0 and (
@@ -901,6 +1024,7 @@ def main() -> None:
 
             # Prefer overseas decision window on boot when pricing_basis=overseas.
             boot_klines = klines
+            boot_overseas_close: float | None = None
             if overseas_mode:
                 live_bars, live_src = fetch_for_signal_source(signal_source, limit=400)
                 if live_bars:
@@ -912,142 +1036,233 @@ def main() -> None:
                     )
                     decision_klines = boot_klines
                     last_seen_overseas_ts = int(live_bars[-1]["time"])
+                    try:
+                        boot_overseas_close = float(live_bars[-1]["close"])
+                        last_overseas_close = boot_overseas_close
+                    except (TypeError, ValueError, KeyError):
+                        boot_overseas_close = None
                     print(
                         f"启动外盘窗口 | source={live_src} bars={len(live_bars)} "
                         f"symbol={signal_source.decision_symbol}",
                         flush=True,
                     )
 
-            result0 = pipeline.on_bar_close(boot_klines, trade=True)
-            annotate_klines(boot_klines, result0)
-            if persist is not None:
-                persist.record_decision(result0)
-            boot_session = shfe_precious_session_open()
-            print(
-                f"启动评估 | regime={result0.factors.regime.value} "
-                f"signal={result0.signal.legacy_signal} ({score_parts(result0)}) "
-                f"desired={result0.sizing_target} atr={atr_of(result0):.2f} "
-                f"close={close_of(result0):.2f} session={boot_session['label']}",
-                flush=True,
+            boot_net = _broker_net(position)
+            need_orphan_rearm = (
+                persist is not None
+                and boot_net != 0
+                and pipeline.risk.state.stop_price is None
             )
-            runtime0 = persist.runtime if persist is not None else healthy_runtime()
-            # Boot path must execute flatten as well as opens. Previously only
-            # TARGET(open) called set_target, so STOP_LOSS decisions were logged
-            # without any order_intent — invisible in「委托与成交」.
-            boot_actions = {"TARGET", "STOP_LOSS", "TAKE_PROFIT"}
-            if result0.applied_action in boot_actions:
-                net0 = _broker_net(position)
-                pre0 = apply_pretrade(
-                    result0,
-                    net_position=net0,
-                    last_price=float(getattr(main_quote, "last_price", 0) or 0)
-                    or close_of(result0),
-                    risk_engine=risk_engine,
-                    runtime=runtime0,
-                    symbol=trade_symbol,
-                    trade_status=str(boot_session["trade_status"]),
+            if need_orphan_rearm:
+                # Observe-only: get signal ATR without risk.check clearing a fresh arm.
+                tip_obs = pipeline.on_bar_close(boot_klines, trade=False)
+                tip_atr = float(atr_of(tip_obs) or last_signal_atr)
+                tip_close = float(close_of(tip_obs) or 0)
+                if overseas_mode and tip_close > 0:
+                    boot_overseas_close = tip_close
+                    last_overseas_close = tip_close
+                last_signal_atr = tip_atr
+                boot_px = float(getattr(main_quote, "last_price", 0) or 0)
+                fill_px = _broker_avg_entry_price(position, boot_net) or boot_px
+                boot_payload = payload if isinstance(payload, dict) else {}
+                display_boot = _maybe_rearm_orphan_stops(
+                    pipeline,
+                    net=boot_net,
+                    fill_price=float(fill_px or 0),
+                    signal_atr=float(tip_atr),
+                    signal=int(boot_payload.get("entry_signal") or 0),
+                    domestic_mark=boot_px if boot_px > 0 else None,
+                    overseas_close=boot_overseas_close if overseas_mode else None,
+                    sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                    tp_atr_mult=float(cfg.risk.tp_atr_mult),
                 )
-                if persist is not None:
-                    persist.record_risk(result0.bar_id, pre0)
-                if pre0.action in {RiskAction.REJECT, RiskAction.HALT}:
-                    print(
-                        f"启动事前风控{pre0.action.value} | hits={pre0.rule_hits}",
-                        flush=True,
-                    )
+                if display_boot is not None:
+                    orphan_rearmed_on_boot = True
                     _persist_state(
                         persist,
                         pipeline,
                         symbol=trade_symbol,
-                        net=net0,
-                        pending=(
-                            0
-                            if result0.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}
-                            and net0 != 0
-                            else None
-                        ),
+                        net=boot_net,
+                        pending=pending_boot_i,
+                        last_bar_id=last_saved_bar_id,
+                        config_hash=cfg.config_hash(),
+                        last_price=boot_px if boot_px > 0 else None,
+                        display_levels=display_boot,
+                    )
+                result0 = tip_obs
+                annotate_klines(boot_klines, result0)
+                if persist is not None:
+                    persist.record_decision(result0)
+                boot_session = shfe_precious_session_open()
+                print(
+                    f"启动评估(补锁后观察) | regime={result0.factors.regime.value} "
+                    f"signal={result0.signal.legacy_signal} ({score_parts(result0)}) "
+                    f"desired={result0.sizing_target} atr={atr_of(result0):.2f} "
+                    f"close={close_of(result0):.2f} session={boot_session['label']} "
+                    f"| 跳过立即止损/止盈，等下一根完成K",
+                    flush=True,
+                )
+                if persist is not None:
+                    _persist_state(
+                        persist,
+                        pipeline,
+                        symbol=trade_symbol,
+                        net=boot_net,
+                        pending=pending_boot_i,
                         last_bar_id=result0.bar_id,
                         config_hash=cfg.config_hash(),
-                        last_price=_domestic_mark(float(getattr(main_quote, "last_price", 0) or 0)),
+                        last_price=_domestic_mark(
+                            float(getattr(main_quote, "last_price", 0) or 0)
+                        ),
                     )
                     last_saved_bar_id = result0.bar_id
-                else:
-                    desired0 = (
-                        0
-                        if result0.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}
-                        else int(pre0.approved_position)
+            else:
+                result0 = pipeline.on_bar_close(boot_klines, trade=True)
+                annotate_klines(boot_klines, result0)
+                if persist is not None:
+                    persist.record_decision(result0)
+                boot_session = shfe_precious_session_open()
+                print(
+                    f"启动评估 | regime={result0.factors.regime.value} "
+                    f"signal={result0.signal.legacy_signal} ({score_parts(result0)}) "
+                    f"desired={result0.sizing_target} atr={atr_of(result0):.2f} "
+                    f"close={close_of(result0):.2f} session={boot_session['label']}",
+                    flush=True,
+                )
+                runtime0 = persist.runtime if persist is not None else healthy_runtime()
+                # Boot path must execute flatten as well as opens. Previously only
+                # TARGET(open) called set_target, so STOP_LOSS decisions were logged
+                # without any order_intent — invisible in「委托与成交」.
+                boot_actions = {"TARGET", "STOP_LOSS", "TAKE_PROFIT"}
+                if result0.applied_action in boot_actions:
+                    net0 = _broker_net(position)
+                    pre0 = apply_pretrade(
+                        result0,
+                        net_position=net0,
+                        last_price=float(getattr(main_quote, "last_price", 0) or 0)
+                        or close_of(result0),
+                        risk_engine=risk_engine,
+                        runtime=runtime0,
+                        symbol=trade_symbol,
+                        trade_status=str(boot_session["trade_status"]),
                     )
-                    if desired0 != net0:
-                        key0 = f"{result0.bar_id}:{desired0}:boot:{result0.applied_action}"
-                        intent0 = executor.set_target(
-                            desired0,
-                            decision_id=result0.bar_id,
-                            current_net=net0,
-                            urgency=(
-                                "HIGH"
-                                if result0.applied_action != "TARGET"
-                                else "NORMAL"
-                            ),
-                            reason_codes=pre0.rule_hits,
-                            idempotency_key=key0,
+                    if persist is not None:
+                        persist.record_risk(result0.bar_id, pre0)
+                    if pre0.action in {RiskAction.REJECT, RiskAction.HALT}:
+                        print(
+                            f"启动事前风控{pre0.action.value} | hits={pre0.rule_hits}",
+                            flush=True,
                         )
-                        if intent0 is None:
-                            print(
-                                f"启动意图被抑制 | action={result0.applied_action} "
-                                f"{net0}->{desired0} key={key0}",
-                                flush=True,
-                            )
-                        elif persist is not None:
-                            persist.record_intent(intent0)
-                            print(
-                                f"启动{result0.applied_action} 已登记意图 "
-                                f"{net0}->{desired0} | {trade_symbol}",
-                                flush=True,
-                            )
-                        last_fill_atr = atr_of(result0)
-                        last_fill_signal = int(result0.signal.legacy_signal)
-                        last_signal_atr = float(last_fill_atr)
-                        if intent0 is not None:
-                            _wait_fill_briefly(
-                                api,
-                                executor=executor,
-                                position=position,
-                                persist=persist,
-                                last_price=_domestic_mark(float(getattr(main_quote, "last_price", 0) or 0)),
-                                atr=last_fill_atr,
-                                signal=last_fill_signal,
-                                pipeline=pipeline,
-                                trade_symbol=trade_symbol,
-                                config_hash=cfg.config_hash(),
-                                last_bar_id=result0.bar_id,
-                                domestic_mark=_domestic_mark(float(getattr(main_quote, "last_price", 0) or 0)),
-                                signal_atr=last_signal_atr,
-                                sl_atr_mult=float(cfg.risk.sl_atr_mult),
-                                tp_atr_mult=float(cfg.risk.tp_atr_mult),
-                            )
-                        confirmed0 = _broker_net(position)
-                        _persist_state(
-                            persist,
-                            pipeline,
-                            symbol=trade_symbol,
-                            net=confirmed0,
-                            pending=None if confirmed0 == desired0 else desired0,
-                            last_bar_id=result0.bar_id,
-                            config_hash=cfg.config_hash(),
-                            last_price=_domestic_mark(float(getattr(main_quote, "last_price", 0) or 0)),
-                        )
-                        last_saved_bar_id = result0.bar_id
-                    else:
                         _persist_state(
                             persist,
                             pipeline,
                             symbol=trade_symbol,
                             net=net0,
-                            pending=None,
+                            pending=(
+                                0
+                                if result0.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}
+                                and net0 != 0
+                                else None
+                            ),
                             last_bar_id=result0.bar_id,
                             config_hash=cfg.config_hash(),
-                            last_price=_domestic_mark(float(getattr(main_quote, "last_price", 0) or 0)),
+                            last_price=_domestic_mark(
+                                float(getattr(main_quote, "last_price", 0) or 0)
+                            ),
                         )
                         last_saved_bar_id = result0.bar_id
+                    else:
+                        desired0 = (
+                            0
+                            if result0.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}
+                            else int(pre0.approved_position)
+                        )
+                        if desired0 != net0:
+                            key0 = (
+                                f"{result0.bar_id}:{desired0}:boot:"
+                                f"{result0.applied_action}"
+                            )
+                            intent0 = executor.set_target(
+                                desired0,
+                                decision_id=result0.bar_id,
+                                current_net=net0,
+                                urgency=(
+                                    "HIGH"
+                                    if result0.applied_action != "TARGET"
+                                    else "NORMAL"
+                                ),
+                                reason_codes=pre0.rule_hits,
+                                idempotency_key=key0,
+                                decision_price=_domestic_mark(
+                                    float(getattr(main_quote, "last_price", 0) or 0)
+                                ),
+                            )
+                            if intent0 is None:
+                                print(
+                                    f"启动意图被抑制 | action={result0.applied_action} "
+                                    f"{net0}->{desired0} key={key0}",
+                                    flush=True,
+                                )
+                            elif persist is not None:
+                                persist.record_intent(intent0)
+                                print(
+                                    f"启动{result0.applied_action} 已登记意图 "
+                                    f"{net0}->{desired0} | {trade_symbol}",
+                                    flush=True,
+                                )
+                            last_fill_atr = atr_of(result0)
+                            last_fill_signal = int(result0.signal.legacy_signal)
+                            last_signal_atr = float(last_fill_atr)
+                            if intent0 is not None:
+                                _wait_fill_briefly(
+                                    api,
+                                    executor=executor,
+                                    position=position,
+                                    persist=persist,
+                                    last_price=_domestic_mark(
+                                        float(getattr(main_quote, "last_price", 0) or 0)
+                                    ),
+                                    atr=last_fill_atr,
+                                    signal=last_fill_signal,
+                                    pipeline=pipeline,
+                                    trade_symbol=trade_symbol,
+                                    config_hash=cfg.config_hash(),
+                                    last_bar_id=result0.bar_id,
+                                    domestic_mark=_domestic_mark(
+                                        float(getattr(main_quote, "last_price", 0) or 0)
+                                    ),
+                                    signal_atr=last_signal_atr,
+                                    sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                                    tp_atr_mult=float(cfg.risk.tp_atr_mult),
+                                )
+                            confirmed0 = _broker_net(position)
+                            _persist_state(
+                                persist,
+                                pipeline,
+                                symbol=trade_symbol,
+                                net=confirmed0,
+                                pending=None if confirmed0 == desired0 else desired0,
+                                last_bar_id=result0.bar_id,
+                                config_hash=cfg.config_hash(),
+                                last_price=_domestic_mark(
+                                    float(getattr(main_quote, "last_price", 0) or 0)
+                                ),
+                            )
+                            last_saved_bar_id = result0.bar_id
+                        else:
+                            _persist_state(
+                                persist,
+                                pipeline,
+                                symbol=trade_symbol,
+                                net=net0,
+                                pending=None,
+                                last_bar_id=result0.bar_id,
+                                config_hash=cfg.config_hash(),
+                                last_price=_domestic_mark(
+                                    float(getattr(main_quote, "last_price", 0) or 0)
+                                ),
+                            )
+                            last_saved_bar_id = result0.bar_id
 
         consecutive_errors = 0
         while True:
@@ -1076,24 +1291,61 @@ def main() -> None:
                 q_px = float(main_quote.last_price)
             except (TypeError, ValueError):
                 q_px = 0.0
-            if q_px > 0:
-                _try_confirm_fill(
-                    executor=executor,
-                    position=position,
-                    persist=persist,
-                    last_price=q_px,
-                    atr=last_fill_atr,
-                    signal=last_fill_signal,
-                    pipeline=pipeline,
-                    trade_symbol=trade_symbol or "",
-                    config_hash=cfg.config_hash(),
-                    last_bar_id=last_saved_bar_id,
-                    domestic_mark=q_px,
-                    overseas_close=last_overseas_close,
-                    signal_atr=last_signal_atr,
-                    sl_atr_mult=float(cfg.risk.sl_atr_mult),
-                    tp_atr_mult=float(cfg.risk.tp_atr_mult),
+            if trade_symbol and position is not None:
+                pending_live = None
+                if executor is not None and executor.active_intent is not None:
+                    pending_live = int(executor.active_intent.desired_position)
+                position, net_live = refresh_broker_position(
+                    api,
+                    trade_symbol,
+                    position,
+                    account,
+                    pending_desired=pending_live,
                 )
+                if q_px > 0:
+                    _try_confirm_fill(
+                        executor=executor,
+                        position=position,
+                        persist=persist,
+                        last_price=q_px,
+                        atr=last_fill_atr,
+                        signal=last_fill_signal,
+                        pipeline=pipeline,
+                        trade_symbol=trade_symbol,
+                        config_hash=cfg.config_hash(),
+                        last_bar_id=last_saved_bar_id,
+                        domestic_mark=q_px,
+                        overseas_close=last_overseas_close,
+                        signal_atr=last_signal_atr,
+                        sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                        tp_atr_mult=float(cfg.risk.tp_atr_mult),
+                    )
+                    net_live = _broker_net(position)
+                if net_live != 0 and pipeline.risk.state.stop_price is None:
+                    fill_px = _broker_avg_entry_price(position, net_live) or q_px
+                    display_live = _maybe_rearm_orphan_stops(
+                        pipeline,
+                        net=net_live,
+                        fill_price=float(fill_px or 0),
+                        signal_atr=float(last_signal_atr),
+                        signal=int(last_fill_signal or 0),
+                        domestic_mark=q_px if q_px > 0 else None,
+                        overseas_close=last_overseas_close,
+                        sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                        tp_atr_mult=float(cfg.risk.tp_atr_mult),
+                    )
+                    if display_live is not None and persist is not None:
+                        _persist_state(
+                            persist,
+                            pipeline,
+                            symbol=trade_symbol,
+                            net=net_live,
+                            pending=pending_live,
+                            last_bar_id=last_saved_bar_id,
+                            config_hash=cfg.config_hash(),
+                            last_price=q_px if q_px > 0 else None,
+                            display_levels=display_live,
+                        )
 
             try:
                 cur_kline_ns = int(klines.iloc[-1]["datetime"])
@@ -1141,19 +1393,74 @@ def main() -> None:
             if not new_bar:
                 if now - last_heartbeat >= HEARTBEAT_SECONDS:
                     last_heartbeat = now
-                    position, net = refresh_broker_position(
-                        api, trade_symbol, position, account
-                    )
                     pending = None
                     if executor is not None and executor.active_intent is not None:
                         pending = int(executor.active_intent.desired_position)
+                    position, net = refresh_broker_position(
+                        api,
+                        trade_symbol,
+                        position,
+                        account,
+                        pending_desired=pending,
+                    )
+                    if (
+                        q_px > 0
+                        and executor is not None
+                        and executor.active_intent is not None
+                    ):
+                        _try_confirm_fill(
+                            executor=executor,
+                            position=position,
+                            persist=persist,
+                            last_price=q_px,
+                            atr=last_fill_atr,
+                            signal=last_fill_signal,
+                            pipeline=pipeline,
+                            trade_symbol=trade_symbol,
+                            config_hash=cfg.config_hash(),
+                            last_bar_id=last_saved_bar_id,
+                            domestic_mark=q_px,
+                            overseas_close=last_overseas_close,
+                            signal_atr=last_signal_atr,
+                            sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                            tp_atr_mult=float(cfg.risk.tp_atr_mult),
+                        )
+                        net = _broker_net(position)
+                        if executor.active_intent is None:
+                            pending = None
+                    if net != 0 and pipeline.risk.state.stop_price is None:
+                        fill_px = _broker_avg_entry_price(position, net) or q_px
+                        display_hb = _maybe_rearm_orphan_stops(
+                            pipeline,
+                            net=net,
+                            fill_price=float(fill_px or 0),
+                            signal_atr=float(last_signal_atr),
+                            signal=int(last_fill_signal or 0),
+                            domestic_mark=q_px if q_px > 0 else None,
+                            overseas_close=last_overseas_close,
+                            sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                            tp_atr_mult=float(cfg.risk.tp_atr_mult),
+                        )
+                        if display_hb is not None and persist is not None:
+                            _persist_state(
+                                persist,
+                                pipeline,
+                                symbol=trade_symbol,
+                                net=net,
+                                pending=pending,
+                                last_bar_id=last_saved_bar_id,
+                                config_hash=cfg.config_hash(),
+                                last_price=q_px if q_px > 0 else None,
+                                display_levels=display_hb,
+                            )
                     print(
                         f"[心跳] {datetime.datetime.now():%H:%M:%S} "
                         f"{trade_symbol or '-'} target={pipeline.current_target} net={net} "
                         f"balance={account.balance:.2f} margin={float(getattr(account,'margin',0) or 0):.0f} "
                         f"last={main_quote.last_price} "
                         f"rt={(persist.runtime.runtime_state if persist else 'N/A')}"
-                        f"{'' if pending is None else f' pending={pending}'}",
+                        f"{'' if pending is None else f' pending={pending}'}"
+                        f"{'' if pipeline.risk.state.stop_price is None else f' sl={pipeline.risk.state.stop_price:.2f}'}",
                         flush=True,
                     )
                     # Retry aligning broker to strategy target between bars.
@@ -1338,8 +1645,15 @@ def main() -> None:
             dt = datetime.datetime.fromtimestamp(
                 int(decision_klines.iloc[-1]["datetime"]) // 1_000_000_000
             )
+            pending_bar = None
+            if executor is not None and executor.active_intent is not None:
+                pending_bar = int(executor.active_intent.desired_position)
             position, net_pos = refresh_broker_position(
-                api, trade_symbol, position, account
+                api,
+                trade_symbol,
+                position,
+                account,
+                pending_desired=pending_bar,
             )
             parts = score_parts(result)
             atr = atr_of(result)
@@ -1686,6 +2000,21 @@ def main() -> None:
                     f"(等待后续成交确认)",
                     flush=True,
                 )
+            display_orphan = None
+            if confirmed != 0 and pipeline.risk.state.stop_price is None:
+                mark = _domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0))
+                fill_px = _broker_avg_entry_price(position, confirmed) or mark or 0.0
+                display_orphan = _maybe_rearm_orphan_stops(
+                    pipeline,
+                    net=confirmed,
+                    fill_price=float(fill_px),
+                    signal_atr=float(atr_of(result)),
+                    signal=int(result.signal.legacy_signal or last_fill_signal or 0),
+                    domestic_mark=mark,
+                    overseas_close=overseas_close,
+                    sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                    tp_atr_mult=float(cfg.risk.tp_atr_mult),
+                )
             if (
                 result.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}
                 and confirmed != 0
@@ -1705,6 +2034,7 @@ def main() -> None:
                 config_hash=cfg.config_hash(),
                 last_price=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0)),
                 signal_close=close_of(result),
+                display_levels=display_orphan,
             )
             last_saved_bar_id = result.bar_id
 
