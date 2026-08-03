@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 
 DEFAULT_USERS = (
     ("hawk1949", "123456", "Hawk"),
-    ("jem083", "123456", "Jem"),
+    ("jem0830", "123456", "Jem"),
 )
 
 
@@ -76,7 +76,7 @@ def main() -> int:
     parser.add_argument(
         "--defaults",
         action="store_true",
-        help="seed hawk1949 + jem083 (default when no --username)",
+        help="seed hawk1949 + jem0830 (default when no --username)",
     )
     args = parser.parse_args()
 
