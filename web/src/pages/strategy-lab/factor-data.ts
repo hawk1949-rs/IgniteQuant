@@ -472,11 +472,12 @@ export function collectOutputKeys(modules: FactorModule[]): string[] {
 
 export function validateModules(
   modules: FactorModule[],
-  opts: { lintSource?: boolean } = {},
+  opts: { lintSource?: boolean } = { lintSource: true },
 ): string[] {
   const errs: string[] = []
   const keyOwner = new Map<string, string>()
   const fileOwner = new Map<string, string>()
+  const lint = opts.lintSource !== false
   for (const m of modules) {
     if (!m.name.trim()) errs.push('存在未命名模块')
     const fileName = sanitizePyFileName(m.fileName || m.modulePath)
@@ -492,6 +493,9 @@ export function validateModules(
     if (m.outputKeys.length === 0 || m.outputKeys.every((k) => !k.trim())) {
       errs.push(`「${m.name}」至少声明一个 Feature Dict 输出键`)
     }
+    if (!m.requiredTimeframes.length) {
+      errs.push(`「${m.name}」至少选择一个触发周期`)
+    }
     for (const k of m.outputKeys) {
       const key = k.trim()
       if (!key) continue
@@ -504,7 +508,7 @@ export function validateModules(
       }
       keyOwner.set(key, m.id)
     }
-    if (opts.lintSource) {
+    if (lint) {
       errs.push(...lintFactorSource(m.source || '', m.outputKeys).map((e) => `「${m.name}」${e}`))
     }
   }
@@ -512,7 +516,7 @@ export function validateModules(
 }
 
 /** 静态检查（非真机 Python 解释器）；真跑通需后续接 runner */
-export function lintFactorSource(source: string, _outputKeys: string[] = []): string[] {
+export function lintFactorSource(source: string, outputKeys: string[] = []): string[] {
   const errs: string[] = []
   const text = source || ''
   if (!text.trim()) {
@@ -527,6 +531,14 @@ export function lintFactorSource(source: string, _outputKeys: string[] = []): st
   }
   const opens = (text.match(/"""/g) || []).length
   if (opens % 2 !== 0) errs.push('三引号字符串可能未闭合')
+  for (const k of outputKeys) {
+    const key = k.trim()
+    if (!key) continue
+    const re = new RegExp(`["']${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']`)
+    if (!re.test(text)) {
+      errs.push(`源码未出现声明键「${key}」`)
+    }
+  }
   return errs
 }
 
@@ -537,6 +549,190 @@ export function buildFeatureDictPreview(cfg: FactorMiningConfig): Record<string,
     out[key] = Math.round(((key.length * 13 + i * 7) % 50) / 10 - 2) * 100 / 100
   })
   return out
+}
+
+// ---------------------------------------------------------------------------
+// 对话编译（一期：本地模板骨架；完善代码靠 Cursor）
+// ---------------------------------------------------------------------------
+
+export type FactorChatRole = 'user' | 'assistant' | 'system'
+
+export type FactorChatMessage = {
+  id: string
+  role: FactorChatRole
+  content: string
+  createdAt: string
+  /** 若本条助手消息编译出了模块，记下 id */
+  moduleId?: string
+}
+
+export type FactorCompileResult = {
+  module: FactorModule
+  assistantReply: string
+}
+
+const LS_CHAT = 'ignitequant.lab.factor_chat_v1'
+
+const TF_HINTS: { re: RegExp; id: TimeframeId }[] = [
+  { re: /\b1\s*m\b|1分钟|一分/, id: '1m' },
+  { re: /\b5\s*m\b|5分钟|五分/, id: '5m' },
+  { re: /\b15\s*m\b|15分钟|十五分/, id: '15m' },
+  { re: /\b60\s*m\b|1\s*h\b|60分钟|小时/, id: '60m' },
+  { re: /\b1\s*d\b|日线|天线/, id: '1d' },
+]
+
+function slugifyKey(raw: string, fallback: string): string {
+  const ascii = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  if (ascii && /^[a-z][a-z0-9_]*$/.test(ascii)) return ascii.slice(0, 32)
+  return fallback
+}
+
+function guessCategory(text: string): string {
+  if (/波动|波动率|atr|vol/i.test(text)) return '波动率'
+  if (/量|成交量|volume|oi|持仓/i.test(text)) return '成交量'
+  if (/基本面|库存|仓单/i.test(text)) return '基本面'
+  if (/趋势|均线|动量|突破|价格/i.test(text)) return '价格趋势'
+  return DEFAULT_CATEGORY
+}
+
+function guessName(text: string): string {
+  const first = text
+    .split(/[\n。！？.!?]/)
+    .map((s) => s.trim())
+    .find(Boolean)
+  if (!first) return '对话编译因子'
+  return first.length > 24 ? `${first.slice(0, 22)}…` : first
+}
+
+function guessTimeframes(text: string): TimeframeId[] {
+  const found: TimeframeId[] = []
+  for (const h of TF_HINTS) {
+    if (h.re.test(text) && !found.includes(h.id)) found.push(h.id)
+  }
+  return found.length > 0 ? found : ['5m']
+}
+
+function guessOutputKeys(text: string, fileStem: string): string[] {
+  const keys: string[] = []
+  if (/波动|vol/i.test(text)) keys.push('vol_ratio')
+  if (/趋势|trend/i.test(text)) keys.push('trend_bias')
+  if (/动量|mom/i.test(text)) keys.push('momentum')
+  if (/量能|成交量|volume/i.test(text)) keys.push('volume_confirm')
+  if (keys.length === 0) {
+    keys.push(slugifyKey(fileStem, `f_${Math.random().toString(36).slice(2, 6)}`))
+  }
+  return [...new Set(keys)].slice(0, 4)
+}
+
+function escapeDocstring(text: string): string {
+  return text.replace(/\\/g, '\\\\').replace(/"""/g, "'''").slice(0, 800)
+}
+
+/** 由自然语言需求编译合规 compute 骨架（Feature Dict） */
+export function compileRequirementToModule(
+  requirement: string,
+  opts: { category?: string } = {},
+): FactorCompileResult {
+  const text = requirement.trim()
+  if (!text) {
+    throw new Error('请先描述因子需求')
+  }
+  const name = guessName(text)
+  const slug = Math.random().toString(36).slice(2, 6)
+  const fileStem = slugifyKey(name, `factor_${slug}`).slice(0, 24) || `factor_${slug}`
+  const fileName = sanitizePyFileName(`${fileStem}_${slug}.py`)
+  const requiredTimeframes = guessTimeframes(text)
+  const outputKeys = guessOutputKeys(text, fileStem)
+  const primaryTf = requiredTimeframes[0] || '5m'
+  const returnBody = outputKeys.map((k) => `        "${k}": 0.0,`).join('\n')
+  const tfLoads = requiredTimeframes
+    .map((tf) => `    bars_${tf.replace(/\W/g, '_')} = bars_by_tf.get("${tf}")`)
+    .join('\n')
+  const source = `"""${fileStem}: AI/Cursor 草稿 — Feature Dict 模块。"""
+
+from __future__ import annotations
+
+from typing import Mapping
+
+ClosedBars = Mapping[str, object]
+
+
+def compute(bars_by_tf: Mapping[str, ClosedBars]) -> Mapping[str, float]:
+    """需求: ${escapeDocstring(text)}
+
+    契约: 只读已闭合 OHLCV；返回 Mapping[str, float]。
+    请在 Cursor 中补全公式，保持键与 outputKeys 一致。
+    """
+${tfLoads}
+    _ = bars_${primaryTf.replace(/\W/g, '_')}  # TODO: 用闭合字段计算
+    return {
+${returnBody}
+    }
+`
+
+  const module = normalizeModule({
+    name,
+    category: opts.category || guessCategory(text),
+    fileName,
+    hypothesis: text,
+    outputKeys,
+    requiredTimeframes,
+    source,
+    status: 'draft',
+    enabled: true,
+  })
+
+  const tfLabel = requiredTimeframes.join('+')
+  const assistantReply = [
+    `已生成「${name}」，请在右侧查看。`,
+    `分类先记为「${opts.category || guessCategory(text)}」，周期 ${tfLabel}。`,
+    '代码是可运行形状的草稿，公式还是占位；需要的话可复制到 Cursor 补全后再贴回。',
+  ].join('\n')
+
+  return { module, assistantReply }
+}
+
+export function createChatMessage(
+  role: FactorChatRole,
+  content: string,
+  extra: Partial<Pick<FactorChatMessage, 'moduleId'>> = {},
+): FactorChatMessage {
+  return {
+    id: `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    role,
+    content,
+    createdAt: new Date().toISOString(),
+    ...extra,
+  }
+}
+
+export function defaultFactorChat(): FactorChatMessage[] {
+  return [
+    createChatMessage(
+      'assistant',
+      '把要挖的概念、想法写进来。例如：「5 分钟波动率过滤」。生成后会在右边出现命名、分类和代码，你可以改名保存。',
+    ),
+  ]
+}
+
+export function loadFactorChat(): FactorChatMessage[] {
+  try {
+    const raw = localStorage.getItem(LS_CHAT)
+    if (!raw) return defaultFactorChat()
+    const parsed = JSON.parse(raw) as FactorChatMessage[]
+    if (!Array.isArray(parsed) || parsed.length === 0) return defaultFactorChat()
+    return parsed.filter((m) => m && typeof m.content === 'string' && m.role)
+  } catch {
+    return defaultFactorChat()
+  }
+}
+
+export function persistFactorChat(messages: FactorChatMessage[]) {
+  localStorage.setItem(LS_CHAT, JSON.stringify(messages.slice(-80)))
 }
 
 export const FACTOR_MODULE_CONTRACT = `from __future__ import annotations

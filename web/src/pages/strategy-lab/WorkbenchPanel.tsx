@@ -1,10 +1,11 @@
-import { useMemo, useState, type MouseEvent } from 'react'
+import { useEffect, useMemo, useState, type MouseEvent } from 'react'
 import {
   App,
   Alert,
   Button,
   Card,
   Col,
+  Collapse,
   DatePicker,
   Flex,
   Input,
@@ -20,14 +21,12 @@ import {
   Typography,
 } from 'antd'
 import {
-  CopyOutlined,
-  FileAddOutlined,
   PlayCircleOutlined,
   RedoOutlined,
   SaveOutlined,
 } from '@ant-design/icons'
 import dayjs, { type Dayjs } from 'dayjs'
-import { runBacktest, type RunRecord } from '@/lib/api'
+import { fetchCatalog, runBacktest, type RunRecord, type Strategy } from '@/lib/api'
 import {
   BACKTEST_ENGINE_OPTIONS,
   CHART_METRIC_OPTIONS,
@@ -43,12 +42,10 @@ import {
   formatMetricValue,
   loadAssemblySnapshots,
   loadBacktestRuns,
-  loadSavedStrategies,
   metricValue,
   newId,
   persistAssemblySnapshots,
   persistBacktestRuns,
-  persistSavedStrategies,
   type AccountConfig,
   type AssemblySnapshot,
   type BacktestEngine,
@@ -57,13 +54,28 @@ import {
   type ChartPeriod,
   type KpiSet,
   type PipelineNodeKey,
-  type SavedStrategy,
   type SeriesPoint,
   type WorkbenchTrade,
 } from './workbench-data'
 
 const { Text } = Typography
 const PAGE_SIZE = 10
+const DEFAULT_STRATEGY_ID = 'falcon_v2'
+
+const FALLBACK_STRATEGIES: Strategy[] = [
+  {
+    id: 'falcon_v2',
+    name: 'Falcon v2',
+    description: 'ADX 行情状态 + 格兰维尔/量能/KDJ 评分 + ATR 止盈止损（5 分钟）',
+    ready: true,
+  },
+  {
+    id: 'vwap_au',
+    name: 'VWAP（沪金）',
+    description: 'VWAP 偏离回归（看板内暂作占位）',
+    ready: false,
+  },
+]
 
 function MetricChart({
   series,
@@ -286,12 +298,6 @@ function KpiGrid({ kpis }: { kpis: KpiSet | null }) {
 export function WorkbenchPanel() {
   const { message, modal } = App.useApp()
 
-  const [strategies, setStrategies] = useState<SavedStrategy[]>(() =>
-    typeof window === 'undefined' ? [] : loadSavedStrategies(),
-  )
-  // 默认进入草稿，避免「一打开就选中第一条 → 每次保存都覆盖」
-  const [activeStrategyId, setActiveStrategyId] = useState('')
-  const [strategyName, setStrategyName] = useState('未命名策略')
   const [nodes, setNodes] = useState<Record<PipelineNodeKey, string>>({
     ...DEFAULT_PIPELINE,
   })
@@ -300,6 +306,9 @@ export function WorkbenchPanel() {
   )
   const [selectedAssemblyId, setSelectedAssemblyId] = useState<string>()
   const [account, setAccount] = useState<AccountConfig>({ ...DEFAULT_ACCOUNT })
+  const [catalogStrategies, setCatalogStrategies] =
+    useState<Strategy[]>(FALLBACK_STRATEGIES)
+  const [strategyId, setStrategyId] = useState(DEFAULT_STRATEGY_ID)
   const [runs, setRuns] = useState<BacktestRun[]>(() =>
     typeof window === 'undefined' ? [] : loadBacktestRuns(),
   )
@@ -314,9 +323,32 @@ export function WorkbenchPanel() {
   const [chartMetric, setChartMetric] = useState<ChartMetric>('equity')
   const [chartPeriod, setChartPeriod] = useState<ChartPeriod>('day')
 
+  useEffect(() => {
+    let cancelled = false
+    void fetchCatalog()
+      .then((catalog) => {
+        if (cancelled || !catalog.strategies?.length) return
+        setCatalogStrategies(catalog.strategies)
+        setStrategyId((prev) =>
+          catalog.strategies.some((s) => s.id === prev)
+            ? prev
+            : catalog.strategies[0]?.id || DEFAULT_STRATEGY_ID,
+        )
+      })
+      .catch(() => {
+        /* 保持本地兜底目录 */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const engineMeta =
     BACKTEST_ENGINE_OPTIONS.find((o) => o.id === account.engine) ??
     BACKTEST_ENGINE_OPTIONS[0]
+
+  const strategyMeta =
+    catalogStrategies.find((s) => s.id === strategyId) ?? catalogStrategies[0]
 
   const chartSeries = useMemo(
     () => aggregateSeries(series, chartPeriod),
@@ -326,91 +358,8 @@ export function WorkbenchPanel() {
   const patchAccount = (patch: Partial<AccountConfig>) =>
     setAccount((prev) => ({ ...prev, ...patch }))
 
-  const onSelectStrategy = (id: string | undefined) => {
-    if (!id) {
-      setActiveStrategyId('')
-      setStrategyName('未命名策略')
-      setNodes({ ...DEFAULT_PIPELINE })
-      setAccount({ ...DEFAULT_ACCOUNT })
-      setSelectedAssemblyId(undefined)
-      return
-    }
-    const s = strategies.find((x) => x.id === id)
-    if (!s) return
-    setActiveStrategyId(s.id)
-    setStrategyName(s.name)
-    setNodes({ ...s.nodes })
-    setAccount({ ...s.account })
-    setSelectedAssemblyId(undefined)
-    message.success(`已加载策略「${s.name}」`)
-  }
-
-  const onNewDraft = () => {
-    setActiveStrategyId('')
-    setStrategyName('未命名策略')
-    setNodes({ ...DEFAULT_PIPELINE })
-    setAccount({ ...DEFAULT_ACCOUNT })
-    setSelectedAssemblyId(undefined)
-    message.info('已新建草稿，保存后会追加一条策略')
-  }
-
-  /** 始终追加一条新策略，不覆盖已有列表 */
-  const createStrategy = (name: string) => {
-    const now = new Date().toISOString()
-    const created: SavedStrategy = {
-      id: newId('strat'),
-      name,
-      updatedAt: now,
-      nodes: { ...nodes },
-      account: { ...account },
-    }
-    const next = [created, ...strategies]
-    setStrategies(next)
-    persistSavedStrategies(next)
-    setActiveStrategyId(created.id)
-    setStrategyName(name)
-    return created
-  }
-
-  const onSaveStrategy = () => {
-    const name = strategyName.trim() || '未命名策略'
-    const now = new Date().toISOString()
-
-    // 草稿：新增
-    if (!activeStrategyId) {
-      createStrategy(name)
-      message.success(`已新增策略「${name}」`)
-      return
-    }
-
-    // 已选中：只更新当前这一条（改名 + 装配/账号），其它策略保持不变
-    const exists = strategies.some((s) => s.id === activeStrategyId)
-    if (!exists) {
-      createStrategy(name)
-      message.success(`已新增策略「${name}」`)
-      return
-    }
-
-    const next = strategies.map((s) =>
-      s.id === activeStrategyId
-        ? { ...s, name, updatedAt: now, nodes: { ...nodes }, account: { ...account } }
-        : s,
-    )
-    setStrategies(next)
-    persistSavedStrategies(next)
-    setStrategyName(name)
-    message.success(`已更新策略「${name}」`)
-  }
-
-  /** 在已有选中策略时，另存为新档案（保留原策略） */
-  const onSaveAsStrategy = () => {
-    const name = strategyName.trim() || '未命名策略'
-    const created = createStrategy(name)
-    message.success(`已另存为新策略「${created.name}」（原策略仍保留）`)
-  }
-
   const onSaveAssembly = () => {
-    let name = `${strategyName || '装配'} · ${dayjs().format('MM-DD HH:mm')}`
+    let name = `装配 · ${dayjs().format('MM-DD HH:mm')}`
     modal.confirm({
       title: '保存当前装配组合',
       content: (
@@ -429,7 +378,7 @@ export function WorkbenchPanel() {
           id: newId('asm'),
           name: trimmed,
           savedAt: new Date().toISOString(),
-          strategyId: activeStrategyId || 'draft',
+          strategyId,
           nodes: { ...nodes },
         }
         const next = [snap, ...assemblies].slice(0, 40)
@@ -458,9 +407,6 @@ export function WorkbenchPanel() {
       setSelectedRunId(undefined)
       return
     }
-    // 只回放该次结果；退出策略选中，避免误点「更新」把历史装配写回档案
-    setActiveStrategyId('')
-    setStrategyName(run.strategyName || '历史回测')
     setSeries(
       enrichEquitySeries(
         run.series.map((p) => ({ t: p.t, equity: p.equity, lots: p.lots ?? 0 })),
@@ -471,6 +417,7 @@ export function WorkbenchPanel() {
     setKpis(run.kpis)
     setNodes({ ...run.nodes })
     setAccount({ ...run.account })
+    setStrategyId(run.strategyId || DEFAULT_STRATEGY_ID)
     setSelectedAssemblyId(undefined)
     setPage(1)
     message.success(`已载入历史回测「${run.name}」`)
@@ -478,6 +425,7 @@ export function WorkbenchPanel() {
 
   const onResetAccount = () => {
     setAccount({ ...DEFAULT_ACCOUNT })
+    setStrategyId(DEFAULT_STRATEGY_ID)
     setSelectedRunId(undefined)
     setSeries([])
     setTrades([])
@@ -552,8 +500,9 @@ export function WorkbenchPanel() {
     )
     try {
       const engineApi = account.engine === 'tq' ? 'tq' : 'local'
+      const strategyLabel = strategyMeta?.name || strategyId
       const out = await runBacktest({
-        strategy_id: 'falcon_v2', // 装配节点尚未接入回测 API
+        strategy_id: strategyId,
         symbol_ids: [account.symbolId],
         start: account.start,
         end: account.end,
@@ -589,10 +538,10 @@ export function WorkbenchPanel() {
       const engineLabel = account.engine === 'tq' ? '天勤' : '缓存'
       const run: BacktestRun = {
         id: rec.run_id || newId('run'),
-        name: `${strategyName} · ${engineLabel} · ${rec.start || account.start}~${rec.end || account.end}`,
+        name: `${strategyLabel} · ${engineLabel} · ${rec.start || account.start}~${rec.end || account.end}`,
         savedAt: rec.saved_at || new Date().toISOString(),
-        strategyId: activeStrategyId || 'falcon_v2',
-        strategyName,
+        strategyId,
+        strategyName: strategyLabel,
         account: { ...account },
         nodes: { ...nodes },
         series: curve,
@@ -663,368 +612,296 @@ export function WorkbenchPanel() {
   ]
 
   return (
-    <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <Alert
-        type="info"
-        showIcon
-        banner
-        message="回测当前固定使用 Falcon v2 决策核；信号/仓位装配为预览，尚未接入回测 API。"
-      />
-      <Card
-        size="small"
-        title="策略档案"
-        extra={
-          <Space wrap size={8}>
-            <Button size="small" icon={<FileAddOutlined />} onClick={onNewDraft}>
-              新建草稿
-            </Button>
-            <Button size="small" icon={<CopyOutlined />} onClick={onSaveAsStrategy}>
-              另存为
-            </Button>
-            <Button size="small" type="primary" icon={<SaveOutlined />} onClick={onSaveStrategy}>
-              {activeStrategyId ? '更新策略' : '保存策略'}
-            </Button>
-          </Space>
-        }
-      >
-        <Text type="secondary" style={{ display: 'block', marginBottom: 10, fontSize: 12 }}>
-          默认是草稿：点「保存策略」会新增一条。选中已有策略后「更新策略」只改当前条；保留原策略请用「另存为」。
-        </Text>
-        <Row gutter={[12, 12]}>
-          <Col xs={24} md={12}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              已保存策略（共 {strategies.length} 条）
-            </Text>
-            <Select
-              style={{ width: '100%', marginTop: 8 }}
-              allowClear
-              placeholder="新建 / 未保存草稿"
-              value={activeStrategyId || undefined}
-              onChange={onSelectStrategy}
-              options={strategies.map((s) => ({
-                value: s.id,
-                label: `${s.name} · ${dayjs(s.updatedAt).format('MM-DD HH:mm')}`,
-              }))}
-            />
-          </Col>
-          <Col xs={24} md={12}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              策略名称
-            </Text>
-            <Input
-              style={{ marginTop: 8 }}
-              value={strategyName}
-              onChange={(e) => setStrategyName(e.target.value)}
-              placeholder="输入策略名称"
-            />
-          </Col>
-        </Row>
-      </Card>
+    <Row gutter={[16, 16]} align="stretch">
+      <Col xs={24} xl={9} xxl={8}>
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Alert
+            type="info"
+            showIcon
+            message="下方「信号/仓位预览」尚未接入回测 API；实际回测以所选策略目录为准。"
+          />
 
-      <Card
-        size="small"
-        title="策略装配区"
-        extra={
-          <Space wrap size={8}>
-            <Select
-              size="small"
-              style={{ minWidth: 180 }}
-              placeholder="加载装配组合…"
-              value={selectedAssemblyId}
-              options={assemblies.map((s) => ({ value: s.id, label: s.name }))}
-              onChange={onLoadAssembly}
-              allowClear
-            />
-            <Button size="small" icon={<SaveOutlined />} onClick={onSaveAssembly}>
-              保存当前装配
-            </Button>
-          </Space>
-        }
-      >
-        <Text type="secondary" style={{ display: 'block', marginBottom: 10, fontSize: 12 }}>
-          装配信号发生器与仓位控制。因子在「因子与特征」页独立编译挖掘，不在此选择。
-        </Text>
-        <Row gutter={[10, 10]}>
-          {PIPELINE_STEPS.map((step, i) => {
-            const options = PIPELINE_OPTIONS[step.key].map((o) => ({
-              value: o.id,
-              label: o.label,
-              desc: o.desc,
-            }))
-            const selected = options.find((o) => o.value === nodes[step.key])
-            return (
-              <Col key={step.key} xs={24} sm={12} lg={12}>
-                <Card size="small" styles={{ body: { padding: '10px 12px' } }}>
-                  <Flex justify="space-between" align="center">
-                    <Text type="secondary" style={{ fontSize: 11 }}>
-                      节点 {i + 1}
-                    </Text>
-                    {i < PIPELINE_STEPS.length - 1 && (
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        →
-                      </Text>
-                    )}
-                  </Flex>
-                  <Text strong style={{ display: 'block', marginTop: 4 }}>
-                    {step.title}
-                  </Text>
-                  <Select
-                    style={{ width: '100%', marginTop: 10 }}
-                    value={nodes[step.key] || undefined}
-                    options={options.map((o) => ({ value: o.value, label: o.label }))}
-                    onChange={(v) => setNodes((prev) => ({ ...prev, [step.key]: v }))}
-                  />
-                  <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 11 }}>
-                    {selected?.desc ?? ''}
-                  </Text>
-                </Card>
-              </Col>
-            )
-          })}
-        </Row>
-      </Card>
-
-      <Card size="small" title="测试账号配置">
-        <Row gutter={[16, 20]}>
-          <Col span={24}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
-              历史回测结果
-            </Text>
-            <Select
-              style={{ width: '100%' }}
-              allowClear
-              placeholder="不选择（使用当前配置新测）"
-              value={selectedRunId}
-              onChange={onSelectRun}
-              options={runs.map((r) => ({
-                value: r.id,
-                label: `${r.name} · ${dayjs(r.savedAt).format('YYYY-MM-DD HH:mm')}`,
-              }))}
-            />
-            <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 11 }}>
-              选中后下方曲线与绩效直接渲染该次归档结果。
-            </Text>
-          </Col>
-
-          <Col xs={24} md={8}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
-              回测机制
-            </Text>
-            <Select
-              style={{ width: '100%' }}
-              value={account.engine}
-              disabled={busy}
-              onChange={(v) => patchAccount({ engine: v as BacktestEngine })}
-              options={BACKTEST_ENGINE_OPTIONS.map((o) => ({
-                value: o.id,
-                label: o.label,
-              }))}
-            />
-          </Col>
-          <Col xs={24} md={8}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
-              测试品种
-            </Text>
-            <Select
-              style={{ width: '100%' }}
-              value={account.symbolId}
-              disabled={busy}
-              onChange={(v) => patchAccount({ symbolId: v })}
-              options={WORKBENCH_SYMBOLS.map((s) => ({
-                value: s.id,
-                label: `${s.name}（${s.signal}）`,
-              }))}
-            />
-          </Col>
-          <Col xs={24} md={8}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
-              初始资金
-            </Text>
-            <InputNumber
-              style={{ width: '100%' }}
-              value={account.initBalance}
-              min={0}
-              step={10000}
-              disabled={busy}
-              onChange={(v) => patchAccount({ initBalance: Math.max(0, Number(v) || 0) })}
-            />
-          </Col>
-
-          <Col xs={24} md={8}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
-              回测区间
-            </Text>
-            <DatePicker.RangePicker
-              style={{ width: '100%' }}
-              value={rangeValue}
-              allowClear={false}
-              disabled={busy}
-              onChange={(vals) => {
-                if (!vals?.[0] || !vals?.[1]) return
-                const start = vals[0]
-                const end = vals[1]
-                if (start.isAfter(end, 'day')) {
-                  message.warning('开始日期不能晚于结束日期')
-                  return
-                }
-                patchAccount({
-                  start: start.format('YYYY-MM-DD'),
-                  end: end.format('YYYY-MM-DD'),
-                })
-              }}
-            />
-            <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 11 }}>
-              实际下单回测严格按此区间；本地缓存若缺数，进度条可能先显示更早的「预热补拉」日期。
-            </Text>
-          </Col>
-          <Col xs={24} md={8}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
-              手续费
-            </Text>
-            <Flex
-              align="center"
-              justify="space-between"
-              style={{
-                height: 40,
-                padding: '0 12px',
-                borderRadius: 12,
-                border: '1px solid rgba(180, 200, 230, 0.42)',
-                background: '#121C30',
-              }}
-            >
-              <Text>{account.enableCommission ? '计入手续费' : '不计手续费'}</Text>
-              <Switch
-                checked={account.enableCommission}
-                disabled={busy}
-                onChange={(v) => patchAccount({ enableCommission: v })}
-                checkedChildren="是"
-                unCheckedChildren="否"
-              />
-            </Flex>
-          </Col>
-          <Col xs={24} md={8}>
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
-              保存回测
-            </Text>
-            <Flex
-              align="center"
-              justify="space-between"
-              style={{
-                height: 40,
-                padding: '0 12px',
-                borderRadius: 12,
-                border: '1px solid rgba(180, 200, 230, 0.42)',
-                background: '#121C30',
-              }}
-            >
-              <Text>{account.persistDb ? '保存到本机历史' : '仅本次展示'}</Text>
-              <Switch
-                checked={account.persistDb}
-                disabled={busy}
-                onChange={(v) => patchAccount({ persistDb: v })}
-                checkedChildren="是"
-                unCheckedChildren="否"
-              />
-            </Flex>
-          </Col>
-
-          <Col span={24}>
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              {engineMeta.desc}
-            </Text>
-          </Col>
-
-          <Col span={24}>
-            <Space>
-              <Button
-                type="primary"
-                icon={<PlayCircleOutlined />}
-                loading={busy}
-                disabled={busy}
-                onClick={() => void onRun()}
-              >
-                {busy ? '回测进行中…' : '开始测试'}
-              </Button>
-              <Button icon={<RedoOutlined />} disabled={busy} onClick={onResetAccount}>
-                重置
-              </Button>
-            </Space>
-          </Col>
-
-          {(busy || progress > 0) && (
-            <Col span={24}>
-              <Card size="small" styles={{ body: { padding: '14px 16px' } }}>
-                <Flex justify="space-between" align="center" style={{ marginBottom: 8 }}>
-                  <Text>{progressMsg || (busy ? '处理中…' : '就绪')}</Text>
-                  <Text style={{ color: '#0A84FF', fontVariantNumeric: 'tabular-nums' }}>
-                    {progress}%
-                  </Text>
-                </Flex>
-                <Progress
-                  percent={progress}
-                  status={busy ? 'active' : progress >= 100 ? 'success' : 'normal'}
-                  strokeColor={{ from: '#1a6cff', to: '#0A84FF' }}
-                  showInfo={false}
+          <Card size="small" title="回测参数">
+            <Row gutter={[12, 14]}>
+              <Col span={24}>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                  策略
+                </Text>
+                <Select
+                  style={{ width: '100%' }}
+                  value={strategyId}
+                  disabled={busy}
+                  onChange={setStrategyId}
+                  options={catalogStrategies.map((s) => ({
+                    value: s.id,
+                    label: s.ready === false ? `${s.name}（占位）` : s.name,
+                  }))}
                 />
-              </Card>
-            </Col>
-          )}
-        </Row>
-      </Card>
+                {strategyMeta?.description ? (
+                  <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 12 }}>
+                    {strategyMeta.description}
+                  </Text>
+                ) : null}
+              </Col>
+              <Col span={24}>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                  历史结果
+                </Text>
+                <Select
+                  style={{ width: '100%' }}
+                  allowClear
+                  placeholder="不选则按当前参数新测"
+                  value={selectedRunId}
+                  onChange={onSelectRun}
+                  options={runs.map((r) => ({
+                    value: r.id,
+                    label: `${r.name} · ${dayjs(r.savedAt).format('MM-DD HH:mm')}`,
+                  }))}
+                />
+              </Col>
+              <Col xs={24} sm={12}>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                  引擎
+                </Text>
+                <Select
+                  style={{ width: '100%' }}
+                  value={account.engine}
+                  disabled={busy}
+                  onChange={(v) => patchAccount({ engine: v as BacktestEngine })}
+                  options={BACKTEST_ENGINE_OPTIONS.map((o) => ({
+                    value: o.id,
+                    label: o.label,
+                  }))}
+                />
+              </Col>
+              <Col xs={24} sm={12}>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                  品种
+                </Text>
+                <Select
+                  style={{ width: '100%' }}
+                  value={account.symbolId}
+                  disabled={busy}
+                  onChange={(v) => patchAccount({ symbolId: v })}
+                  options={WORKBENCH_SYMBOLS.map((s) => ({
+                    value: s.id,
+                    label: `${s.name}（${s.signal}）`,
+                  }))}
+                />
+              </Col>
+              <Col span={24}>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                  区间
+                </Text>
+                <DatePicker.RangePicker
+                  style={{ width: '100%' }}
+                  value={rangeValue}
+                  allowClear={false}
+                  disabled={busy}
+                  onChange={(vals) => {
+                    if (!vals?.[0] || !vals?.[1]) return
+                    const start = vals[0]
+                    const end = vals[1]
+                    if (start.isAfter(end, 'day')) {
+                      message.warning('开始日期不能晚于结束日期')
+                      return
+                    }
+                    patchAccount({
+                      start: start.format('YYYY-MM-DD'),
+                      end: end.format('YYYY-MM-DD'),
+                    })
+                  }}
+                />
+              </Col>
+              <Col xs={24} sm={12}>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                  初始资金
+                </Text>
+                <InputNumber
+                  style={{ width: '100%' }}
+                  value={account.initBalance}
+                  min={0}
+                  step={10000}
+                  disabled={busy}
+                  onChange={(v) =>
+                    patchAccount({ initBalance: Math.max(0, Number(v) || 0) })
+                  }
+                />
+              </Col>
+              <Col xs={12} sm={6}>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                  手续费
+                </Text>
+                <Switch
+                  checked={account.enableCommission}
+                  disabled={busy}
+                  onChange={(v) => patchAccount({ enableCommission: v })}
+                  checkedChildren="计"
+                  unCheckedChildren="否"
+                />
+              </Col>
+              <Col xs={12} sm={6}>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                  存历史
+                </Text>
+                <Switch
+                  checked={account.persistDb}
+                  disabled={busy}
+                  onChange={(v) => patchAccount({ persistDb: v })}
+                  checkedChildren="是"
+                  unCheckedChildren="否"
+                />
+              </Col>
+              <Col span={24}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {engineMeta.desc}
+                </Text>
+              </Col>
+              <Col span={24}>
+                <Space wrap>
+                  <Button
+                    type="primary"
+                    icon={<PlayCircleOutlined />}
+                    loading={busy}
+                    disabled={busy}
+                    onClick={() => void onRun()}
+                  >
+                    {busy ? '回测中…' : '开始回测'}
+                  </Button>
+                  <Button icon={<RedoOutlined />} disabled={busy} onClick={onResetAccount}>
+                    重置
+                  </Button>
+                </Space>
+              </Col>
+              {(busy || progress > 0) && (
+                <Col span={24}>
+                  <Flex justify="space-between" style={{ marginBottom: 6 }}>
+                    <Text style={{ fontSize: 13 }}>{progressMsg || (busy ? '处理中…' : '就绪')}</Text>
+                    <Text style={{ color: '#0A84FF', fontVariantNumeric: 'tabular-nums' }}>
+                      {progress}%
+                    </Text>
+                  </Flex>
+                  <Progress
+                    percent={progress}
+                    status={busy ? 'active' : progress >= 100 ? 'success' : 'normal'}
+                    strokeColor={{ from: '#1a6cff', to: '#0A84FF' }}
+                    showInfo={false}
+                  />
+                </Col>
+              )}
+            </Row>
+          </Card>
 
-      <Card
-        size="small"
-        title="收益时间折线图"
-        extra={
-          <Space wrap size={8}>
-            <Select
+          <Collapse
+            size="small"
+            items={[
+              {
+                key: 'pipeline-preview',
+                label: '信号 / 仓位预览（未接入回测）',
+                children: (
+                  <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                    <Flex wrap="wrap" gap={8} justify="space-between">
+                      <Select
+                        size="small"
+                        style={{ minWidth: 160, flex: 1 }}
+                        placeholder="加载装配…"
+                        value={selectedAssemblyId}
+                        options={assemblies.map((s) => ({ value: s.id, label: s.name }))}
+                        onChange={onLoadAssembly}
+                        allowClear
+                      />
+                      <Button size="small" icon={<SaveOutlined />} onClick={onSaveAssembly}>
+                        保存装配
+                      </Button>
+                    </Flex>
+                    <Row gutter={[8, 8]}>
+                      {PIPELINE_STEPS.map((step) => {
+                        const options = PIPELINE_OPTIONS[step.key].map((o) => ({
+                          value: o.id,
+                          label: o.label,
+                        }))
+                        return (
+                          <Col key={step.key} span={24}>
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              {step.title}
+                            </Text>
+                            <Select
+                              style={{ width: '100%', marginTop: 4 }}
+                              value={nodes[step.key]}
+                              options={options}
+                              onChange={(v) =>
+                                setNodes((prev) => ({ ...prev, [step.key]: v }))
+                              }
+                            />
+                          </Col>
+                        )
+                      })}
+                    </Row>
+                  </Space>
+                ),
+              },
+            ]}
+          />
+        </Space>
+      </Col>
+
+      <Col xs={24} xl={15} xxl={16}>
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Card
+            size="small"
+            title="收益曲线"
+            extra={
+              <Space wrap size={8}>
+                <Select
+                  size="small"
+                  value={chartMetric}
+                  onChange={(v) => setChartMetric(v as ChartMetric)}
+                  style={{ width: 140 }}
+                  options={CHART_METRIC_OPTIONS.map((o) => ({
+                    value: o.id,
+                    label: o.label,
+                  }))}
+                  popupMatchSelectWidth={false}
+                />
+                <Segmented
+                  size="small"
+                  value={chartPeriod}
+                  onChange={(v) => setChartPeriod(v as ChartPeriod)}
+                  options={CHART_PERIOD_OPTIONS.map((o) => ({
+                    value: o.id,
+                    label: o.label,
+                  }))}
+                />
+              </Space>
+            }
+          >
+            <MetricChart series={chartSeries} metric={chartMetric} />
+          </Card>
+
+          <Card size="small" title="绩效">
+            <KpiGrid kpis={kpis} />
+          </Card>
+
+          <Card size="small" title="成交明细">
+            <Table
               size="small"
-              value={chartMetric}
-              onChange={(v) => setChartMetric(v as ChartMetric)}
-              style={{ width: 140 }}
-              options={CHART_METRIC_OPTIONS.map((o) => ({
-                value: o.id,
-                label: o.label,
-              }))}
-              popupMatchSelectWidth={false}
+              rowKey="id"
+              columns={tradeColumns}
+              dataSource={trades}
+              pagination={{
+                current: page,
+                pageSize: PAGE_SIZE,
+                total: trades.length,
+                showSizeChanger: false,
+                showTotal: (t) => `共 ${t} 笔`,
+                onChange: setPage,
+              }}
+              locale={{ emptyText: '尚无成交记录（当前 Falcon 回测未返回逐笔）' }}
+              scroll={{ x: 720 }}
             />
-            <Segmented
-              size="small"
-              value={chartPeriod}
-              onChange={(v) => setChartPeriod(v as ChartPeriod)}
-              options={CHART_PERIOD_OPTIONS.map((o) => ({
-                value: o.id,
-                label: o.label,
-              }))}
-            />
-          </Space>
-        }
-      >
-        <MetricChart series={chartSeries} metric={chartMetric} />
-      </Card>
-
-      <Card size="small" title="绩效指标">
-        <KpiGrid kpis={kpis} />
-      </Card>
-
-      <Card size="small" title="交易明细">
-        <Table
-          size="small"
-          rowKey="id"
-          columns={tradeColumns}
-          dataSource={trades}
-          pagination={{
-            current: page,
-            pageSize: PAGE_SIZE,
-            total: trades.length,
-            showSizeChanger: false,
-            showTotal: (t) => `共 ${t} 笔`,
-            onChange: setPage,
-          }}
-          locale={{ emptyText: '尚无成交记录' }}
-          scroll={{ x: 720 }}
-        />
-      </Card>
-    </Space>
+          </Card>
+        </Space>
+      </Col>
+    </Row>
   )
 }

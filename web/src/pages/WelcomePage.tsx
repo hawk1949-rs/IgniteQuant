@@ -6,8 +6,8 @@ type Props = {
   onLogout?: () => void
 }
 
-const MODULES: {
-  key: ModuleKey
+const PRIMARY_MODULES: {
+  key: Exclude<ModuleKey, 'lab-legacy'>
   title: string
   desc: string
   arrow: string
@@ -15,13 +15,7 @@ const MODULES: {
   {
     key: 'lab',
     title: '策略实验室',
-    desc: '回测工作台：策略档案、流水线装配、测试账号与绩效曲线。',
-    arrow: '进入 →',
-  },
-  {
-    key: 'lab-legacy',
-    title: '旧版策略实验室',
-    desc: '原 Falcon 回测控制台：本地/天勤回测、评分对照与跑次档案。',
+    desc: '回测工作台与因子对话编译：设区间跑 Falcon；用对话生成 Feature Dict 模块。',
     arrow: '进入 →',
   },
   {
@@ -47,13 +41,6 @@ export default function WelcomePage({ onNavigate, username, onLogout }: Props) {
             onClick={() => onNavigate('lab')}
           >
             策略实验室
-          </button>
-          <button
-            type="button"
-            className="site-header__link-btn"
-            onClick={() => onNavigate('lab-legacy')}
-          >
-            旧版策略实验室
           </button>
           <button
             type="button"
@@ -85,7 +72,7 @@ export default function WelcomePage({ onNavigate, username, onLogout }: Props) {
         </header>
 
         <nav className="welcome-grid" aria-label="功能模块">
-          {MODULES.map((m) => (
+          {PRIMARY_MODULES.map((m) => (
             <button
               key={m.key}
               type="button"
@@ -99,9 +86,19 @@ export default function WelcomePage({ onNavigate, username, onLogout }: Props) {
           ))}
         </nav>
 
-        <footer className="welcome-foot">
-          页面展示仅供参考，不构成投资建议。
-        </footer>
+        <p className="welcome-foot" style={{ marginTop: 8 }}>
+          需要对照旧版 Falcon 回测台？
+          <button
+            type="button"
+            className="site-header__link-btn"
+            style={{ marginLeft: 6 }}
+            onClick={() => onNavigate('lab-legacy')}
+          >
+            打开旧版策略实验室
+          </button>
+        </p>
+
+        <footer className="welcome-foot">页面展示仅供参考，不构成投资建议。</footer>
       </div>
     </div>
   )
