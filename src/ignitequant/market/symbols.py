@@ -113,17 +113,32 @@ def instrument_by_signal(signal_symbol: str) -> InstrumentSpec | None:
     return None
 
 
-def resolve_signal_source(spec: InstrumentSpec) -> SignalSource:
-    """Map instrument → decision bar source + domestic exec continuous."""
-    if spec.pricing_basis != "overseas" or not spec.overseas_id:
+def resolve_signal_source(
+    spec: InstrumentSpec,
+    *,
+    use_overseas: bool | None = None,
+) -> SignalSource:
+    """Map instrument → decision bar source + domestic exec continuous.
+
+    ``use_overseas`` overrides static ``pricing_basis`` for Strategy Lab:
+    - None: default ON when lab_overseas_supported(spec.id)
+    - True: overseas only if lab-supported and overseas_id present
+    - False: force domestic
+    """
+    from ignitequant.market.overseas import lab_overseas_supported, overseas_by_id
+
+    supported = lab_overseas_supported(spec.id) and bool(spec.overseas_id)
+    if use_overseas is None:
+        want = supported
+    else:
+        want = bool(use_overseas) and supported
+    if not want:
         return SignalSource(
             pricing_basis="domestic",
             domestic_id=spec.id,
             domestic_signal_symbol=spec.signal_symbol,
         )
-    from ignitequant.market.overseas import overseas_by_id
-
-    o = overseas_by_id(spec.overseas_id)
+    o = overseas_by_id(spec.overseas_id)  # type: ignore[arg-type]
     return SignalSource(
         pricing_basis="overseas",
         domestic_id=spec.id,

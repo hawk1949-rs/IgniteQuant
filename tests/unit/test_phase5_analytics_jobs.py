@@ -23,6 +23,97 @@ def test_cost_model_hash_stable() -> None:
     assert a.scaled(fee_mult=2).open_fee_per_lot == a.open_fee_per_lot * 2
 
 
+def test_stamp_fills_with_intent_log() -> None:
+    from ignitequant.analytics import TradeFillRecord, stamp_fills_with_intent_log
+
+    fills = [
+        TradeFillRecord("1", "SHFE.rb", "BUY", "OPEN", 3200.0, 1),
+        TradeFillRecord("2", "SHFE.rb", "SELL", "CLOSE", 3210.0, 1),
+    ]
+    intents = [
+        {"applied_action": "TARGET", "legacy_signal": 2, "net_before": 0, "desired": 1},
+        {"applied_action": "STOP_LOSS", "legacy_signal": 1, "net_before": 1, "desired": 0},
+    ]
+    out = stamp_fills_with_intent_log(fills, intents)
+    assert out[0].applied_action == "TARGET"
+    assert out[0].legacy_signal == 2
+    assert out[1].applied_action == "STOP_LOSS"
+    assert out[1].legacy_signal == 1
+
+
+def test_fills_from_tq_trade_log_list_string_enums() -> None:
+    """TqSim.trade_log uses list + BUY/OPEN strings (not int-keyed dict)."""
+    from ignitequant.analytics import fills_from_tq_trade_log
+
+    trade_log = {
+        "2025-05-12": {
+            "trades": [
+                {
+                    "trade_id": "T1",
+                    "exchange_id": "SHFE",
+                    "instrument_id": "rb2505",
+                    "direction": "BUY",
+                    "offset": "OPEN",
+                    "price": 3200.0,
+                    "volume": 1,
+                    "commission": 3.0,
+                    "trade_date_time": 1_746_998_400_000_000_000,
+                },
+                {
+                    "trade_id": "T2",
+                    "exchange_id": "SHFE",
+                    "instrument_id": "rb2505",
+                    "direction": "SELL",
+                    "offset": "CLOSE",
+                    "price": 3210.0,
+                    "volume": 1,
+                    "commission": 3.0,
+                },
+            ],
+            "account": {"balance": 1_000_000},
+        }
+    }
+    fills = fills_from_tq_trade_log(trade_log, default_symbol="SHFE.rb2505")
+    assert len(fills) == 2
+    assert fills[0].side == "BUY"
+    assert fills[0].offset == "OPEN"
+    assert fills[0].symbol == "SHFE.rb2505"
+    assert fills[0].qty == 1
+    assert fills[1].side == "SELL"
+    assert fills[1].offset == "CLOSE"
+
+
+def test_fills_from_tq_trade_log_legacy_dict_ints() -> None:
+    from ignitequant.analytics import fills_from_tq_trade_log
+
+    trade_log = {
+        "2025-01-02": {
+            "trades": {
+                "a": {
+                    "direction": 0,
+                    "offset": 1,
+                    "price": 800.0,
+                    "volume": 1,
+                    "commission": 1.0,
+                    "symbol": "SHFE.au2608",
+                },
+                "b": {
+                    "direction": -1,
+                    "offset": 2,
+                    "price": 810.0,
+                    "volume": 1,
+                    "commission": 1.0,
+                    "symbol": "SHFE.au2608",
+                },
+            }
+        }
+    }
+    fills = fills_from_tq_trade_log(trade_log)
+    assert len(fills) == 2
+    assert fills[0].side == "BUY" and fills[0].offset == "OPEN"
+    assert fills[1].side == "SELL" and fills[1].offset == "CLOSE"
+
+
 def test_attribute_long_roundtrip() -> None:
     fills = [
         TradeFillRecord("1", "SHFE.au2608", "BUY", "OPEN", 800.0, 1, fee=0),

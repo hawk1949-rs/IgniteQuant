@@ -73,6 +73,9 @@ class LocalSimAccount:
         regime: str | None = None,
         is_roll: bool = False,
         month: str | None = None,
+        trade_time: str | None = None,
+        applied_action: str | None = None,
+        legacy_signal: float | None = None,
     ) -> list[TradeFillRecord]:
         """Instant fill at model slip price to reach desired net (absolute target)."""
         current = self.net_pos(symbol)
@@ -86,7 +89,13 @@ class LocalSimAccount:
             regime=regime,
             is_roll=is_roll,
             month=month,
+            trade_time=trade_time,
+            applied_action=applied_action,
+            legacy_signal=legacy_signal,
         )
+
+    # Alias used by local_replay / roll paths.
+    fills_to_target = fill_to_target
 
     def _apply_delta(
         self,
@@ -97,6 +106,9 @@ class LocalSimAccount:
         regime: str | None,
         is_roll: bool,
         month: str | None,
+        trade_time: str | None = None,
+        applied_action: str | None = None,
+        legacy_signal: float | None = None,
     ) -> list[TradeFillRecord]:
         created: list[TradeFillRecord] = []
         remaining = int(delta)
@@ -114,6 +126,9 @@ class LocalSimAccount:
                     regime=regime,
                     is_roll=is_roll,
                     month=month,
+                    trade_time=trade_time,
+                    applied_action=applied_action,
+                    legacy_signal=legacy_signal,
                 )
                 created.append(fill)
                 remaining -= close_qty if remaining > 0 else -close_qty
@@ -128,6 +143,9 @@ class LocalSimAccount:
                     regime=regime,
                     is_roll=is_roll,
                     month=month,
+                    trade_time=trade_time,
+                    applied_action=applied_action,
+                    legacy_signal=legacy_signal,
                 )
                 created.append(fill)
                 remaining = 0
@@ -143,6 +161,9 @@ class LocalSimAccount:
         regime: str | None,
         is_roll: bool,
         month: str | None,
+        trade_time: str | None = None,
+        applied_action: str | None = None,
+        legacy_signal: float | None = None,
     ) -> TradeFillRecord:
         price = self.cost.slip_price(side, signal_price, roll=is_roll)
         fee = self.cost.fee_for(qty=qty, is_open=True)
@@ -162,6 +183,9 @@ class LocalSimAccount:
             regime=regime,
             is_roll=is_roll,
             month=month,
+            trade_time=trade_time,
+            applied_action=applied_action,
+            legacy_signal=legacy_signal,
         )
 
     def _close_lots(
@@ -174,6 +198,9 @@ class LocalSimAccount:
         regime: str | None,
         is_roll: bool,
         month: str | None,
+        trade_time: str | None = None,
+        applied_action: str | None = None,
+        legacy_signal: float | None = None,
     ) -> TradeFillRecord:
         price = self.cost.slip_price(side, signal_price, roll=is_roll)
         fee = self.cost.fee_for(qty=qty, is_open=False)
@@ -217,6 +244,9 @@ class LocalSimAccount:
             regime=regime,
             is_roll=is_roll,
             month=month,
+            trade_time=trade_time,
+            applied_action=applied_action,
+            legacy_signal=legacy_signal,
         )
 
     def _record_fill(
@@ -232,6 +262,9 @@ class LocalSimAccount:
         regime: str | None,
         is_roll: bool,
         month: str | None,
+        trade_time: str | None = None,
+        applied_action: str | None = None,
+        legacy_signal: float | None = None,
     ) -> TradeFillRecord:
         self.trade_seq += 1
         fill = TradeFillRecord(
@@ -246,6 +279,9 @@ class LocalSimAccount:
             regime=regime,
             is_roll=is_roll,
             month=month,
+            trade_time=trade_time or month,
+            applied_action=applied_action,
+            legacy_signal=legacy_signal,
         )
         self.fills.append(fill)
         return fill

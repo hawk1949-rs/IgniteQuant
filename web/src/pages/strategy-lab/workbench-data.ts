@@ -22,11 +22,182 @@ export type WorkbenchTrade = {
   id: string
   time: string
   symbol: string
-  direction: '买开' | '卖开' | '买平' | '卖平'
+  /** Leg: 开多/开空/平多/平空/加多… */
+  direction: string
+  /** Reason: 信号调仓/止损/止盈/换月… */
+  reason: string
+  /** Combined display e.g. 平多·止损 */
+  actionLabel: string
   price: number
   lots: number
   pnl: number | null
-  signalStrength: number
+  signalStrength: number | null
+}
+
+/** Backend /api/backtest fill row (subset). */
+export type BacktestFillRow = {
+  trade_id?: string
+  symbol?: string
+  side?: string
+  offset?: string
+  price?: number
+  qty?: number
+  fee?: number
+  signal_price?: number | null
+  trade_time?: string | null
+  month?: string | null
+  realized_pnl?: number | null
+  applied_action?: string | null
+  legacy_signal?: number | null
+}
+
+function fillReason(action?: string | null, isRoll?: boolean): string {
+  const a = String(action || '').toUpperCase()
+  if (a === 'STOP_LOSS') return '止损'
+  if (a === 'TAKE_PROFIT') return '止盈'
+  if (a === 'TARGET') return '信号调仓'
+  if (a === 'ROLL_FLATTEN' || a === 'ROLL' || isRoll) return '换月'
+  if (a === 'END_FLAT' || a === 'FLAT_EXIT' || a === 'FLAT') return '到期平仓'
+  if (a === 'BOOT_FLATTEN') return '启动补平'
+  if (a === 'RESYNC') return '仓位对齐'
+  if (!a) return '成交'
+  return a
+}
+
+function fillLeg(
+  side: string,
+  isOpen: boolean,
+  netBefore: number,
+  qty: number,
+): string {
+  const buy = side === 'BUY' || side === 'LONG'
+  if (isOpen) {
+    if (netBefore === 0) return buy ? '开多' : '开空'
+    if (netBefore > 0 && buy) return '加多'
+    if (netBefore < 0 && !buy) return '加空'
+    return buy ? '开多' : '开空'
+  }
+  // close
+  if (netBefore > 0) {
+    return Math.abs(netBefore) > qty ? '减多' : '平多'
+  }
+  if (netBefore < 0) {
+    return Math.abs(netBefore) > qty ? '减空' : '平空'
+  }
+  return buy ? '买平' : '卖平'
+}
+
+function reasonTagColor(reason: string): string | undefined {
+  if (reason === '止损') return 'error'
+  if (reason === '止盈') return 'success'
+  if (reason === '换月' || reason === '到期平仓' || reason === '启动补平') return 'warning'
+  if (reason === '开多' || reason.includes('多')) return 'red'
+  if (reason === '开空' || reason.includes('空')) return 'green'
+  return 'default'
+}
+
+/** Tag color from full action label (开多 / 平多·止损). */
+export function actionTagColor(actionLabel: string, reason?: string): string | undefined {
+  if (reason === '止损' || actionLabel.includes('止损')) return 'error'
+  if (reason === '止盈' || actionLabel.includes('止盈')) return 'success'
+  if (actionLabel.includes('换月') || actionLabel.includes('到期') || actionLabel.includes('补平'))
+    return 'warning'
+  if (actionLabel.includes('多')) return 'red'
+  if (actionLabel.includes('空')) return 'green'
+  return reasonTagColor(reason || '')
+}
+
+/**
+ * Map backtest fills → workbench trade rows.
+ * Close legs get FIFO realized PnL (AU multiplier 1000) when backend omits it.
+ */
+export function tradesFromRunFills(
+  fills: BacktestFillRow[] | null | undefined,
+  opts?: { symbolFallback?: string; multiplier?: number },
+): WorkbenchTrade[] {
+  if (!fills?.length) return []
+  const symbolFallback = opts?.symbolFallback || ''
+  const multiplier =
+    typeof opts?.multiplier === 'number' && opts.multiplier > 0
+      ? opts.multiplier
+      : 1000
+  type Lot = { qty: number; price: number }
+  const inventory: Lot[] = []
+  const rows: WorkbenchTrade[] = []
+  let net = 0
+
+  fills.forEach((f, i) => {
+    const side = String(f.side || '').toUpperCase()
+    const offset = String(f.offset || 'UNKNOWN').toUpperCase()
+    const price = Number(f.price)
+    const qty = Math.abs(Number(f.qty) || 0)
+    if (!Number.isFinite(price) || qty <= 0) return
+
+    let isOpen: boolean
+    if (offset === 'OPEN') isOpen = true
+    else if (offset === 'CLOSE' || offset === 'CLOSETODAY') isOpen = false
+    else {
+      const signed = side === 'BUY' || side === 'LONG' ? qty : -qty
+      isOpen = !inventory.length || inventory[0].qty * signed > 0
+    }
+
+    const netBefore = net
+    let pnl: number | null =
+      typeof f.realized_pnl === 'number' && Number.isFinite(f.realized_pnl)
+        ? f.realized_pnl
+        : null
+
+    if (isOpen) {
+      const signed = side === 'BUY' || side === 'LONG' ? qty : -qty
+      inventory.push({ qty: signed, price })
+      net += signed
+    } else {
+      let left = qty
+      let realized = 0
+      while (left > 0 && inventory.length) {
+        const lot = inventory[0]
+        const take = Math.min(Math.abs(lot.qty), left)
+        if (lot.qty > 0) {
+          realized += (price - lot.price) * take * multiplier
+          lot.qty -= take
+        } else {
+          realized += (lot.price - price) * take * multiplier
+          lot.qty += take
+        }
+        left -= take
+        if (lot.qty === 0) inventory.shift()
+      }
+      if (pnl == null) pnl = Math.round(realized * 100) / 100
+      const signedClose = side === 'BUY' || side === 'LONG' ? qty : -qty
+      // Closing buy reduces short (net increases); closing sell reduces long.
+      net += signedClose
+    }
+
+    const leg = fillLeg(side, isOpen, netBefore, qty)
+    const reason = fillReason(f.applied_action, Boolean((f as { is_roll?: boolean }).is_roll))
+    const sig =
+      typeof f.legacy_signal === 'number' && Number.isFinite(f.legacy_signal)
+        ? f.legacy_signal
+        : null
+    // 信号调仓不额外标注；止损/止盈/换月等才拼到动作上
+    const actionLabel =
+      reason === '信号调仓' || reason === '成交' ? leg : `${leg}·${reason}`
+
+    rows.push({
+      id: String(f.trade_id || `fill-${i}`),
+      time: String(f.trade_time || f.month || '—'),
+      symbol: String(f.symbol || symbolFallback || '—'),
+      direction: leg,
+      reason,
+      actionLabel,
+      price,
+      lots: qty,
+      pnl: isOpen ? null : pnl,
+      signalStrength: sig,
+    })
+  })
+
+  return rows
 }
 
 export type KpiSet = {
@@ -51,6 +222,8 @@ export type AccountConfig = {
   persistDb: boolean
   /** 回测机制：缓存回测 | 天勤回测 */
   engine: BacktestEngine
+  /** 使用外盘行情驱动信号（仅 au/ag）；无外盘品种强制 false */
+  useOverseas: boolean
 }
 
 /** 用户可命名/改名/切换的策略档案（含装配） */
@@ -129,6 +302,19 @@ export const DEFAULT_ACCOUNT: AccountConfig = {
   enableCommission: true,
   persistDb: true,
   engine: 'cache',
+  useOverseas: true,
+}
+
+export const WORKBENCH_SYMBOLS = [
+  { id: 'au', name: '沪金', signal: 'KQ.m@SHFE.au', overseasSupported: true },
+  { id: 'ag', name: '沪银', signal: 'KQ.m@SHFE.ag', overseasSupported: true },
+  { id: 'rb', name: '螺纹钢', signal: 'KQ.m@SHFE.rb', overseasSupported: false },
+  { id: 'fg', name: '玻璃', signal: 'KQ.m@CZCE.FG', overseasSupported: false },
+] as const
+
+export function defaultUseOverseas(symbolId: string): boolean {
+  const hit = WORKBENCH_SYMBOLS.find((s) => s.id === symbolId)
+  return Boolean(hit?.overseasSupported)
 }
 
 export const BACKTEST_ENGINE_OPTIONS: {
@@ -147,13 +333,6 @@ export const BACKTEST_ENGINE_OPTIONS: {
     desc: '天勤 TqBacktest 在线时光机，更慢，适合最终对照。',
   },
 ]
-
-export const WORKBENCH_SYMBOLS = [
-  { id: 'au', name: '沪金', signal: 'KQ.m@SHFE.au' },
-  { id: 'ag', name: '沪银', signal: 'KQ.m@SHFE.ag' },
-  { id: 'rb', name: '螺纹钢', signal: 'KQ.m@SHFE.rb' },
-  { id: 'fg', name: '玻璃', signal: 'KQ.m@CZCE.FG' },
-] as const
 
 export const CHART_METRIC_OPTIONS: { id: ChartMetric; label: string }[] = [
   { id: 'equity', label: '总资产' },
@@ -267,6 +446,10 @@ export function loadBacktestRuns(): BacktestRun[] {
         ...DEFAULT_ACCOUNT,
         ...r.account,
         engine: r.account?.engine === 'tq' ? ('tq' as const) : ('cache' as const),
+        useOverseas:
+          typeof r.account?.useOverseas === 'boolean'
+            ? r.account.useOverseas
+            : defaultUseOverseas(r.account?.symbolId || DEFAULT_ACCOUNT.symbolId),
       }
       const needsEnrich = r.series.some(
         (p) => typeof p.ror !== 'number' || typeof p.drawdown !== 'number',
@@ -342,21 +525,28 @@ export function buildDemoSeries(
 
 export function buildDemoTrades(symbolName: string): WorkbenchTrade[] {
   const rows: WorkbenchTrade[] = []
-  const dirs: WorkbenchTrade['direction'][] = ['买开', '卖平', '卖开', '买平']
+  const legs = ['开多', '平多', '开空', '平空']
+  const reasons = ['信号调仓', '止损', '信号调仓', '止盈']
   for (let i = 0; i < 94; i++) {
-    const dir = dirs[i % 4]
-    const isClose = dir.includes('平')
+    const leg = legs[i % 4]
+    const reason = reasons[i % 4]
+    const isClose = leg.includes('平')
     const month = String((i % 5) + 1).padStart(2, '0')
     const day = String((i % 27) + 1).padStart(2, '0')
+    const sig = (i % 2 === 0 ? 1 : -1) * (1 + (i % 3))
+    const actionLabel =
+      reason === '信号调仓' || reason === '成交' ? leg : `${leg}·${reason}`
     rows.push({
       id: `T-${String(i + 1).padStart(3, '0')}`,
       time: `2025-${month}-${day} ${String(9 + (i % 6)).padStart(2, '0')}:${String((i * 7) % 60).padStart(2, '0')}:00`,
       symbol: symbolName,
-      direction: dir,
+      direction: leg,
+      reason,
+      actionLabel,
       price: 580 + (i % 40) * 0.8,
       lots: 1 + (i % 3),
       pnl: isClose ? Math.round((Math.sin(i / 3) * 1800 + (i % 5) * 80) * 100) / 100 : null,
-      signalStrength: 1 + (i % 5),
+      signalStrength: sig,
     })
   }
   return rows

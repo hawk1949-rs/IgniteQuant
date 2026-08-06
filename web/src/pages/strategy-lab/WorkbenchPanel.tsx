@@ -38,6 +38,7 @@ import {
   WORKBENCH_SYMBOLS,
   aggregateSeries,
   chartStrokeColor,
+  defaultUseOverseas,
   enrichEquitySeries,
   formatMetricValue,
   loadAssemblySnapshots,
@@ -56,6 +57,8 @@ import {
   type PipelineNodeKey,
   type SeriesPoint,
   type WorkbenchTrade,
+  tradesFromRunFills,
+  actionTagColor,
 } from './workbench-data'
 
 const { Text } = Typography
@@ -350,6 +353,8 @@ export function WorkbenchPanel() {
   const strategyMeta =
     catalogStrategies.find((s) => s.id === strategyId) ?? catalogStrategies[0]
 
+  const overseasSupported = defaultUseOverseas(account.symbolId)
+
   const chartSeries = useMemo(
     () => aggregateSeries(series, chartPeriod),
     [series, chartPeriod],
@@ -509,6 +514,7 @@ export function WorkbenchPanel() {
         init_balance: account.initBalance,
         engine: engineApi,
         auto_download: true,
+        use_overseas: overseasSupported ? account.useOverseas : false,
         force: true,
         onProgress: (job) => {
           const pct = Math.max(0, Math.min(100, Math.round(Number(job.progress || 0) * 100)))
@@ -531,8 +537,22 @@ export function WorkbenchPanel() {
 
       const curve = seriesFromRun(rec, account.initBalance)
       const metrics = kpisFromRun(rec, account.initBalance)
+      const symbolName =
+        WORKBENCH_SYMBOLS.find((s) => s.id === account.symbolId)?.name ||
+        rec.symbol_name ||
+        account.symbolId
+      const multRaw = (rec as { cost_model?: { multiplier?: number } }).cost_model
+        ?.multiplier
+      const multiplier =
+        typeof multRaw === 'number' && Number.isFinite(multRaw) && multRaw > 0
+          ? multRaw
+          : 1000
+      const tradeRows = tradesFromRunFills(rec.fills, {
+        symbolFallback: String(rec.trade_symbol || symbolName),
+        multiplier,
+      })
       setSeries(curve)
-      setTrades([])
+      setTrades(tradeRows)
       setKpis(metrics)
 
       const engineLabel = account.engine === 'tq' ? '天勤' : '缓存'
@@ -545,7 +565,7 @@ export function WorkbenchPanel() {
         account: { ...account },
         nodes: { ...nodes },
         series: curve,
-        trades: [],
+        trades: tradeRows,
         kpis: metrics,
       }
 
@@ -579,9 +599,31 @@ export function WorkbenchPanel() {
     account.start && account.end ? [dayjs(account.start), dayjs(account.end)] : null
 
   const tradeColumns = [
-    { title: '时间', dataIndex: 'time', key: 'time', width: 160 },
-    { title: '标的', dataIndex: 'symbol', key: 'symbol', width: 80 },
-    { title: '方向', dataIndex: 'direction', key: 'direction', width: 80 },
+    { title: '时间', dataIndex: 'time', key: 'time', width: 150 },
+    { title: '合约', dataIndex: 'symbol', key: 'symbol', width: 110, ellipsis: true },
+    {
+      title: '动作',
+      dataIndex: 'actionLabel',
+      key: 'actionLabel',
+      width: 130,
+      render: (_: string, r: WorkbenchTrade) => (
+        <Tag color={actionTagColor(r.actionLabel, r.reason)}>{r.actionLabel}</Tag>
+      ),
+    },
+    {
+      title: '信号',
+      dataIndex: 'signalStrength',
+      key: 'signalStrength',
+      width: 72,
+      render: (v: number | null) =>
+        v == null ? (
+          <Text type="secondary">—</Text>
+        ) : (
+          <Tag color={v > 0 ? 'red' : v < 0 ? 'green' : 'default'}>
+            {v > 0 ? `+${v}` : String(v)}
+          </Tag>
+        ),
+    },
     {
       title: '价格',
       dataIndex: 'price',
@@ -589,7 +631,7 @@ export function WorkbenchPanel() {
       width: 90,
       render: (v: number) => v.toFixed(2),
     },
-    { title: '手数', dataIndex: 'lots', key: 'lots', width: 70 },
+    { title: '手数', dataIndex: 'lots', key: 'lots', width: 56 },
     {
       title: '盈亏',
       dataIndex: 'pnl',
@@ -601,13 +643,6 @@ export function WorkbenchPanel() {
         ) : (
           <Text style={{ color: v >= 0 ? '#30D158' : '#FF453A' }}>{v.toFixed(2)}</Text>
         ),
-    },
-    {
-      title: '信号强度',
-      dataIndex: 'signalStrength',
-      key: 'signalStrength',
-      width: 100,
-      render: (v: number) => <Tag color="processing">{v}</Tag>,
     },
   ]
 
@@ -682,12 +717,37 @@ export function WorkbenchPanel() {
                   style={{ width: '100%' }}
                   value={account.symbolId}
                   disabled={busy}
-                  onChange={(v) => patchAccount({ symbolId: v })}
+                  onChange={(v) =>
+                    patchAccount({
+                      symbolId: v,
+                      useOverseas: defaultUseOverseas(v),
+                    })
+                  }
                   options={WORKBENCH_SYMBOLS.map((s) => ({
                     value: s.id,
                     label: `${s.name}（${s.signal}）`,
                   }))}
                 />
+              </Col>
+              <Col xs={24} sm={12}>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                  使用外盘行情
+                </Text>
+                <Switch
+                  checked={overseasSupported && account.useOverseas}
+                  disabled={busy || !overseasSupported}
+                  onChange={(v) => patchAccount({ useOverseas: v })}
+                  checkedChildren="开"
+                  unCheckedChildren="关"
+                />
+                <Text
+                  type="secondary"
+                  style={{ fontSize: 12, display: 'block', marginTop: 6 }}
+                >
+                  {overseasSupported
+                    ? '外盘信号 + 内盘市价；内盘休市不开仓'
+                    : '该品种无外盘对照'}
+                </Text>
               </Col>
               <Col span={24}>
                 <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
@@ -896,8 +956,14 @@ export function WorkbenchPanel() {
                 showTotal: (t) => `共 ${t} 笔`,
                 onChange: setPage,
               }}
-              locale={{ emptyText: '尚无成交记录（当前 Falcon 回测未返回逐笔）' }}
-              scroll={{ x: 720 }}
+              locale={{
+                emptyText: busy
+                  ? '回测进行中…'
+                  : kpis && kpis.tradeCount > 0
+                    ? '绩效有成交笔数，但缺少逐笔明细（请重新跑回测；旧归档可能未解析天勤成交）'
+                    : '尚无成交记录（本次回测无成交）',
+              }}
+              scroll={{ x: 780 }}
             />
           </Card>
         </Space>

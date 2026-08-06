@@ -115,6 +115,8 @@ class BacktestRequest(BaseModel):
     sync: bool = False
     force: bool = False
     auto_download: bool = True
+    # None: lab-supported symbols default ON; unsupported stay OFF.
+    use_overseas: bool | None = None
 
 
 class NotesRequest(BaseModel):
@@ -163,6 +165,9 @@ def _execute_backtest_request(
     init_balance = float(request.get("init_balance") or 1_000_000)
     engine = str(request.get("engine") or "local").lower()
     auto_download = bool(request.get("auto_download", True))
+    use_overseas = request.get("use_overseas", None)
+    if use_overseas is not None:
+        use_overseas = bool(use_overseas)
 
     if strategy_id not in STRATEGIES:
         raise ValueError(f"未知策略: {strategy_id}")
@@ -180,6 +185,8 @@ def _execute_backtest_request(
         if sid not in SYMBOLS:
             raise ValueError(f"未知标的: {sid}")
         sym = SYMBOLS[sid]
+        if use_overseas is True and not sym.overseas_supported:
+            raise ValueError(f"标的 {sid} 不支持外盘行情回测")
 
         def _cb(pct: float, msg: str, _i=i, _n=n) -> None:
             overall = (_i + float(pct)) / _n
@@ -191,6 +198,7 @@ def _execute_backtest_request(
             "end": end,
             "init_balance": init_balance,
             "progress_cb": _cb,
+            "use_overseas": use_overseas,
         }
         if engine == "local" and strat.runner == "run_falcon_v2":
             kwargs["auto_download"] = auto_download
@@ -200,6 +208,7 @@ def _execute_backtest_request(
         record = {
             **out,
             "engine": out.get("engine") or engine,
+            "use_overseas": bool(out.get("use_overseas", False)),
             "strategy_name": strat.name,
             "symbol_id": sid,
             "symbol_name": sym.name,
@@ -263,6 +272,8 @@ def catalog() -> dict[str, Any]:
                 "name": s.name,
                 "signal_symbol": s.signal_symbol,
                 "exchange": s.exchange,
+                "overseas_supported": bool(s.overseas_supported),
+                "overseas_pair": s.overseas_pair,
             }
             for s in SYMBOLS.values()
         ],
@@ -307,6 +318,8 @@ def backtest(req: BacktestRequest) -> dict[str, Any]:
     for sid in req.symbol_ids:
         if sid not in SYMBOLS:
             raise HTTPException(400, f"未知标的: {sid}")
+        if req.use_overseas is True and not SYMBOLS[sid].overseas_supported:
+            raise HTTPException(400, f"标的 {sid} 不支持外盘行情回测")
 
     if req.engine not in ENGINES:
         raise HTTPException(400, f"未知引擎: {req.engine}")
@@ -319,6 +332,7 @@ def backtest(req: BacktestRequest) -> dict[str, Any]:
         "init_balance": float(req.init_balance),
         "engine": req.engine,
         "auto_download": bool(req.auto_download),
+        "use_overseas": req.use_overseas,
         "config_hash": default_decision_config().config_hash(),
     }
 

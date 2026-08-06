@@ -23,7 +23,88 @@ class TradeFillRecord:
     regime: str | None = None
     is_roll: bool = False
     month: str | None = None
+    trade_time: str | None = None
+    applied_action: str | None = None
+    legacy_signal: float | None = None
 
+
+def fill_record_to_dict(fill: TradeFillRecord) -> dict[str, Any]:
+    """JSON-friendly fill for backtest run archives / Strategy Lab."""
+    return {
+        "trade_id": fill.trade_id,
+        "symbol": fill.symbol,
+        "side": fill.side,
+        "offset": fill.offset,
+        "price": float(fill.price),
+        "qty": int(fill.qty),
+        "fee": float(fill.fee or 0),
+        "signal_price": fill.signal_price,
+        "regime": fill.regime,
+        "is_roll": bool(fill.is_roll),
+        "month": fill.month,
+        "trade_time": fill.trade_time or fill.month,
+        "applied_action": fill.applied_action,
+        "legacy_signal": fill.legacy_signal,
+    }
+
+
+def stamp_fills_with_intent_log(
+    fills: Sequence[TradeFillRecord],
+    intents: Sequence[Mapping[str, Any]],
+) -> list[TradeFillRecord]:
+    """Attach applied_action / legacy_signal from ordered intent log onto fills.
+
+    Each intent covers ``abs(desired - net_before)`` lots of subsequent fills.
+    """
+    if not fills:
+        return []
+    if not intents:
+        return list(fills)
+
+    out: list[TradeFillRecord] = []
+    fill_i = 0
+    for intent in intents:
+        try:
+            net_before = int(intent.get("net_before", 0))
+            desired = int(intent.get("desired", net_before))
+        except (TypeError, ValueError):
+            continue
+        need = abs(desired - net_before)
+        if need <= 0:
+            continue
+        action = intent.get("applied_action")
+        action_s = str(action) if action else None
+        sig_raw = intent.get("legacy_signal")
+        try:
+            sig = float(sig_raw) if sig_raw is not None else None
+        except (TypeError, ValueError):
+            sig = None
+        while need > 0 and fill_i < len(fills):
+            f = fills[fill_i]
+            out.append(
+                TradeFillRecord(
+                    trade_id=f.trade_id,
+                    symbol=f.symbol,
+                    side=f.side,
+                    offset=f.offset,
+                    price=f.price,
+                    qty=f.qty,
+                    fee=f.fee,
+                    signal_price=f.signal_price,
+                    regime=f.regime,
+                    is_roll=f.is_roll,
+                    month=f.month,
+                    trade_time=f.trade_time,
+                    applied_action=action_s or f.applied_action,
+                    legacy_signal=sig if sig is not None else f.legacy_signal,
+                )
+            )
+            need -= abs(int(f.qty))
+            fill_i += 1
+    while fill_i < len(fills):
+        out.append(fills[fill_i])
+        fill_i += 1
+    return out
 
 @dataclass
 class AttributionReport:
@@ -176,50 +257,144 @@ def attribute_fills(
     )
 
 
+def _iter_tq_trades(trades: Any) -> list[tuple[str, Any]]:
+    """Normalize TqSim trade_log trades (list or dict) → [(trade_id, row)]."""
+    if trades is None:
+        return []
+    if isinstance(trades, dict):
+        return [(str(k), v) for k, v in trades.items()]
+    if isinstance(trades, (list, tuple)):
+        out: list[tuple[str, Any]] = []
+        for i, tr in enumerate(trades):
+            if isinstance(tr, dict):
+                tid = str(tr.get("trade_id") or tr.get("exchange_trade_id") or i)
+            else:
+                tid = str(getattr(tr, "trade_id", None) or getattr(tr, "exchange_trade_id", None) or i)
+            out.append((tid, tr))
+        return out
+    return []
+
+
+def _tq_field(tr: Any, *names: str, default: Any = None) -> Any:
+    if isinstance(tr, dict):
+        for name in names:
+            if name in tr and tr[name] is not None:
+                return tr[name]
+        return default
+    for name in names:
+        if hasattr(tr, name):
+            val = getattr(tr, name)
+            if val is not None:
+                return val
+    return default
+
+
+def _parse_tq_side(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return "BUY" if int(raw) >= 0 else "SELL"
+    text = str(raw).strip().upper()
+    if text in {"BUY", "LONG", "0"}:
+        return "BUY"
+    if text in {"SELL", "SHORT", "1"}:
+        return "SELL"
+    return None
+
+
+def _parse_tq_offset(raw: Any) -> str:
+    if raw is None:
+        return "UNKNOWN"
+    if isinstance(raw, (int, float)):
+        return {0: "OPEN", 1: "OPEN", 2: "CLOSE", 3: "CLOSETODAY"}.get(
+            int(raw), "UNKNOWN"
+        )
+    text = str(raw).strip().upper()
+    if text in {"OPEN", "0"}:
+        return "OPEN"
+    if text in {"CLOSE", "2"}:
+        return "CLOSE"
+    if text in {"CLOSETODAY", "3"}:
+        return "CLOSETODAY"
+    # Legacy int-as-string "1" was OPEN in some docs; prefer OPEN for ambiguity.
+    if text == "1":
+        return "OPEN"
+    return "UNKNOWN"
+
+
+def _parse_tq_symbol(tr: Any, default_symbol: str) -> str:
+    symbol = _tq_field(tr, "symbol", default=None)
+    if symbol:
+        return str(symbol)
+    exchange = _tq_field(tr, "exchange_id", default="")
+    instrument = _tq_field(tr, "instrument_id", default="")
+    if exchange and instrument:
+        return f"{exchange}.{instrument}"
+    if instrument:
+        return str(instrument)
+    return default_symbol
+
+
+def _parse_tq_trade_time(day: Any, tr: Any) -> str | None:
+    ts = _tq_field(tr, "trade_date_time", default=None)
+    if ts is not None:
+        try:
+            ns = int(ts)
+            # ns since epoch → ISO date-time UTC-ish local display date
+            from datetime import datetime, timezone
+
+            dt = datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc)
+            return dt.astimezone().isoformat(timespec="seconds")
+        except Exception:
+            pass
+    return str(day) if day else None
+
+
 def fills_from_tq_trade_log(
     trade_log: Mapping[str, Any] | None,
     *,
     default_symbol: str = "",
 ) -> list[TradeFillRecord]:
-    """Best-effort parse of TqSim.trade_log into TradeFillRecord list."""
+    """Best-effort parse of TqSim.trade_log into TradeFillRecord list.
+
+    TqSim stores ``trades`` as a **list** of dicts with string direction/offset
+    (BUY/SELL, OPEN/CLOSE). Older stubs used int codes + dict keyed by trade_id.
+    """
     if not isinstance(trade_log, dict):
         return []
     out: list[TradeFillRecord] = []
     for day, payload in trade_log.items():
-        trades = (payload or {}).get("trades") or {}
-        if not isinstance(trades, dict):
+        if not isinstance(payload, dict):
             continue
+        trades = payload.get("trades")
         month = str(day)[:7] if day else None
-        for tid, tr in trades.items():
+        for tid, tr in _iter_tq_trades(trades):
             try:
-                if isinstance(tr, dict):
-                    direction = int(tr.get("direction", 0))
-                    offset_raw = int(tr.get("offset", 0))
-                    price = float(tr.get("price", 0))
-                    volume = int(tr.get("volume", 0))
-                    fee = float(tr.get("commission") or 0)
-                    symbol = str(tr.get("symbol") or default_symbol)
-                else:
-                    direction = int(getattr(tr, "direction", 0))
-                    offset_raw = int(getattr(tr, "offset", 0))
-                    price = float(getattr(tr, "price", 0))
-                    volume = int(getattr(tr, "volume", 0))
-                    fee = float(getattr(tr, "commission", 0) or 0)
-                    symbol = str(getattr(tr, "symbol", default_symbol) or default_symbol)
-            except Exception:
+                side = _parse_tq_side(_tq_field(tr, "direction", default=None))
+                if side is None:
+                    continue
+                offset = _parse_tq_offset(_tq_field(tr, "offset", default=None))
+                price = float(_tq_field(tr, "price", default=0) or 0)
+                volume = int(_tq_field(tr, "volume", default=0) or 0)
+                fee = float(
+                    _tq_field(tr, "commission", "fee", default=0) or 0
+                )
+                symbol = _parse_tq_symbol(tr, default_symbol)
+            except (TypeError, ValueError):
                 continue
-            side = "BUY" if direction >= 0 else "SELL"
-            off = {1: "OPEN", 2: "CLOSE", 3: "CLOSETODAY"}.get(offset_raw, "UNKNOWN")
+            if volume <= 0 or price <= 0:
+                continue
             out.append(
                 TradeFillRecord(
                     trade_id=str(tid),
                     symbol=symbol or default_symbol,
                     side=side,
-                    offset=off,
+                    offset=offset,
                     price=price,
                     qty=volume,
                     fee=fee,
                     month=month,
+                    trade_time=_parse_tq_trade_time(day, tr) or (str(day) if day else month),
                 )
             )
     return out

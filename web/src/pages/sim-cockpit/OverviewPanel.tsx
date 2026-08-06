@@ -13,13 +13,15 @@ import {
 import { useSimCockpit } from './SimCockpitContext'
 import { MiniCandleChart } from './MiniCandleChart'
 import {
-  actionLabel,
   decisionReasonText,
   qualityLabel,
   regimeLabel,
   riskActionLabel,
   shortBiasLabel,
   statusLabel,
+  tradeActionLabel,
+  tradeActionTagColor,
+  intentActionCode,
 } from './labels'
 import { catchUpSimBars, startSimSession } from '@/lib/api'
 import { formatLocalDateTime } from './time'
@@ -321,9 +323,12 @@ export function OverviewPanel() {
         },
         {
           step: '目标',
-          detail: `${latest.target_before} → ${latest.target_after} · ${actionLabel(latest.applied_action)}${
-            targetNetDesync ? ` · 净仓仍为 ${net}` : ''
-          }`,
+          detail: `${latest.target_before} → ${latest.target_after} · ${tradeActionLabel({
+            action: latest.applied_action,
+            from: latest.target_before,
+            to: latest.target_after,
+            signal: latest.legacy_signal,
+          })}${targetNetDesync ? ` · 净仓仍为 ${net}` : ''}`,
         },
         {
           step: '风控',
@@ -1057,8 +1062,14 @@ export function OverviewPanel() {
               {
                 title: '动作',
                 dataIndex: 'applied_action',
-                width: 80,
-                render: (v: string) => actionLabel(v),
+                width: 110,
+                render: (v: string, r) =>
+                  tradeActionLabel({
+                    action: v,
+                    from: r.target_before,
+                    to: r.target_after,
+                    signal: r.legacy_signal,
+                  }),
               },
               {
                 title: (
@@ -1133,6 +1144,27 @@ export function OverviewPanel() {
                       { title: '合约', dataIndex: 'symbol', width: 110, ellipsis: true },
                       { title: '当前', dataIndex: 'current_position', width: 52 },
                       { title: '目标', dataIndex: 'desired_position', width: 52 },
+                      {
+                        title: '动作',
+                        key: 'intent_action',
+                        width: 100,
+                        ellipsis: true,
+                        render: (_, r) => {
+                          const action = intentActionCode(r)
+                          const input = {
+                            action,
+                            from: r.current_position,
+                            to: r.desired_position,
+                          }
+                          const label = tradeActionLabel(input)
+                          const color = tradeActionTagColor(input)
+                          return color ? (
+                            <Tag color={color}>{label}</Tag>
+                          ) : (
+                            <Tag>{label}</Tag>
+                          )
+                        },
+                      },
                       {
                         title: '状态',
                         dataIndex: 'status',
@@ -1210,19 +1242,27 @@ export function OverviewPanel() {
                       {
                         title: '动作',
                         dataIndex: 'applied_action',
-                        width: 88,
+                        width: 120,
                         ellipsis: true,
-                        render: (v: string | null | undefined) => {
-                          if (!v) return '—'
-                          if (v === 'STOP_LOSS') return <Tag color="error">止损</Tag>
-                          if (v === 'TAKE_PROFIT') return <Tag color="success">止盈</Tag>
-                          if (v === 'TARGET') return <Tag color="processing">调仓</Tag>
-                          if (v === 'BOOT_FLATTEN') return <Tag>启动补平</Tag>
-                          if (v === 'FLAT_EXIT' || v === 'EXIT' || v === 'FLAT')
-                            return <Tag color="warning">平仓</Tag>
-                          if (v === 'HOLD' || v === 'COOLDOWN_HOLD')
-                            return <Tag>{actionLabel(v)}</Tag>
-                          return actionLabel(v)
+                        render: (v: string | null | undefined, r) => {
+                          const from =
+                            r.current_position ?? r.target_before ?? null
+                          const to =
+                            r.desired_position ?? r.target_after ?? null
+                          const input = {
+                            action: v,
+                            from,
+                            to,
+                            signal: r.legacy_signal,
+                          }
+                          const label = tradeActionLabel(input)
+                          if (label === '—') return '—'
+                          const color = tradeActionTagColor(input)
+                          return color ? (
+                            <Tag color={color}>{label}</Tag>
+                          ) : (
+                            <Tag>{label}</Tag>
+                          )
                         },
                       },
                       {

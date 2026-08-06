@@ -419,6 +419,42 @@ def load_overseas_cache_bars(
         )
 
 
+def ensure_overseas_cache_bars(
+    overseas_id: str,
+    *,
+    duration_seconds: int = 300,
+    auto_download: bool = True,
+) -> pd.DataFrame:
+    """Load overseas cache; optionally download 5m via tools/download_overseas_cache."""
+    spec = overseas_by_id(overseas_id)
+    frame = load_overseas_cache_bars(
+        spec.signal_symbol, duration_seconds=duration_seconds
+    )
+    if not frame.empty or not auto_download:
+        return frame
+    if duration_seconds != 300:
+        # Archive tool currently downloads 5m/1h/1d; only auto-fill 5m.
+        return frame
+    try:
+        import importlib.util
+
+        tool = Path(__file__).resolve().parents[3] / "tools" / "download_overseas_cache.py"
+        mod_name = "ignitequant_download_overseas_cache"
+        py_spec = importlib.util.spec_from_file_location(mod_name, tool)
+        if py_spec is None or py_spec.loader is None:
+            return frame
+        mod = importlib.util.module_from_spec(py_spec)
+        py_spec.loader.exec_module(mod)
+        mod.download_one(overseas_id, intervals=["5m"])
+    except Exception:
+        return load_overseas_cache_bars(
+            spec.signal_symbol, duration_seconds=duration_seconds
+        )
+    return load_overseas_cache_bars(
+        spec.signal_symbol, duration_seconds=duration_seconds
+    )
+
+
 def load_decision_bars_for_spec(
     spec: InstrumentSpec,
     *,
@@ -427,19 +463,19 @@ def load_decision_bars_for_spec(
     duration_seconds: int = 300,
     auto_download: bool = False,
     progress_cb=None,
+    use_overseas: bool | None = None,
 ) -> tuple[pd.DataFrame, SignalSource]:
     """Bars used as Factor/Signal clock for this instrument."""
     from ignitequant.market.cache import ensure_cache, slice_bars
 
-    source = resolve_signal_source(spec)
-    if source.pricing_basis == "overseas" and source.overseas_signal_symbol:
-        try:
-            frame = load_overseas_cache_bars(
-                source.overseas_signal_symbol, duration_seconds=duration_seconds
-            )
-        except Exception:
-            frame = pd.DataFrame()
-        if frame.empty and auto_download:
+    source = resolve_signal_source(spec, use_overseas=use_overseas)
+    if source.pricing_basis == "overseas" and source.overseas_id:
+        frame = ensure_overseas_cache_bars(
+            source.overseas_id,
+            duration_seconds=duration_seconds,
+            auto_download=auto_download,
+        )
+        if frame.empty and auto_download and source.overseas_signal_symbol:
             # Fall back to live fetch window (shallow) for smoke tests only.
             live, _ = fetch_for_signal_source(source, limit=400)
             frame = bars_dicts_to_dataframe(

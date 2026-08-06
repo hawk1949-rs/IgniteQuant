@@ -3,7 +3,7 @@ import dayjs from 'dayjs'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSimCockpit } from './SimCockpitContext'
 import { MiniCandleChart } from './MiniCandleChart'
-import { actionLabel, qualityLabel, regimeLabel, riskActionLabel } from './labels'
+import { qualityLabel, regimeLabel, riskActionLabel, tradeActionLabel } from './labels'
 
 export function ReplayPanel() {
   const { decisions, fills, bars, replayAt, setReplayAt, refresh, replay } = useSimCockpit()
@@ -104,7 +104,13 @@ export function ReplayPanel() {
                 </li>
                 <li>
                   <span className="text-faint">目标 </span>
-                  {focus.target_before} → {focus.target_after} · {actionLabel(focus.applied_action)}
+                  {focus.target_before} → {focus.target_after} ·{' '}
+                  {tradeActionLabel({
+                    action: focus.applied_action,
+                    from: focus.target_before,
+                    to: focus.target_after,
+                    signal: focus.legacy_signal,
+                  })}
                 </li>
                 <li>
                   <span className="text-faint">风控 </span>

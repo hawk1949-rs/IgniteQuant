@@ -25,6 +25,15 @@ def _first_finite(*values: Any) -> float | None:
     return None
 
 
+def _coerce_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 # Exit fills keep action label only; SL/TP levels belong on the open fill.
 EXIT_FILL_ACTIONS = frozenset(
     {
@@ -237,8 +246,16 @@ def enrichment_from_decision_payload(
         "take_price": take,
         "entry_price": entry,
         "price_basis": price_basis,
-        "target_before": payload.get("target_before"),
-        "target_after": payload.get("target_after"),
+        "target_before": payload.get("target_before")
+        if payload.get("target_before") is not None
+        else _coerce_int(
+            current_position if current_position is not None else target.get("current_position")
+        ),
+        "target_after": payload.get("target_after")
+        if payload.get("target_after") is not None
+        else _coerce_int(
+            desired_position if desired_position is not None else target.get("desired_position")
+        ),
     }
 
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -86,12 +88,75 @@ OVERSEAS_PAIRS: dict[str, OverseasPair] = {
     "ag": OverseasPair(domestic_id="ag", overseas_id="si"),
 }
 
+# Phase-1 Strategy Lab: only gold/silver are wired for overseas backtest + cache.
+LAB_OVERSEAS_WIRED: frozenset[str] = frozenset({"au", "ag"})
+
+_ROOT = Path(__file__).resolve().parents[3]
+_EXCEL_PATH = _ROOT / "data" / "内外盘品种对照.xlsx"
+
 
 def overseas_by_id(product_id: str) -> OverseasInstrumentSpec:
     key = product_id.strip().lower()
     if key not in OVERSEAS_INSTRUMENTS:
         raise KeyError(f"unsupported overseas id: {product_id}")
     return OVERSEAS_INSTRUMENTS[key]
+
+
+@lru_cache(maxsize=1)
+def domestic_codes_from_excel(path: str | None = None) -> frozenset[str]:
+    """Parse futures product codes (AU/AG/…) from the对照表; empty on failure."""
+    xlsx = Path(path) if path else _EXCEL_PATH
+    if not xlsx.is_file():
+        return frozenset()
+    try:
+        import openpyxl
+    except ImportError:
+        return frozenset()
+    try:
+        wb = openpyxl.load_workbook(xlsx, read_only=True, data_only=True)
+        ws = wb[wb.sheetnames[0]]
+        rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+    except Exception:
+        return frozenset()
+    if not rows:
+        return frozenset()
+    header = [str(c).strip() if c is not None else "" for c in rows[0]]
+    code_idx = None
+    for i, h in enumerate(header):
+        if "代码" in h or h.upper() in {"CODE", "SYMBOL", "PRODUCT"}:
+            code_idx = i
+            break
+    if code_idx is None:
+        # Fallback: third column in the shipped workbook.
+        code_idx = 2 if len(header) > 2 else 0
+    codes: set[str] = set()
+    for row in rows[1:]:
+        if not row or code_idx >= len(row):
+            continue
+        raw = row[code_idx]
+        if raw is None:
+            continue
+        text = str(raw).strip().upper()
+        if not text or not text.replace("_", "").isalnum():
+            continue
+        # RU / AU / AG / SC …
+        if 1 <= len(text) <= 4 and text.isalpha():
+            codes.add(text.lower())
+    return frozenset(codes)
+
+
+def lab_overseas_supported(domestic_id: str) -> bool:
+    """True when Strategy Lab may enable overseas pricing for this domestic id."""
+    key = domestic_id.strip().lower()
+    if key not in LAB_OVERSEAS_WIRED:
+        return False
+    if key not in OVERSEAS_PAIRS:
+        return False
+    excel = domestic_codes_from_excel()
+    if excel and key not in excel:
+        return False
+    return True
 
 
 def overseas_pair_for_domestic(domestic_id: str) -> dict[str, str] | None:
@@ -109,6 +174,20 @@ def overseas_pair_for_domestic(domestic_id: str) -> dict[str, str] | None:
         "signal_symbol": spec.signal_symbol,
         "exchange": spec.exchange,
         "note": spec.note,
+    }
+
+
+def lab_overseas_pair_payload(domestic_id: str) -> dict[str, str] | None:
+    """Compact pair for /api/catalog (Strategy Lab toggle)."""
+    if not lab_overseas_supported(domestic_id):
+        return None
+    pair = overseas_pair_for_domestic(domestic_id)
+    if not pair:
+        return None
+    return {
+        "id": pair["id"],
+        "name": pair["name"],
+        "display_symbol": pair["display_symbol"],
     }
 
 

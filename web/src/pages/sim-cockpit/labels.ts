@@ -33,6 +33,166 @@ export const ACTION_LABEL: Record<string, string> = {
   NONE: '无动作',
 }
 
+/** Net-position change verbs for TARGET / flatten intents. */
+export function positionChangeVerb(
+  from: number,
+  to: number,
+): string | null {
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return null
+  if (from === to) return null
+  if (from === 0 && to > 0) return '开多'
+  if (from === 0 && to < 0) return '开空'
+  if (to === 0 && from > 0) return '平多'
+  if (to === 0 && from < 0) return '平空'
+  if (from > 0 && to > 0) return to > from ? '加多' : '减多'
+  if (from < 0 && to < 0) return to < from ? '加空' : '减空'
+  if (from > 0 && to < 0) return '反手空'
+  if (from < 0 && to > 0) return '反手多'
+  return null
+}
+
+function formatSignalPart(signal?: number | null): string {
+  if (signal == null || !Number.isFinite(Number(signal))) return ''
+  const n = Number(signal)
+  if (n > 0) return `+${n}`
+  return String(n)
+}
+
+export type TradeActionLabelInput = {
+  action?: string | null
+  /** Net position before this intent/decision. */
+  from?: number | null
+  /** Net position target after. */
+  to?: number | null
+  /** Legacy signal ∈ [-3, 3]. */
+  signal?: number | null
+}
+
+/**
+ * Human action for cockpit: TARGET becomes 开多/开空/加多/加空… plus signal.
+ * Exit actions get 平多/平空 when from/to known.
+ */
+export function tradeActionLabel(input: TradeActionLabelInput): string {
+  const action = String(input.action || '').toUpperCase() || null
+  const from =
+    input.from == null || !Number.isFinite(Number(input.from))
+      ? null
+      : Number(input.from)
+  const to =
+    input.to == null || !Number.isFinite(Number(input.to))
+      ? null
+      : Number(input.to)
+  const sig = formatSignalPart(input.signal)
+  const verb =
+    from != null && to != null ? positionChangeVerb(from, to) : null
+
+  const withSig = (base: string) => (sig ? `${base}(${sig})` : base)
+
+  if (action === 'TARGET' || action === 'RESYNC') {
+    if (verb) return withSig(verb)
+    return withSig(ACTION_LABEL[action] || '调仓')
+  }
+
+  if (action === 'STOP_LOSS') {
+    if (verb === '平多' || verb === '平空') return withSig(`止损${verb}`)
+    if (from != null && from > 0 && (to === 0 || to == null))
+      return withSig('止损平多')
+    if (from != null && from < 0 && (to === 0 || to == null))
+      return withSig('止损平空')
+    return withSig('止损')
+  }
+
+  if (action === 'TAKE_PROFIT') {
+    if (verb === '平多' || verb === '平空') return withSig(`止盈${verb}`)
+    if (from != null && from > 0 && (to === 0 || to == null))
+      return withSig('止盈平多')
+    if (from != null && from < 0 && (to === 0 || to == null))
+      return withSig('止盈平空')
+    return withSig('止盈')
+  }
+
+  if (
+    action === 'BOOT_FLATTEN' ||
+    action === 'FLAT_EXIT' ||
+    action === 'EXIT' ||
+    action === 'FLAT'
+  ) {
+    if (verb === '平多' || verb === '平空') {
+      const prefix = action === 'BOOT_FLATTEN' ? '启动补平·' : ''
+      return withSig(`${prefix}${verb}`)
+    }
+    return ACTION_LABEL[action] || actionLabel(action)
+  }
+
+  if (action === 'HOLD' || action === 'COOLDOWN_HOLD') {
+    return ACTION_LABEL[action] || actionLabel(action)
+  }
+
+  // Decision rows sometimes omit action but still have before→after.
+  if (!action && verb) return withSig(verb)
+
+  if (action && ACTION_LABEL[action]) {
+    return verb ? withSig(verb) : ACTION_LABEL[action]
+  }
+  return actionLabel(action)
+}
+
+/** Infer cockpit action code from an order intent row. */
+export function intentActionCode(input: {
+  current_position?: number | null
+  desired_position?: number | null
+  reason_codes?: string[] | null
+  idempotency_key?: string | null
+}): string {
+  const codes = (input.reason_codes || []).map((c) => String(c).toUpperCase())
+  const key = String(input.idempotency_key || '').toUpperCase()
+  if (
+    codes.some((c) => c.includes('BOOT_FLATTEN')) ||
+    key.includes('BOOT_FLAT')
+  ) {
+    return 'BOOT_FLATTEN'
+  }
+  if (key.includes('STOP_LOSS') || codes.includes('LEGACY_EXIT_STOP')) {
+    return 'STOP_LOSS'
+  }
+  if (key.includes('TAKE_PROFIT') || codes.includes('LEGACY_EXIT_TAKE')) {
+    return 'TAKE_PROFIT'
+  }
+  if (
+    codes.some(
+      (c) =>
+        c.includes('RESYNC') ||
+        c.includes('CATCH_UP') ||
+        c.includes('HEARTBEAT'),
+    ) ||
+    key.includes('HB-RESYNC') ||
+    key.includes('CATCHUP')
+  ) {
+    return 'RESYNC'
+  }
+  const from = Number(input.current_position)
+  const to = Number(input.desired_position)
+  if (Number.isFinite(from) && Number.isFinite(to) && from === to) return 'HOLD'
+  return 'TARGET'
+}
+
+/** Ant Design Tag color hint for trade action chips. */
+export function tradeActionTagColor(
+  input: TradeActionLabelInput,
+): string | undefined {
+  const label = tradeActionLabel(input)
+  if (label.includes('开多') || label.includes('加多') || label.includes('反手多'))
+    return 'red'
+  if (label.includes('开空') || label.includes('加空') || label.includes('反手空'))
+    return 'green'
+  if (label.includes('止损')) return 'error'
+  if (label.includes('止盈')) return 'success'
+  if (label.includes('平多') || label.includes('平空') || label.includes('减'))
+    return 'warning'
+  if (label.includes('调仓')) return 'processing'
+  return undefined
+}
+
 export const RISK_ACTION_LABEL: Record<string, string> = {
   PASS: '通过',
   RESIZE: '缩量',

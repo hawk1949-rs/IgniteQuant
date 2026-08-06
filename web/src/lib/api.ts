@@ -62,6 +62,12 @@ export type SymbolItem = {
   name: string
   signal_symbol: string
   exchange: string
+  overseas_supported?: boolean
+  overseas_pair?: {
+    id: string
+    name: string
+    display_symbol: string
+  } | null
 }
 
 export type EngineItem = {
@@ -80,6 +86,24 @@ export type Scorecard = {
   parts?: Record<string, number>
 }
 
+export type RunFill = {
+  trade_id?: string
+  symbol?: string
+  side?: string
+  offset?: string
+  price?: number
+  qty?: number
+  fee?: number
+  signal_price?: number | null
+  regime?: string | null
+  is_roll?: boolean
+  month?: string | null
+  trade_time?: string | null
+  realized_pnl?: number | null
+  applied_action?: string | null
+  legacy_signal?: number | null
+}
+
 export type RunRecord = {
   run_id: string
   saved_at?: string
@@ -93,6 +117,9 @@ export type RunRecord = {
   end?: string
   init_balance?: number
   equity_curve?: { t: string; equity: number }[]
+  fills?: RunFill[]
+  trade_symbol?: string
+  cost_model?: { multiplier?: number }
   attribution?: Record<string, unknown>
   stress?: Record<string, unknown>
   reproducibility?: Record<string, unknown>
@@ -139,6 +166,7 @@ export async function runBacktest(body: {
   init_balance: number
   engine?: 'local' | 'tq'
   auto_download?: boolean
+  use_overseas?: boolean | null
   /** 用户点击「开始回测」时应为 true，避免命中历史 SUCCEEDED 任务秒回 done */
   force?: boolean
   onProgress?: (job: JobRecord) => void
@@ -394,6 +422,7 @@ export type SimIntent = {
   status: string
   reason_codes: string[]
   created_at: string
+  idempotency_key?: string | null
 }
 
 export type SimFill = {
@@ -416,6 +445,8 @@ export type SimFill = {
   take_price?: number | null
   target_before?: number | null
   target_after?: number | null
+  current_position?: number | null
+  desired_position?: number | null
   fill_source?: string | null
 }
 

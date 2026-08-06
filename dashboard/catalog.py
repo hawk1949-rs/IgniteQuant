@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ignitequant.market.overseas import lab_overseas_pair_payload, lab_overseas_supported
 from ignitequant.market.symbols import INSTRUMENTS
 
 
@@ -22,6 +23,8 @@ class SymbolInfo:
     name: str
     signal_symbol: str  # 连续合约，用于信号
     exchange: str
+    overseas_supported: bool = False
+    overseas_pair: dict[str, str] | None = None
 
 
 STRATEGIES: dict[str, StrategyInfo] = {
@@ -46,6 +49,8 @@ SYMBOLS: dict[str, SymbolInfo] = {
         name=spec.name,
         signal_symbol=spec.signal_symbol,
         exchange=spec.exchange,
+        overseas_supported=lab_overseas_supported(sid),
+        overseas_pair=lab_overseas_pair_payload(sid),
     )
     for sid, spec in INSTRUMENTS.items()
 }

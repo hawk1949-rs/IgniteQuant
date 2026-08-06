@@ -8,7 +8,12 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from ignitequant.analytics import attribute_fills, run_cost_stress, stress_summary
+from ignitequant.analytics import (
+    attribute_fills,
+    fill_record_to_dict,
+    run_cost_stress,
+    stress_summary,
+)
 from ignitequant.config import DecisionConfig, default_decision_config
 from ignitequant.domain.enums import RiskAction
 from ignitequant.engine.decision_pipeline import FalconDecisionPipeline, close_of
@@ -20,7 +25,7 @@ from ignitequant.engine.runtime_bridge import (
 )
 from ignitequant.execution.roll import RollStateMachine
 from ignitequant.market.cache import ensure_cache, load_bars, resolve_instrument
-from ignitequant.market.overseas_bars import load_overseas_cache_bars
+from ignitequant.market.overseas_bars import ensure_overseas_cache_bars, load_overseas_cache_bars
 from ignitequant.market.session import (
     TRADE_STATUS_CLOSED,
     TRADE_STATUS_OPEN,
@@ -102,6 +107,7 @@ def run_local_falcon_backtest(
     bars: pd.DataFrame | None = None,
     config: DecisionConfig | None = None,
     record_decisions: bool = False,
+    use_overseas: bool | None = None,
 ) -> dict[str, Any]:
     """Mirror dashboard/runners.run_falcon_v2 semantics without tqsdk event loop."""
     flat_date = _last_business_day_on_or_before(end)
@@ -119,16 +125,23 @@ def run_local_falcon_backtest(
 
     spec = resolve_instrument(signal_symbol)
     cost = cost_model_for(spec, tq_align=True)
-    source = resolve_signal_source(spec)
+    source = resolve_signal_source(spec, use_overseas=use_overseas)
     domestic_bars: pd.DataFrame | None = None
     decision_symbol = signal_symbol
 
     if bars is None:
         if source.pricing_basis == "overseas" and source.overseas_signal_symbol:
             decision_symbol = source.overseas_signal_symbol
-            bars = load_overseas_cache_bars(
-                source.overseas_signal_symbol, duration_seconds=kline_seconds
-            )
+            if source.overseas_id:
+                bars = ensure_overseas_cache_bars(
+                    source.overseas_id,
+                    duration_seconds=kline_seconds,
+                    auto_download=auto_download,
+                )
+            else:
+                bars = load_overseas_cache_bars(
+                    source.overseas_signal_symbol, duration_seconds=kline_seconds
+                )
             if bars.empty:
                 raise RuntimeError(
                     f"overseas cache missing for {source.overseas_signal_symbol}. "
@@ -240,6 +253,9 @@ def run_local_falcon_backtest(
                         regime="ROLL",
                         is_roll=True,
                         month=settle_day.strftime("%Y-%m"),
+                        trade_time=settle_day.isoformat(),
+                        applied_action="ROLL_FLATTEN",
+                        legacy_signal=None,
                     )
                     net_old = sim.net_pos(trade_symbol)
                 roll.on_old_position(net_old)
@@ -286,6 +302,11 @@ def run_local_falcon_backtest(
                     signal_price=decision_px,
                     regime=result.factors.regime.value,
                     month=settle_day.strftime("%Y-%m"),
+                    trade_time=settle_day.isoformat(),
+                    applied_action="END_FLAT",
+                    legacy_signal=float(result.signal.legacy_signal)
+                    if result.signal.legacy_signal is not None
+                    else None,
                 )
             _record_settle_day(
                 sim, symbol=trade_symbol, settle_day=settle_day, mark_price=close_px
@@ -350,6 +371,11 @@ def run_local_falcon_backtest(
             regime=result.factors.regime.value,
             is_roll=False,
             month=settle_day.strftime("%Y-%m"),
+            trade_time=settle_day.isoformat(),
+            applied_action=str(result.applied_action),
+            legacy_signal=float(result.signal.legacy_signal)
+            if result.signal.legacy_signal is not None
+            else None,
         )
         _record_settle_day(
             sim, symbol=trade_symbol, settle_day=settle_day, mark_price=close_px
@@ -371,6 +397,7 @@ def run_local_falcon_backtest(
     out: dict[str, Any] = {
         "strategy_id": "falcon_v2",
         "engine": "local",
+        "use_overseas": source.pricing_basis == "overseas",
         "signal_symbol": signal_symbol,
         "decision_symbol": decision_symbol,
         "pricing_basis": source.pricing_basis,
@@ -401,24 +428,12 @@ def run_local_falcon_backtest(
             "data_length": data_length,
             "entry_mode": cfg.entry_mode,
             "engine": "local",
+            "use_overseas": source.pricing_basis == "overseas",
             "align_mode": cost.align_mode,
             "bars": len(bars),
         },
     }
     if record_decisions:
         out["decisions"] = decisions
-        out["fills"] = [
-            {
-                "trade_id": f.trade_id,
-                "symbol": f.symbol,
-                "side": f.side,
-                "offset": f.offset,
-                "price": f.price,
-                "qty": f.qty,
-                "fee": f.fee,
-                "signal_price": f.signal_price,
-                "is_roll": f.is_roll,
-            }
-            for f in sim.fills
-        ]
+    out["fills"] = [fill_record_to_dict(f) for f in sim.fills]
     return out

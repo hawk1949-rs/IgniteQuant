@@ -25,8 +25,10 @@ if str(ROOT / "src") not in sys.path:
 
 from ignitequant.analytics import (
     attribute_fills,
+    fill_record_to_dict,
     fills_from_tq_trade_log,
     run_cost_stress,
+    stamp_fills_with_intent_log,
     stress_summary,
 )
 from ignitequant.analytics.tq_metrics import (
@@ -215,13 +217,18 @@ def run_falcon_v2(
     kline_seconds: int = 300,
     data_length: int = 400,
     progress_cb=None,
+    use_overseas: bool | None = None,
+    auto_download: bool = True,
 ) -> dict[str, Any]:
     """跑完一次 Falcon 回测并返回指标（无 web_gui，结束后立即关闭）。
 
-    Overseas-priced products (au/ag) use local overseas-bar clock + MARKET_CLOSED gate.
+    Overseas-priced products (au/ag) use local overseas-bar clock + MARKET_CLOSED gate
+    when ``use_overseas`` is enabled (default ON for lab-supported symbols).
     """
+    from ignitequant.market.symbols import resolve_signal_source
+
     spec = resolve_instrument(signal_symbol)
-    source = resolve_signal_source(spec)
+    source = resolve_signal_source(spec, use_overseas=use_overseas)
     if source.pricing_basis == "overseas":
         out = run_falcon_local(
             signal_symbol=signal_symbol,
@@ -231,9 +238,11 @@ def run_falcon_v2(
             kline_seconds=kline_seconds,
             data_length=data_length,
             progress_cb=progress_cb,
-            auto_download=True,
+            auto_download=auto_download,
+            use_overseas=True,
         )
         out["engine"] = "local_overseas"
+        out["use_overseas"] = True
         return out
 
     from tqsdk import BacktestFinished, TqApi, TqAuth, TqBacktest, TqSim
@@ -279,6 +288,7 @@ def run_falcon_v2(
     trade_events = 0
     t0 = time.time()
     trade_log = None
+    intent_log: list[dict[str, Any]] = []
 
     try:
         main_quote = api.get_quote(signal_symbol)
@@ -330,6 +340,15 @@ def run_falcon_v2(
                             urgency="HIGH",
                             reason_codes=("ROLL_IN_PROGRESS",),
                             decision_price=float(klines.iloc[-1]["open"]),
+                        )
+                        intent_log.append(
+                            {
+                                "applied_action": "ROLL_FLATTEN",
+                                "legacy_signal": None,
+                                "net_before": net_old,
+                                "desired": 0,
+                                "symbol": trade_symbol,
+                            }
                         )
                         pipeline.force_flat()
                         trade_events += 1
@@ -388,6 +407,17 @@ def run_falcon_v2(
                         reason_codes=("END_FLAT",),
                         decision_price=decision_px,
                     )
+                    intent_log.append(
+                        {
+                            "applied_action": "END_FLAT",
+                            "legacy_signal": float(result.signal.legacy_signal)
+                            if result.signal.legacy_signal is not None
+                            else None,
+                            "net_before": net_pos,
+                            "desired": 0,
+                            "symbol": trade_symbol,
+                        }
+                    )
                     trade_events += 1
                 continue
 
@@ -420,6 +450,17 @@ def run_falcon_v2(
             )
             if intent is None:
                 continue
+            intent_log.append(
+                {
+                    "applied_action": str(result.applied_action),
+                    "legacy_signal": float(result.signal.legacy_signal)
+                    if result.signal.legacy_signal is not None
+                    else None,
+                    "net_before": net_pos,
+                    "desired": int(desired),
+                    "symbol": trade_symbol,
+                }
+            )
             trade_events += 1
             # After TargetPosTask, re-read net; confirm fill when matched.
             net_after = int(position.pos)
@@ -459,6 +500,7 @@ def run_falcon_v2(
         progress_cb(1.0, "完成")
 
     fills = fills_from_tq_trade_log(trade_log, default_symbol=trade_symbol)
+    fills = stamp_fills_with_intent_log(fills, intent_log)
     attribution = attribute_fills(fills, cost=cost)
     stress_rows = run_cost_stress(fills, base=cost) if fills else []
     metrics["gross_pnl_attr"] = attribution.gross_pnl
@@ -477,6 +519,7 @@ def run_falcon_v2(
     return {
         "strategy_id": "falcon_v2",
         "engine": "tq",
+        "use_overseas": False,
         "signal_symbol": signal_symbol,
         "trade_symbol": trade_symbol,
         "start": start.isoformat(),
@@ -485,6 +528,7 @@ def run_falcon_v2(
         "elapsed_sec": round(elapsed, 2),
         "metrics": metrics,
         "equity_curve": equity_curve,
+        "fills": [fill_record_to_dict(f) for f in fills],
         "config_version": cfg.config_version,
         "config_hash": cfg.config_hash(),
         "entry_mode": cfg.entry_mode,
@@ -502,6 +546,7 @@ def run_falcon_v2(
             "data_length": data_length,
             "entry_mode": cfg.entry_mode,
             "engine": "tq",
+            "use_overseas": False,
             "align_mode": cost.align_mode,
             "tq_commission_per_lot": commission_per_lot,
         },
@@ -518,6 +563,7 @@ def run_falcon_local(
     data_length: int = 400,
     progress_cb=None,
     auto_download: bool = True,
+    use_overseas: bool | None = None,
 ) -> dict[str, Any]:
     """本地行情缓存 + 离线回放（含换月 / LocalSim 撮合）。"""
     from ignitequant.engine.local_replay import run_local_falcon_backtest
@@ -531,6 +577,7 @@ def run_falcon_local(
         data_length=data_length,
         progress_cb=progress_cb,
         auto_download=auto_download,
+        use_overseas=use_overseas,
     )
 
 

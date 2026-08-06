@@ -4,7 +4,9 @@ from ignitequant.analytics.attribution import (
     AttributionReport,
     TradeFillRecord,
     attribute_fills,
+    fill_record_to_dict,
     fills_from_tq_trade_log,
+    stamp_fills_with_intent_log,
 )
 from ignitequant.analytics.cost_model import COST_MODEL_VERSION, CostModel, default_cost_model
 from ignitequant.analytics.stress import DEFAULT_STRESS, run_cost_stress, stress_summary
@@ -34,7 +36,9 @@ __all__ = [
     "attribute_fills",
     "default_cost_model",
     "equity_curve_metrics",
+    "fill_record_to_dict",
     "fills_from_tq_trade_log",
+    "stamp_fills_with_intent_log",
     "market_fill_price",
     "metrics_delta",
     "plan_walk_forward",

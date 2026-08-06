@@ -1,0 +1,688 @@
+{
+  "profile_id": "falcon_legacy_v1",
+  "format": "trade_strategy_graph_v1",
+  "notes": [
+    "将 Falcon 兼容路径（strategies/falcon）映射为声明式图。",
+    "原策略是 gv+vol+kdj+penalty 累加后 clip 到 [-3,3]，不是单一 buy/sell 布尔树。",
+    "因此除 LessThan/GreaterThan/And/Or/Not 外，增加了 CrossAbove/CrossBelow/NearPct/SlopeUp/SlopeDown/Add/Clip/If/Min/Negate 等算子以保真。",
+    "执行仍以 Python 源码为准；本文件用于对照、可视化与后续图编译。",
+    "buy_signal ≈ (score>0 且可交易)；sell_signal ≈ (score<0 且可交易)。持仓管理、ATR 止损止盈、冷却见 risk 段。"
+  ],
+  "trade_strategy": {
+    "timeframe": {
+      "bar_seconds": 300,
+      "warmup_bars": 5,
+      "subscription_bars": 400
+    },
+    "indicators": [
+      {
+        "id": "ma7",
+        "type": "SMA",
+        "params": { "period": 7, "column": "Close" }
+      },
+      {
+        "id": "ma14",
+        "type": "SMA",
+        "params": { "period": 14, "column": "Close" }
+      },
+      {
+        "id": "ma52",
+        "type": "SMA",
+        "params": { "period": 52, "column": "Close" }
+      },
+      {
+        "id": "atr14",
+        "type": "ATR",
+        "params": { "period": 14 }
+      },
+      {
+        "id": "adx14",
+        "type": "ADX",
+        "params": { "period": 14 }
+      },
+      {
+        "id": "kdj",
+        "type": "KDJ",
+        "params": { "n": 9, "m1": 3, "m2": 3 },
+        "outputs": ["k", "d", "j"]
+      },
+      {
+        "id": "vol_ma20",
+        "type": "SMA",
+        "params": { "period": 20, "column": "Volume" }
+      },
+      {
+        "id": "const_0",
+        "type": "Constant",
+        "params": { "value": 0 }
+      },
+      {
+        "id": "const_1",
+        "type": "Constant",
+        "params": { "value": 1 }
+      },
+      {
+        "id": "const_2",
+        "type": "Constant",
+        "params": { "value": 2 }
+      },
+      {
+        "id": "adx_th",
+        "type": "Constant",
+        "params": { "value": 25 }
+      },
+      {
+        "id": "near_ma_pct",
+        "type": "Constant",
+        "params": { "value": 0.002 }
+      },
+      {
+        "id": "vol_spike_ratio",
+        "type": "Constant",
+        "params": { "value": 1.2 }
+      },
+      {
+        "id": "kdj_j_overbuy",
+        "type": "Constant",
+        "params": { "value": 80 }
+      },
+      {
+        "id": "kdj_j_oversell",
+        "type": "Constant",
+        "params": { "value": 20 }
+      },
+      {
+        "id": "sl_atr_mult",
+        "type": "Constant",
+        "params": { "value": 1.3 }
+      },
+      {
+        "id": "tp_atr_mult",
+        "type": "Constant",
+        "params": { "value": 2.3 }
+      },
+      {
+        "id": "cooldown_bars",
+        "type": "Constant",
+        "params": { "value": 4 }
+      }
+    ],
+    "signals": [
+      {
+        "id": "ma52_slope_up",
+        "type": "SlopeUp",
+        "inputs": [{ "ref": "ma52" }],
+        "params": { "lookback": 1 }
+      },
+      {
+        "id": "ma52_slope_down",
+        "type": "SlopeDown",
+        "inputs": [{ "ref": "ma52" }],
+        "params": { "lookback": 1 }
+      },
+      {
+        "id": "ma52_turn_up",
+        "type": "And",
+        "inputs": [
+          {
+            "type": "Not",
+            "inputs": [{
+              "type": "SlopeUp",
+              "inputs": [{ "ref": "ma52", "offset": 1 }],
+              "params": { "lookback": 1 }
+            }]
+          },
+          { "ref": "ma52_slope_up" }
+        ],
+        "comment": "ma52[-2]<=ma52[-3] 且 ma52[-1]>ma52[-2]"
+      },
+      {
+        "id": "ma52_turn_down",
+        "type": "And",
+        "inputs": [
+          {
+            "type": "Not",
+            "inputs": [{
+              "type": "SlopeDown",
+              "inputs": [{ "ref": "ma52", "offset": 1 }],
+              "params": { "lookback": 1 }
+            }]
+          },
+          { "ref": "ma52_slope_down" }
+        ]
+      },
+      {
+        "id": "close_above_ma52",
+        "type": "GreaterThan",
+        "inputs": [{ "column": "Close" }, { "ref": "ma52" }]
+      },
+      {
+        "id": "close_below_ma52",
+        "type": "LessThan",
+        "inputs": [{ "column": "Close" }, { "ref": "ma52" }]
+      },
+      {
+        "id": "cross_up_ma52",
+        "type": "CrossAbove",
+        "inputs": [{ "column": "Close" }, { "ref": "ma52" }]
+      },
+      {
+        "id": "cross_down_ma52",
+        "type": "CrossBelow",
+        "inputs": [{ "column": "Close" }, { "ref": "ma52" }]
+      },
+      {
+        "id": "close_near_ma52",
+        "type": "NearPct",
+        "inputs": [{ "column": "Close" }, { "ref": "ma52" }],
+        "params": { "pct_ref": "near_ma_pct" }
+      },
+      {
+        "id": "close_up_bar",
+        "type": "GreaterThan",
+        "inputs": [
+          { "column": "Close" },
+          { "column": "Close", "offset": 1 }
+        ]
+      },
+      {
+        "id": "close_down_bar",
+        "type": "LessThan",
+        "inputs": [
+          { "column": "Close" },
+          { "column": "Close", "offset": 1 }
+        ]
+      },
+      {
+        "id": "pullback_hold",
+        "type": "And",
+        "inputs": [
+          { "ref": "close_above_ma52" },
+          { "ref": "close_near_ma52" },
+          { "ref": "close_up_bar" }
+        ]
+      },
+      {
+        "id": "bounce_fail",
+        "type": "And",
+        "inputs": [
+          { "ref": "close_below_ma52" },
+          { "ref": "close_near_ma52" },
+          { "ref": "close_down_bar" }
+        ]
+      },
+      {
+        "id": "bull_align",
+        "type": "And",
+        "inputs": [
+          {
+            "type": "GreaterThan",
+            "inputs": [{ "ref": "ma7" }, { "ref": "ma14" }]
+          },
+          {
+            "type": "GreaterThan",
+            "inputs": [{ "ref": "ma14" }, { "ref": "ma52" }]
+          }
+        ]
+      },
+      {
+        "id": "bear_align",
+        "type": "And",
+        "inputs": [
+          {
+            "type": "LessThan",
+            "inputs": [{ "ref": "ma7" }, { "ref": "ma14" }]
+          },
+          {
+            "type": "LessThan",
+            "inputs": [{ "ref": "ma14" }, { "ref": "ma52" }]
+          }
+        ]
+      },
+      {
+        "id": "ma7_above_ma14",
+        "type": "GreaterThan",
+        "inputs": [{ "ref": "ma7" }, { "ref": "ma14" }]
+      },
+      {
+        "id": "ma7_below_ma14",
+        "type": "LessThan",
+        "inputs": [{ "ref": "ma7" }, { "ref": "ma14" }]
+      },
+      {
+        "id": "reclaim_ma7",
+        "type": "CrossAbove",
+        "inputs": [{ "column": "Close" }, { "ref": "ma7" }]
+      },
+      {
+        "id": "lose_ma7",
+        "type": "CrossBelow",
+        "inputs": [{ "column": "Close" }, { "ref": "ma7" }]
+      },
+      {
+        "id": "gv_bull_trig_a",
+        "type": "And",
+        "inputs": [
+          { "ref": "ma52_turn_up" },
+          { "ref": "cross_up_ma52" },
+          { "ref": "ma7_above_ma14" }
+        ]
+      },
+      {
+        "id": "gv_bull_trig_b",
+        "type": "And",
+        "inputs": [{ "ref": "pullback_hold" }, { "ref": "ma7_above_ma14" }]
+      },
+      {
+        "id": "gv_bull_trig_c",
+        "type": "And",
+        "inputs": [{ "ref": "bull_align" }, { "ref": "reclaim_ma7" }]
+      },
+      {
+        "id": "gv_bull_base",
+        "type": "Or",
+        "inputs": [
+          { "ref": "gv_bull_trig_a" },
+          { "ref": "gv_bull_trig_b" },
+          { "ref": "gv_bull_trig_c" }
+        ],
+        "comment": "三选一触发；源码为 elif，语义等价于互斥优先，图上用 Or 近似"
+      },
+      {
+        "id": "gv_bear_trig_a",
+        "type": "And",
+        "inputs": [
+          { "ref": "ma52_turn_down" },
+          { "ref": "cross_down_ma52" },
+          { "ref": "ma7_below_ma14" }
+        ]
+      },
+      {
+        "id": "gv_bear_trig_b",
+        "type": "And",
+        "inputs": [{ "ref": "bounce_fail" }, { "ref": "ma7_below_ma14" }]
+      },
+      {
+        "id": "gv_bear_trig_c",
+        "type": "And",
+        "inputs": [{ "ref": "bear_align" }, { "ref": "lose_ma7" }]
+      },
+      {
+        "id": "gv_bear_base",
+        "type": "Or",
+        "inputs": [
+          { "ref": "gv_bear_trig_a" },
+          { "ref": "gv_bear_trig_b" },
+          { "ref": "gv_bear_trig_c" }
+        ]
+      },
+      {
+        "id": "granville_bull_raw",
+        "type": "Add",
+        "inputs": [
+          {
+            "type": "If",
+            "inputs": [{ "ref": "gv_bull_base" }, { "ref": "const_1" }, { "ref": "const_0" }]
+          },
+          {
+            "type": "If",
+            "inputs": [
+              {
+                "type": "And",
+                "inputs": [{ "ref": "gv_bull_base" }, { "ref": "bull_align" }]
+              },
+              { "ref": "const_1" },
+              { "ref": "const_0" }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "granville_bear_raw",
+        "type": "Add",
+        "inputs": [
+          {
+            "type": "If",
+            "inputs": [{ "ref": "gv_bear_base" }, { "ref": "const_1" }, { "ref": "const_0" }]
+          },
+          {
+            "type": "If",
+            "inputs": [
+              {
+                "type": "And",
+                "inputs": [{ "ref": "gv_bear_base" }, { "ref": "bear_align" }]
+              },
+              { "ref": "const_1" },
+              { "ref": "const_0" }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "granville_conflict",
+        "type": "And",
+        "inputs": [
+          {
+            "type": "GreaterThan",
+            "inputs": [{ "ref": "granville_bull_raw" }, { "ref": "const_0" }]
+          },
+          {
+            "type": "GreaterThan",
+            "inputs": [{ "ref": "granville_bear_raw" }, { "ref": "const_0" }]
+          }
+        ]
+      },
+      {
+        "id": "granville_score",
+        "type": "If",
+        "inputs": [
+          { "ref": "granville_conflict" },
+          { "ref": "const_0" },
+          {
+            "type": "If",
+            "inputs": [
+              {
+                "type": "GreaterThan",
+                "inputs": [{ "ref": "granville_bull_raw" }, { "ref": "const_0" }]
+              },
+              {
+                "type": "Min",
+                "inputs": [{ "ref": "granville_bull_raw" }, { "ref": "const_2" }]
+              },
+              {
+                "type": "If",
+                "inputs": [
+                  {
+                    "type": "GreaterThan",
+                    "inputs": [{ "ref": "granville_bear_raw" }, { "ref": "const_0" }]
+                  },
+                  {
+                    "type": "Negate",
+                    "inputs": [{
+                      "type": "Min",
+                      "inputs": [{ "ref": "granville_bear_raw" }, { "ref": "const_2" }]
+                    }]
+                  },
+                  { "ref": "const_0" }
+                ]
+              }
+            ]
+          }
+        ],
+        "comment": "输出整数 ∈ {-2,-1,0,1,2}"
+      },
+      {
+        "id": "k_cross_up_d",
+        "type": "CrossAbove",
+        "inputs": [{ "ref": "kdj.k" }, { "ref": "kdj.d" }]
+      },
+      {
+        "id": "k_cross_down_d",
+        "type": "CrossBelow",
+        "inputs": [{ "ref": "kdj.k" }, { "ref": "kdj.d" }]
+      },
+      {
+        "id": "j_below_80",
+        "type": "LessThan",
+        "inputs": [{ "ref": "kdj.j" }, { "ref": "kdj_j_overbuy" }]
+      },
+      {
+        "id": "j_above_20",
+        "type": "GreaterThan",
+        "inputs": [{ "ref": "kdj.j" }, { "ref": "kdj_j_oversell" }]
+      },
+      {
+        "id": "kdj_long",
+        "type": "And",
+        "inputs": [{ "ref": "k_cross_up_d" }, { "ref": "j_below_80" }]
+      },
+      {
+        "id": "kdj_short",
+        "type": "And",
+        "inputs": [{ "ref": "k_cross_down_d" }, { "ref": "j_above_20" }]
+      },
+      {
+        "id": "kdj_score",
+        "type": "If",
+        "inputs": [
+          { "ref": "kdj_long" },
+          { "ref": "const_1" },
+          {
+            "type": "If",
+            "inputs": [
+              { "ref": "kdj_short" },
+              { "type": "Negate", "inputs": [{ "ref": "const_1" }] },
+              { "ref": "const_0" }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "volume_spike",
+        "type": "GreaterThan",
+        "inputs": [
+          { "column": "Volume" },
+          {
+            "type": "Multiply",
+            "inputs": [{ "ref": "vol_ma20" }, { "ref": "vol_spike_ratio" }]
+          }
+        ]
+      },
+      {
+        "id": "direction_for_volume",
+        "type": "If",
+        "inputs": [
+          {
+            "type": "NotEqual",
+            "inputs": [{ "ref": "granville_score" }, { "ref": "const_0" }]
+          },
+          { "ref": "granville_score" },
+          { "ref": "kdj_score" }
+        ],
+        "comment": "gv!=0 用 gv 方向，否则用 kdj 方向"
+      },
+      {
+        "id": "volume_score",
+        "type": "If",
+        "inputs": [
+          {
+            "type": "And",
+            "inputs": [
+              { "ref": "volume_spike" },
+              {
+                "type": "GreaterThan",
+                "inputs": [{ "ref": "direction_for_volume" }, { "ref": "const_0" }]
+              }
+            ]
+          },
+          { "ref": "const_1" },
+          {
+            "type": "If",
+            "inputs": [
+              {
+                "type": "And",
+                "inputs": [
+                  { "ref": "volume_spike" },
+                  {
+                    "type": "LessThan",
+                    "inputs": [{ "ref": "direction_for_volume" }, { "ref": "const_0" }]
+                  }
+                ]
+              },
+              { "type": "Negate", "inputs": [{ "ref": "const_1" }] },
+              { "ref": "const_0" }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "conflict_penalty",
+        "type": "If",
+        "inputs": [
+          {
+            "type": "And",
+            "inputs": [
+              {
+                "type": "GreaterThan",
+                "inputs": [{ "ref": "granville_score" }, { "ref": "const_0" }]
+              },
+              {
+                "type": "LessThan",
+                "inputs": [{ "ref": "kdj_score" }, { "ref": "const_0" }]
+              }
+            ]
+          },
+          { "type": "Negate", "inputs": [{ "ref": "const_1" }] },
+          {
+            "type": "If",
+            "inputs": [
+              {
+                "type": "And",
+                "inputs": [
+                  {
+                    "type": "LessThan",
+                    "inputs": [{ "ref": "granville_score" }, { "ref": "const_0" }]
+                  },
+                  {
+                    "type": "GreaterThan",
+                    "inputs": [{ "ref": "kdj_score" }, { "ref": "const_0" }]
+                  }
+                ]
+              },
+              { "ref": "const_1" },
+              { "ref": "const_0" }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "score_raw",
+        "type": "Add",
+        "inputs": [
+          { "ref": "granville_score" },
+          { "ref": "volume_score" },
+          { "ref": "kdj_score" },
+          { "ref": "conflict_penalty" }
+        ]
+      },
+      {
+        "id": "score",
+        "type": "Clip",
+        "inputs": [{ "ref": "score_raw" }],
+        "params": { "min": -3, "max": 3 }
+      },
+      {
+        "id": "adx_strong",
+        "type": "GreaterThanOrEqual",
+        "inputs": [{ "ref": "adx14" }, { "ref": "adx_th" }]
+      },
+      {
+        "id": "regime_trend_up",
+        "type": "And",
+        "inputs": [
+          { "ref": "adx_strong" },
+          { "ref": "close_above_ma52" },
+          { "ref": "ma52_slope_up" }
+        ]
+      },
+      {
+        "id": "regime_trend_down",
+        "type": "And",
+        "inputs": [
+          { "ref": "adx_strong" },
+          { "ref": "close_below_ma52" },
+          { "ref": "ma52_slope_down" }
+        ]
+      },
+      {
+        "id": "regime_range",
+        "type": "Not",
+        "inputs": [{
+          "type": "Or",
+          "inputs": [
+            { "ref": "regime_trend_up" },
+            { "ref": "regime_trend_down" }
+          ]
+        }]
+      },
+      {
+        "id": "score_long",
+        "type": "GreaterThan",
+        "inputs": [{ "ref": "score" }, { "ref": "const_0" }]
+      },
+      {
+        "id": "score_short",
+        "type": "LessThan",
+        "inputs": [{ "ref": "score" }, { "ref": "const_0" }]
+      },
+      {
+        "id": "buy_condition",
+        "type": "And",
+        "inputs": [
+          { "ref": "score_long" },
+          { "ref": "regime_trend_up" }
+        ],
+        "comment": "RANGE 或逆趋势时 HOLD，不开多"
+      },
+      {
+        "id": "sell_condition",
+        "type": "And",
+        "inputs": [
+          { "ref": "score_short" },
+          { "ref": "regime_trend_down" }
+        ],
+        "comment": "RANGE 或逆趋势时 HOLD，不开空"
+      }
+    ],
+    "outputs": {
+      "buy_signal": "buy_condition",
+      "sell_signal": "sell_condition",
+      "score": "score",
+      "regime": {
+        "trend_up": "regime_trend_up",
+        "trend_down": "regime_trend_down",
+        "range": "regime_range"
+      },
+      "indicators": [
+        { "id": "ma7", "output_name": "ma7" },
+        { "id": "ma14", "output_name": "ma14" },
+        { "id": "ma52", "output_name": "ma52" },
+        { "id": "atr14", "output_name": "atr14" },
+        { "id": "adx14", "output_name": "adx14" },
+        { "id": "kdj.k", "output_name": "kdj_k" },
+        { "id": "kdj.d", "output_name": "kdj_d" },
+        { "id": "kdj.j", "output_name": "kdj_j" },
+        { "id": "vol_ma20", "output_name": "vol_ma20" },
+        { "id": "granville_score", "output_name": "granville" },
+        { "id": "volume_score", "output_name": "volume" },
+        { "id": "kdj_score", "output_name": "kdj" },
+        { "id": "conflict_penalty", "output_name": "conflict_penalty" },
+        { "id": "score", "output_name": "signal_score" },
+        { "id": "buy_condition", "output_name": "buy_condition" },
+        { "id": "sell_condition", "output_name": "sell_condition" },
+        { "id": "regime_trend_up", "output_name": "regime_trend_up" },
+        { "id": "regime_trend_down", "output_name": "regime_trend_down" },
+        { "id": "regime_range", "output_name": "regime_range" }
+      ]
+    },
+    "sizing": {
+      "mode": "legacy_fixed_lot",
+      "lot_by_abs_score": { "1": 1, "2": 1, "3": 1 },
+      "hold_when_score_zero": true,
+      "hold_when_regime_range": true,
+      "hold_when_against_regime": true
+    },
+    "risk": {
+      "stop_loss": {
+        "type": "ATRMultiple",
+        "params": { "atr_ref": "atr14", "mult": 1.3 }
+      },
+      "take_profit": {
+        "type": "ATRMultiple",
+        "params": { "atr_ref": "atr14", "mult": 2.3 }
+      },
+      "cooldown_bars": 4,
+      "trigger": "bar_high_low"
+    }
+  }
+}
