@@ -143,10 +143,18 @@ def run_local_falcon_backtest(
                     source.overseas_signal_symbol, duration_seconds=kline_seconds
                 )
             if bars.empty:
+                hint = ""
+                errs = getattr(bars, "attrs", {}).get("ensure_errors") if hasattr(bars, "attrs") else None
+                if errs:
+                    hint = " Details: " + "; ".join(str(x) for x in errs)
                 raise RuntimeError(
                     f"overseas cache missing for {source.overseas_signal_symbol}. "
-                    f"Run: PYTHONPATH=src python tools/download_overseas_cache.py "
-                    f"--ids {source.overseas_id} --intervals 5m"
+                    f"On a host that can reach Yahoo Finance, run: "
+                    f"PYTHONPATH=src python tools/download_overseas_cache.py "
+                    f"--ids {source.overseas_id} --intervals 5m "
+                    f"then sync data/market_cache to the server "
+                    f"(ECS often blocks Yahoo; Eastmoney alone is too shallow for multi-month backtests)."
+                    f"{hint}"
                 )
             try:
                 domestic_bars = ensure_cache(

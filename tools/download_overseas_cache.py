@@ -47,6 +47,13 @@ _BROWSER_UA = (
 )
 
 
+def _curl_bins() -> list[str]:
+    # Prefer platform-native curl; keep curl.exe for Windows shells.
+    if sys.platform.startswith("win"):
+        return ["curl.exe", "curl"]
+    return ["curl", "curl.exe"]
+
+
 def _http_get(url: str, *, timeout: int = 30) -> str:
     try:
         import urllib.request
@@ -56,30 +63,44 @@ def _http_get(url: str, *, timeout: int = 30) -> str:
             headers={"User-Agent": _BROWSER_UA, "Accept": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", errors="replace")
+            text = resp.read().decode("utf-8", errors="replace")
+            if text and not text.lstrip().startswith("<!DOCTYPE"):
+                return text
     except Exception:
         pass
-    # Windows / CN networks: curl often succeeds when urllib is blocked.
-    try:
-        completed = subprocess.run(
-            [
-                "curl.exe",
-                "-sL",
-                "--max-time",
-                str(timeout),
-                "-A",
-                _BROWSER_UA,
-                "-H",
-                "Accept: application/json",
-                url,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return completed.stdout or ""
-    except Exception:
-        return ""
+    # CN networks: curl often succeeds when urllib is blocked/challenged.
+    for bin_name in _curl_bins():
+        try:
+            completed = subprocess.run(
+                [
+                    bin_name,
+                    "-sL",
+                    "--max-time",
+                    str(timeout),
+                    "-A",
+                    _BROWSER_UA,
+                    "-H",
+                    "Accept: application/json",
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            text = completed.stdout or ""
+            if text and not text.lstrip().startswith("<!DOCTYPE"):
+                return text
+        except Exception:
+            continue
+    return ""
+
+
+# Spot Yahoo tickers (XAUUSD=X / XAGUSD=X) are often delisted; COMEX continuous
+# still provides deep 5m archives for Strategy Lab backtests.
+YAHOO_ARCHIVE_FALLBACK: dict[str, str] = {
+    "gc": "GC=F",
+    "si": "SI=F",
+}
 
 
 def fetch_yahoo_bars(
@@ -155,28 +176,61 @@ def bars_to_frame(bars: list[dict[str, Any]], *, underlying: str) -> pd.DataFram
     return pd.DataFrame(rows)
 
 
+def _yahoo_symbols_for(product_id: str, primary: str) -> list[str]:
+    ordered: list[str] = []
+    for sym in (primary, YAHOO_ARCHIVE_FALLBACK.get(product_id, "")):
+        s = (sym or "").strip()
+        if s and s not in ordered:
+            ordered.append(s)
+    return ordered
+
+
 def download_one(product_id: str, *, intervals: list[str]) -> dict[str, int]:
     spec = overseas_by_id(product_id)
     out: dict[str, int] = {}
     for interval in intervals:
         duration = INTERVAL_TO_DURATION[interval]
         range_ = DEFAULT_RANGE[interval]
-        bars = fetch_yahoo_bars(spec.yahoo_symbol, interval=interval, range_=range_)
+        bars: list[dict[str, Any]] = []
+        used_symbol = ""
+        source = ""
+        for ys in _yahoo_symbols_for(product_id, spec.yahoo_symbol):
+            bars = fetch_yahoo_bars(ys, interval=interval, range_=range_)
+            if bars:
+                used_symbol = ys
+                source = f"yahoo_{ys}_{interval}_{range_}"
+                break
+        if not bars and interval == "5m" and spec.eastmoney_secid:
+            # CN / blocked-Yahoo fallback: shallow Eastmoney history (smoke only).
+            try:
+                from ignitequant.market.overseas_bars import fetch_eastmoney_5m_bars
+
+                bars = fetch_eastmoney_5m_bars(spec.eastmoney_secid, limit=20_000)
+            except Exception:
+                bars = []
+            if bars:
+                used_symbol = spec.eastmoney_secid
+                source = f"eastmoney_{spec.eastmoney_secid}_5m"
         if not bars:
-            print(f"[MISS] {spec.id} {interval}/{range_} empty", flush=True)
+            print(
+                f"[MISS] {spec.id} {interval}/{range_} empty "
+                f"(tried yahoo={_yahoo_symbols_for(product_id, spec.yahoo_symbol)}"
+                f"{'+eastmoney' if interval == '5m' and spec.eastmoney_secid else ''})",
+                flush=True,
+            )
             out[interval] = 0
             continue
-        frame = bars_to_frame(bars, underlying=spec.yahoo_symbol)
+        frame = bars_to_frame(bars, underlying=spec.signal_symbol)
         path = merge_and_save(
             spec.signal_symbol,
             frame,
             duration_seconds=duration,
-            source=f"yahoo_{interval}_{range_}",
+            source=source or f"yahoo_{interval}_{range_}",
         )
         start = datetime.fromtimestamp(bars[0]["time"], tz=timezone.utc)
         end = datetime.fromtimestamp(bars[-1]["time"], tz=timezone.utc)
         print(
-            f"[OK] {spec.id:3} {interval:3} rows={len(bars)} "
+            f"[OK] {spec.id:3} {interval:3} rows={len(bars)} via={used_symbol} "
             f"{start.date()}→{end.date()} → {path}",
             flush=True,
         )

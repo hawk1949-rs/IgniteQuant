@@ -32,35 +32,47 @@ _EASTMONEY_HOSTS = (
 )
 
 
+def _curl_bins() -> list[str]:
+    import sys
+
+    if sys.platform.startswith("win"):
+        return ["curl.exe", "curl"]
+    return ["curl", "curl.exe"]
+
+
 def _http_get_text(url: str, *, headers: dict[str, str], timeout: float = 12) -> str | None:
     try:
         import requests
 
         resp = requests.get(url, headers=headers, timeout=timeout)
         resp.raise_for_status()
-        return resp.text
+        text = resp.text
+        if text and not text.lstrip().startswith("<!DOCTYPE"):
+            return text
     except Exception:
         pass
-    try:
-        cmd = [
-            "curl.exe",
-            "-sL",
-            "--fail",
-            "--max-time",
-            str(int(timeout)),
-            "-A",
-            headers.get("User-Agent") or _BROWSER_UA,
-            "-H",
-            f"Accept: {headers.get('Accept') or '*/*'}",
-        ]
-        if headers.get("Referer"):
-            cmd.extend(["-H", f"Referer: {headers['Referer']}"])
-        cmd.append(url)
-        completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if completed.returncode == 0 and completed.stdout:
-            return completed.stdout
-    except Exception:
-        pass
+    for bin_name in _curl_bins():
+        try:
+            cmd = [
+                bin_name,
+                "-sL",
+                "--fail",
+                "--max-time",
+                str(int(timeout)),
+                "-A",
+                headers.get("User-Agent") or _BROWSER_UA,
+                "-H",
+                f"Accept: {headers.get('Accept') or '*/*'}",
+            ]
+            if headers.get("Referer"):
+                cmd.extend(["-H", f"Referer: {headers['Referer']}"])
+            cmd.append(url)
+            completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            text = completed.stdout or ""
+            if completed.returncode == 0 and text and not text.lstrip().startswith("<!DOCTYPE"):
+                return text
+        except Exception:
+            continue
     return None
 
 
@@ -435,6 +447,7 @@ def ensure_overseas_cache_bars(
     if duration_seconds != 300:
         # Archive tool currently downloads 5m/1h/1d; only auto-fill 5m.
         return frame
+    errors: list[str] = []
     try:
         import importlib.util
 
@@ -442,17 +455,22 @@ def ensure_overseas_cache_bars(
         mod_name = "ignitequant_download_overseas_cache"
         py_spec = importlib.util.spec_from_file_location(mod_name, tool)
         if py_spec is None or py_spec.loader is None:
-            return frame
-        mod = importlib.util.module_from_spec(py_spec)
-        py_spec.loader.exec_module(mod)
-        mod.download_one(overseas_id, intervals=["5m"])
-    except Exception:
-        return load_overseas_cache_bars(
-            spec.signal_symbol, duration_seconds=duration_seconds
-        )
-    return load_overseas_cache_bars(
+            errors.append(f"download tool missing: {tool}")
+        else:
+            mod = importlib.util.module_from_spec(py_spec)
+            py_spec.loader.exec_module(mod)
+            counts = mod.download_one(overseas_id, intervals=["5m"])
+            if int(counts.get("5m") or 0) <= 0:
+                errors.append("download_one returned 0 rows for 5m")
+    except Exception as exc:
+        errors.append(f"{type(exc).__name__}: {exc}")
+    frame = load_overseas_cache_bars(
         spec.signal_symbol, duration_seconds=duration_seconds
     )
+    if frame.empty and errors:
+        # Keep empty return; caller raises a user-facing command hint.
+        frame.attrs["ensure_errors"] = tuple(errors)
+    return frame
 
 
 def load_decision_bars_for_spec(
