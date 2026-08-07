@@ -102,14 +102,39 @@ def pretrade_target_for_result(
     result: PipelineResult,
     *,
     net_position: int,
+    override_desired: int | None = None,
 ) -> TargetPosition:
     """Target actually submitted after this bar (exits flatten to 0).
 
     Pipeline sizing may still say HOLD/desired=net while applied_action is
     STOP_LOSS/TAKE_PROFIT; pretrade must evaluate the flatten intent so
     MARKET_CLOSED rejects instead of a misleading PASS on HOLD.
+
+    ``override_desired`` is used for HOLD/COOLDOWN broker-resync where the
+    runtime ``current_target`` differs from the bar's sizing target.
     """
     target = result.target
+    if override_desired is not None:
+        want = int(override_desired)
+        if want == int(target.desired_position) and int(target.current_position) == int(
+            net_position
+        ):
+            return target
+        action = (
+            DecisionAction.FLAT
+            if want == 0
+            else DecisionAction.HOLD
+            if want == int(net_position)
+            else DecisionAction.TARGET
+        )
+        return replace(
+            target,
+            decision_action=action,
+            current_position=int(net_position),
+            desired_position=want,
+            delta=want - int(net_position),
+            reason_codes=tuple(target.reason_codes) + ("TARGET_NET_RESYNC",),
+        )
     if result.applied_action not in _EXIT_ACTIONS:
         return target
     if int(target.desired_position) == 0 and int(target.delta) == -int(net_position):
@@ -134,9 +159,14 @@ def apply_pretrade(
     symbol: str | None = None,
     trade_status: str = "CONTINUOUS",
     data_age_seconds: float = 0.0,
+    override_desired: int | None = None,
 ) -> RiskDecision:
     symbol = symbol or result.target.symbol
-    target = pretrade_target_for_result(result, net_position=net_position)
+    target = pretrade_target_for_result(
+        result,
+        net_position=net_position,
+        override_desired=override_desired,
+    )
     return risk_engine.evaluate(
         target=target,
         signal=result.signal,

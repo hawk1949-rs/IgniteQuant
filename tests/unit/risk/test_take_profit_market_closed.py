@@ -129,9 +129,26 @@ def test_take_profit_open_allows_flatten() -> None:
     assert pre.approved_position == 0
 
 
-def test_hold_closed_still_passes_no_order() -> None:
+def test_hold_resync_closed_rejects_without_pass_on_sizing_hold() -> None:
+    """HOLD sizing may say desired=net while runtime target is flat — still reject."""
     result = _result(applied_action="HOLD", desired=1, current=1)
-    # HOLD is not an exit action; target unchanged → no order needed.
+    pre = apply_pretrade(
+        result,
+        net_position=1,
+        last_price=936.0,
+        risk_engine=make_risk_engine(),
+        trade_status=TRADE_STATUS_CLOSED,
+        symbol="SHFE.au2610",
+        override_desired=0,
+    )
+    assert pre.action is RiskAction.REJECT
+    assert ReasonCode.MARKET_CLOSED.value in pre.rule_hits
+    assert pre.requested_position == 0
+    assert pre.approved_position == 1
+
+
+def test_hold_closed_still_passes_when_no_order_needed() -> None:
+    result = _result(applied_action="HOLD", desired=1, current=1)
     pre = apply_pretrade(
         result,
         net_position=1,
@@ -142,3 +159,4 @@ def test_hold_closed_still_passes_no_order() -> None:
     )
     assert pre.action is RiskAction.PASS
     assert pre.approved_position == 1
+

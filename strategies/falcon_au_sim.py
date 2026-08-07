@@ -32,7 +32,7 @@ if str(ROOT / "src") not in sys.path:
 
 from falcon.sizing import LOT_BY_SIGNAL
 from ignitequant.config import load_active_decision_config
-from ignitequant.domain.enums import RiskAction
+from ignitequant.domain.enums import ReasonCode, RiskAction
 from ignitequant.domain.models import AccountSnapshot, FillEvent, PositionSnapshot
 from ignitequant.engine import (
     BrokerFacts,
@@ -42,6 +42,7 @@ from ignitequant.engine import (
     apply_pretrade,
     atr_of,
     close_of,
+    domestic_session_allows_orders,
     healthy_runtime,
     make_risk_engine,
     market_closed_reject_decision,
@@ -1841,6 +1842,25 @@ def main() -> None:
                 == int(pipeline.current_target)
                 and int(pipeline.current_target) != net_pos
             ):
+                if not domestic_session_allows_orders(trade_status):
+                    print(
+                        f"{dt} 等待成交暂停 | target={pipeline.current_target} net={net_pos} "
+                        f"(内盘休市，不轮询成交)",
+                        flush=True,
+                    )
+                    _persist_state(
+                        persist,
+                        pipeline,
+                        symbol=trade_symbol,
+                        net=net_pos,
+                        pending=int(pipeline.current_target),
+                        last_bar_id=result.bar_id,
+                        config_hash=cfg.config_hash(),
+                        last_price=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0)),
+                        signal_close=close_of(result),
+                    )
+                    last_saved_bar_id = result.bar_id
+                    continue
                 print(
                     f"{dt} 等待成交 | target={pipeline.current_target} net={net_pos} "
                     f"intent={executor.active_intent.intent_id}",
@@ -1907,6 +1927,9 @@ def main() -> None:
                 runtime=runtime,
                 symbol=trade_symbol,
                 trade_status=trade_status,
+                override_desired=(
+                    int(pipeline.current_target) if hold_like else None
+                ),
             )
             if persist is not None:
                 persist.record_risk(result.bar_id, pretrade)
@@ -1945,7 +1968,11 @@ def main() -> None:
                         and net_pos != 0
                         else (
                             int(pipeline.current_target)
-                            if hold_like and int(pipeline.current_target) != net_pos
+                            if (
+                                hold_like
+                                or result.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}
+                            )
+                            and int(pipeline.current_target) != net_pos
                             else None
                         )
                     ),
@@ -1966,6 +1993,39 @@ def main() -> None:
                     else int(pretrade.approved_position)
                 )
             )
+            allow_submit, submit_hits = may_submit_domestic_order(
+                trade_status=trade_status,
+                pretrade=pretrade,
+            )
+            if not allow_submit:
+                print(
+                    f"{dt} 拒绝下单 | hits={submit_hits} desired={desired} net={net_pos}",
+                    flush=True,
+                )
+                if persist is not None and ReasonCode.MARKET_CLOSED.value in submit_hits:
+                    persist.record_risk(
+                        result.bar_id,
+                        market_closed_reject_decision(
+                            decision_id=result.bar_id,
+                            net_position=net_pos,
+                            requested_position=desired,
+                            config_version=cfg.config_version,
+                        ),
+                    )
+                _persist_state(
+                    persist,
+                    pipeline,
+                    symbol=trade_symbol,
+                    net=net_pos,
+                    pending=desired if desired != net_pos else None,
+                    last_bar_id=result.bar_id,
+                    config_hash=cfg.config_hash(),
+                    last_price=_domestic_mark(q_px, float(getattr(main_quote, "last_price", 0) or 0)),
+                    signal_close=close_of(result),
+                )
+                last_saved_bar_id = result.bar_id
+                continue
+
             if result.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}:
                 print(
                     f"{dt} 风控{result.applied_action} 清仓 | "
@@ -1979,6 +2039,11 @@ def main() -> None:
                     f"{dt} 调仓 {prev}->{desired} | {trade_symbol} "
                     f"regime={result.factors.regime.value} "
                     f"signal={result.signal.legacy_signal} ({parts}) atr={atr:.2f}",
+                    flush=True,
+                )
+            elif hold_like:
+                print(
+                    f"{dt} 仓位脱节补齐下单 | {net_pos}->{desired}",
                     flush=True,
                 )
 
