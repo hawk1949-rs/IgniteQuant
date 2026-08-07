@@ -1477,10 +1477,10 @@ def main() -> None:
                         want = int(pipeline.current_target)
                         increasing = abs(want) > abs(net)
                         rt_hb = persist.runtime if persist is not None else healthy_runtime()
-                        # DEGRADED / kill-switch / 休市：禁止心跳旁路加仓（减仓仍允许对齐）。
-                        if increasing and trade_status == TRADE_STATUS_CLOSED:
+                        # 休市：开平仓都不走心跳旁路（与 MarketClosedRule / 座舱展示一致）。
+                        if trade_status == TRADE_STATUS_CLOSED:
                             print(
-                                f"[心跳] 跳过加仓补齐 target={want} net={net} "
+                                f"[心跳] 跳过仓位补齐 target={want} net={net} "
                                 f"(内盘休市 MARKET_CLOSED)",
                                 flush=True,
                             )

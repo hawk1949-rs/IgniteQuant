@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ignitequant.config.decision import DecisionConfig, default_decision_config
-from ignitequant.domain.enums import RiskAction
+from ignitequant.domain.enums import DecisionAction, RiskAction
 from ignitequant.domain.models import (
     AccountSnapshot,
     ContractSnapshot,
@@ -16,11 +17,15 @@ from ignitequant.domain.models import (
     PositionSnapshot,
     RiskDecision,
     RuntimeSnapshot,
+    TargetPosition,
 )
 from ignitequant.risk import RiskEngine
 
 if TYPE_CHECKING:
     from ignitequant.execution.target_position import TargetPositionExecutor
+
+
+_EXIT_ACTIONS = frozenset({"STOP_LOSS", "TAKE_PROFIT"})
 
 
 def healthy_runtime(*, roll_in_progress: bool = False) -> RuntimeSnapshot:
@@ -37,6 +42,32 @@ def healthy_runtime(*, roll_in_progress: bool = False) -> RuntimeSnapshot:
     )
 
 
+def pretrade_target_for_result(
+    result: PipelineResult,
+    *,
+    net_position: int,
+) -> TargetPosition:
+    """Target actually submitted after this bar (exits flatten to 0).
+
+    Pipeline sizing may still say HOLD/desired=net while applied_action is
+    STOP_LOSS/TAKE_PROFIT; pretrade must evaluate the flatten intent so
+    MARKET_CLOSED rejects instead of a misleading PASS on HOLD.
+    """
+    target = result.target
+    if result.applied_action not in _EXIT_ACTIONS:
+        return target
+    if int(target.desired_position) == 0 and int(target.delta) == -int(net_position):
+        return target
+    return replace(
+        target,
+        decision_action=DecisionAction.FLAT,
+        current_position=int(net_position),
+        desired_position=0,
+        delta=-int(net_position),
+        reason_codes=tuple(target.reason_codes) + (str(result.applied_action),),
+    )
+
+
 def apply_pretrade(
     result: PipelineResult,
     *,
@@ -49,8 +80,9 @@ def apply_pretrade(
     data_age_seconds: float = 0.0,
 ) -> RiskDecision:
     symbol = symbol or result.target.symbol
+    target = pretrade_target_for_result(result, net_position=net_position)
     return risk_engine.evaluate(
-        target=result.target,
+        target=target,
         signal=result.signal,
         market=MarketSnapshot(
             symbol=symbol,
@@ -97,9 +129,10 @@ def submit_approved_target(
     if result.applied_action not in {"TARGET", "STOP_LOSS", "TAKE_PROFIT"}:
         return out
 
+    # Prefer pretrade-approved size (exits already evaluated as desired=0).
     desired = int(pretrade.approved_position)
-    # Align exit actions to flat.
-    if result.applied_action in {"STOP_LOSS", "TAKE_PROFIT"}:
+    if result.applied_action in _EXIT_ACTIONS and desired != 0:
+        # Safety: never leave a residual risk after an approved exit path.
         desired = 0
 
     intent = executor.set_target(
