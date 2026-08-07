@@ -6,8 +6,10 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from decimal import Decimal
+
 from ignitequant.config.decision import DecisionConfig, default_decision_config
-from ignitequant.domain.enums import DecisionAction, RiskAction
+from ignitequant.domain.enums import DecisionAction, ReasonCode, RiskAction
 from ignitequant.domain.models import (
     AccountSnapshot,
     ContractSnapshot,
@@ -19,6 +21,7 @@ from ignitequant.domain.models import (
     RuntimeSnapshot,
     TargetPosition,
 )
+from ignitequant.market.session import TRADE_STATUS_OPEN
 from ignitequant.risk import RiskEngine
 
 if TYPE_CHECKING:
@@ -26,6 +29,59 @@ if TYPE_CHECKING:
 
 
 _EXIT_ACTIONS = frozenset({"STOP_LOSS", "TAKE_PROFIT"})
+_OPEN_TRADE_STATUSES = frozenset(
+    {"", "CONTINUOUS", "OPEN", "TRADING", "AUCTION", TRADE_STATUS_OPEN}
+)
+
+
+def domestic_session_allows_orders(trade_status: str | None) -> bool:
+    """True only when domestic continuous session can accept new orders."""
+    status = (trade_status or "").strip().upper()
+    return status in _OPEN_TRADE_STATUSES
+
+
+def market_closed_reject_decision(
+    *,
+    decision_id: str,
+    net_position: int,
+    requested_position: int,
+    config_version: str = "falcon_legacy_v1",
+) -> RiskDecision:
+    """Synthetic REJECT for ops paths (boot flatten / catch-up) outside session."""
+    now = datetime.now(timezone.utc)
+    return RiskDecision(
+        risk_decision_id=f"pretrade:{decision_id}",
+        target_id=decision_id,
+        action=RiskAction.REJECT,
+        requested_position=int(requested_position),
+        approved_position=int(net_position),
+        requested_risk=Decimal("0"),
+        approved_risk=Decimal("0"),
+        rule_hits=(ReasonCode.MARKET_CLOSED.value,),
+        warnings=("domestic market closed; signal/ops recorded, no order",),
+        evaluated_at=now,
+        risk_config_version=config_version,
+        risk_snapshot_id="runtime:SESSION",
+    )
+
+
+def may_submit_domestic_order(
+    *,
+    trade_status: str | None,
+    pretrade: RiskDecision | None = None,
+) -> tuple[bool, tuple[str, ...]]:
+    """Gate every domestic submit: session open + pretrade PASS/RESIZE only.
+
+    Rejected paths must not create order_intent or fills.
+    """
+    if not domestic_session_allows_orders(trade_status):
+        return False, (ReasonCode.MARKET_CLOSED.value,)
+    if pretrade is None:
+        return True, ()
+    if pretrade.action in {RiskAction.REJECT, RiskAction.HALT}:
+        hits = tuple(pretrade.rule_hits) or (pretrade.action.value,)
+        return False, hits
+    return True, ()
 
 
 def healthy_runtime(*, roll_in_progress: bool = False) -> RuntimeSnapshot:

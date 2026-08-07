@@ -44,6 +44,8 @@ from ignitequant.engine import (
     close_of,
     healthy_runtime,
     make_risk_engine,
+    market_closed_reject_decision,
+    may_submit_domestic_order,
     score_parts,
 )
 from ignitequant.execution import TargetPositionExecutor
@@ -53,11 +55,7 @@ from ignitequant.market.overseas_bars import (
     drop_forming_5m_bar,
     fetch_for_signal_source,
 )
-from ignitequant.market.session import (
-    TRADE_STATUS_CLOSED,
-    shfe_precious_session_open,
-    trade_status_for_session,
-)
+from ignitequant.market.session import shfe_precious_session_open
 from ignitequant.market.symbols import resolve_signal_source
 from ignitequant.persistence import PersistenceSession
 from ignitequant.portfolio.stop_scale import scale_atr_to_entry
@@ -912,6 +910,11 @@ def main() -> None:
                     )
                     pipeline.force_flat()
                     decision_flat = f"boot-flat:{trade_symbol}:{net_boot}"
+                    boot_session = shfe_precious_session_open()
+                    boot_trade_status = str(boot_session["trade_status"])
+                    allow_boot, boot_hits = may_submit_domestic_order(
+                        trade_status=boot_trade_status
+                    )
                     # Thinking-chain must show 1→0 启动补平 (NOT the later HOLD 0→0).
                     persist.record_ops_decision(
                         decision_id=decision_flat,
@@ -922,47 +925,85 @@ def main() -> None:
                         legacy_signal=0,
                         payload={
                             "applied_action": "BOOT_FLATTEN",
-                            "reason_codes": ["BOOT_FLATTEN_PENDING"],
-                            "note": "策略目标已为0但券商仍有仓，启动时对齐平仓（非止盈/止损）",
+                            "reason_codes": (
+                                list(boot_hits)
+                                if not allow_boot
+                                else ["BOOT_FLATTEN_PENDING"]
+                            ),
+                            "note": (
+                                "内盘休市：启动补平仅记决策，不登记委托/成交"
+                                if not allow_boot
+                                else "策略目标已为0但券商仍有仓，启动时对齐平仓（非止盈/止损）"
+                            ),
                             "pending_desired": pending0,
                             "restored_target": 0,
+                            "trade_status": boot_trade_status,
+                            "session_label": boot_session.get("label"),
                         },
                     )
-                    intent_flat = executor.set_target(
-                        0,
-                        decision_id=decision_flat,
-                        current_net=net_boot,
-                        urgency="HIGH",
-                        reason_codes=("BOOT_FLATTEN_PENDING",),
-                        idempotency_key=f"boot-flat:{trade_symbol}:{net_boot}",
-                    )
-                    if intent_flat:
-                        persist.record_intent(intent_flat)
-                        boot_px = float(getattr(main_quote, "last_price", 0) or 0)
-                        _wait_fill_briefly(
-                            api,
-                            executor=executor,
-                            position=position,
-                            persist=persist,
-                            last_price=boot_px,
-                            atr=0.0,
-                            signal=0,
-                            pipeline=pipeline,
-                            trade_symbol=trade_symbol,
-                            config_hash=cfg.config_hash(),
-                            last_bar_id=decision_flat,
-                            domestic_mark=boot_px if boot_px > 0 else None,
-                            sl_atr_mult=float(cfg.risk.sl_atr_mult),
-                            tp_atr_mult=float(cfg.risk.tp_atr_mult),
+                    if not allow_boot:
+                        persist.record_risk(
+                            decision_flat,
+                            market_closed_reject_decision(
+                                decision_id=decision_flat,
+                                net_position=net_boot,
+                                requested_position=0,
+                                config_version=cfg.config_version,
+                            ),
                         )
-                    persist.snapshot_position(
-                        _tq_position_snapshot(
-                            trade_symbol,
-                            position,
-                            last_price=float(getattr(main_quote, "last_price", 0) or 0) or None,
-                        ),
-                        source="broker_boot_flatten",
-                    )
+                        print(
+                            f"启动补平拒绝下单 | hits={boot_hits} "
+                            f"session={boot_session.get('label')}",
+                            flush=True,
+                        )
+                        _persist_state(
+                            persist,
+                            pipeline,
+                            symbol=trade_symbol,
+                            net=net_boot,
+                            pending=0,
+                            last_bar_id=decision_flat,
+                            config_hash=cfg.config_hash(),
+                            last_price=float(getattr(main_quote, "last_price", 0) or 0)
+                            or None,
+                        )
+                    else:
+                        intent_flat = executor.set_target(
+                            0,
+                            decision_id=decision_flat,
+                            current_net=net_boot,
+                            urgency="HIGH",
+                            reason_codes=("BOOT_FLATTEN_PENDING",),
+                            idempotency_key=f"boot-flat:{trade_symbol}:{net_boot}",
+                        )
+                        if intent_flat:
+                            persist.record_intent(intent_flat)
+                            boot_px = float(getattr(main_quote, "last_price", 0) or 0)
+                            _wait_fill_briefly(
+                                api,
+                                executor=executor,
+                                position=position,
+                                persist=persist,
+                                last_price=boot_px,
+                                atr=0.0,
+                                signal=0,
+                                pipeline=pipeline,
+                                trade_symbol=trade_symbol,
+                                config_hash=cfg.config_hash(),
+                                last_bar_id=decision_flat,
+                                domestic_mark=boot_px if boot_px > 0 else None,
+                                sl_atr_mult=float(cfg.risk.sl_atr_mult),
+                                tp_atr_mult=float(cfg.risk.tp_atr_mult),
+                            )
+                        persist.snapshot_position(
+                            _tq_position_snapshot(
+                                trade_symbol,
+                                position,
+                                last_price=float(getattr(main_quote, "last_price", 0) or 0)
+                                or None,
+                            ),
+                            source="broker_boot_flatten",
+                        )
 
             # 启动补跑：把 last_bar_id 之后漏掉的已完成 5m K 写入决策链，并推进内存目标。
             if persist is not None and len(klines) >= 2:
@@ -991,7 +1032,18 @@ def main() -> None:
                         if want != net_cu and executor is not None:
                             rt_cu = persist.runtime
                             increasing = abs(want) > abs(net_cu)
-                            if increasing and (
+                            cu_session = shfe_precious_session_open()
+                            cu_status = str(cu_session["trade_status"])
+                            allow_cu, cu_hits = may_submit_domestic_order(
+                                trade_status=cu_status
+                            )
+                            if not allow_cu:
+                                print(
+                                    f"启动补跑拒绝下单 | target={want} net={net_cu} "
+                                    f"hits={cu_hits} session={cu_session.get('label')}",
+                                    flush=True,
+                                )
+                            elif increasing and (
                                 not rt_cu.reconciliation_matched
                                 or rt_cu.kill_switch_active
                                 or rt_cu.unknown_order_count > 0
@@ -1478,10 +1530,13 @@ def main() -> None:
                         increasing = abs(want) > abs(net)
                         rt_hb = persist.runtime if persist is not None else healthy_runtime()
                         # 休市：开平仓都不走心跳旁路（与 MarketClosedRule / 座舱展示一致）。
-                        if trade_status == TRADE_STATUS_CLOSED:
+                        allow_hb, hb_hits = may_submit_domestic_order(
+                            trade_status=trade_status
+                        )
+                        if not allow_hb:
                             print(
                                 f"[心跳] 跳过仓位补齐 target={want} net={net} "
-                                f"(内盘休市 MARKET_CLOSED)",
+                                f"(hits={hb_hits})",
                                 flush=True,
                             )
                         elif increasing and (
@@ -1598,6 +1653,16 @@ def main() -> None:
                     )
                     net_old = _broker_net(position) if position is not None else 0
                     pipeline.force_flat()
+                    allow_roll, roll_hits = may_submit_domestic_order(
+                        trade_status=trade_status
+                    )
+                    if not allow_roll:
+                        print(
+                            f"换月平仓拒绝下单 | hits={roll_hits} "
+                            f"session={session.get('label')}",
+                            flush=True,
+                        )
+                        continue
                     intent = executor.set_target(
                         0,
                         decision_id=f"roll:{trade_symbol}",
