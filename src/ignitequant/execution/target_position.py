@@ -158,8 +158,20 @@ class TargetPositionExecutor:
         )
         return intent
 
-    def poll_position(self, net: int, *, last_price: float, atr: float, signal: int) -> FillEvent | None:
-        """Confirm fill when net matches active intent (Phase 3 fill gate)."""
+    def poll_position(
+        self,
+        net: int,
+        *,
+        last_price: float,
+        atr: float,
+        signal: int,
+        fill_price: float | None = None,
+    ) -> FillEvent | None:
+        """Confirm fill when net matches active intent (Phase 3 fill gate).
+
+        ``fill_price`` should be the broker average open price when available.
+        ``last_price`` is only a fallback (and remains the confirm-time mark).
+        """
         intent = self.active_intent
         if intent is None:
             return None
@@ -184,11 +196,18 @@ class TargetPositionExecutor:
             )
             return None
 
+        try:
+            confirmed_px = float(fill_price) if fill_price is not None else float(last_price)
+        except (TypeError, ValueError):
+            confirmed_px = float(last_price)
+        if confirmed_px <= 0 or confirmed_px != confirmed_px:
+            confirmed_px = float(last_price)
+
         fill = FillEvent(
             fill_id=f"fill-{uuid.uuid4().hex[:10]}",
             intent_id=intent.intent_id,
             symbol=self.symbol,
-            price=float(last_price),
+            price=confirmed_px,
             qty=qty,
             fee=0.0,
             side="BUY" if intent.desired_position > intent.current_position else "SELL",
@@ -199,9 +218,9 @@ class TargetPositionExecutor:
             symbol=self.symbol,
             side_lots=net,
             signal=signal,
-            intent_price=last_price,
+            intent_price=float(last_price),
             intent_atr=atr,
-            fill_price=float(last_price),
+            fill_price=confirmed_px,
             stop_price=None,
             take_price=None,
             confirmed=True,
@@ -209,7 +228,15 @@ class TargetPositionExecutor:
         )
         self.state.on_fill_confirmed(fill, entry)
         self.events.append(
-            ExecutorEvent("fill_confirmed", {"net": net, "price": last_price, "intent": intent.intent_id})
+            ExecutorEvent(
+                "fill_confirmed",
+                {
+                    "net": net,
+                    "price": confirmed_px,
+                    "last_price": float(last_price),
+                    "intent": intent.intent_id,
+                },
+            )
         )
         self.active_intent = None
         return fill

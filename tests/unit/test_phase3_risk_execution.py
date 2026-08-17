@@ -180,13 +180,14 @@ def test_executor_idempotent_and_fill_gate() -> None:
     assert ex._task.targets == [1]  # duplicate suppressed
 
     assert ex.state.phase.value == "ENTRY_PENDING"
-    fill = ex.poll_position(1, last_price=801.0, atr=1.5, signal=2)
+    fill = ex.poll_position(1, last_price=801.0, atr=1.5, signal=2, fill_price=799.5)
     assert fill is not None
-    assert fill.price == 801.0
+    assert fill.price == 799.5
     assert ex.state.phase.value == "OPEN"
     assert ex.state.entry is not None
     assert ex.state.entry.confirmed is True
-    assert ex.state.entry.fill_price == 801.0
+    assert ex.state.entry.fill_price == 799.5
+    assert ex.state.entry.intent_price == 801.0
 
 
 def test_roll_blocks_switch_until_flat() -> None:

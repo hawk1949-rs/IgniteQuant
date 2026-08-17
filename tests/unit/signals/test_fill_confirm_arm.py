@@ -6,6 +6,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from ignitequant.config.decision import default_decision_config
 from ignitequant.domain.models import FillEvent, OrderIntent
 from ignitequant.engine import FalconDecisionPipeline
@@ -13,7 +15,7 @@ from ignitequant.execution.target_position import TargetPositionExecutor
 
 
 class _FakePos:
-    def __init__(self, net: int) -> None:
+    def __init__(self, net: int, *, avg: float = 900.0) -> None:
         self.pos = net
         self.pos_long = max(net, 0)
         self.pos_short = max(-net, 0)
@@ -23,8 +25,8 @@ class _FakePos:
         self.pos_short_his = 0
         self.float_profit = 0.0
         self.margin = 0.0
-        self.open_price_long = 900.0 if net > 0 else None
-        self.open_price_short = 900.0 if net < 0 else None
+        self.open_price_long = avg if net > 0 else None
+        self.open_price_short = avg if net < 0 else None
 
 
 def test_try_confirm_fill_arms_and_persists(monkeypatch) -> None:
@@ -93,11 +95,78 @@ def test_try_confirm_fill_arms_and_persists(monkeypatch) -> None:
     )
     assert isinstance(fill, FillEvent)
     assert fill.qty == 1
+    assert fill.price == 900.0
     assert pipeline.risk.state.stop_price is not None
     assert saved["net"] == 1
     assert saved["pending"] is None
     assert saved["display"] is not None
     assert saved["display"]["display_stop_price"] < 900.0
+
+
+def test_try_confirm_fill_arms_from_broker_avg_not_last(monkeypatch) -> None:
+    """Delayed confirm must lock SL/TP on open avg, not drifted last_price."""
+    import strategies.falcon_au_sim as sim
+
+    cfg = replace(default_decision_config(), entry_mode="fill_confirmed")
+    pipeline = FalconDecisionPipeline(cfg)
+    pipeline._adapter.current_target = -1
+
+    saved: dict = {}
+
+    def _save_state(session, pipeline, **kwargs):  # noqa: ANN001,ANN003
+        saved["display"] = kwargs.get("display_levels")
+
+    monkeypatch.setattr(sim, "_persist_state", _save_state)
+
+    class _Persist:
+        def record_fill(self, fill):  # noqa: ANN001
+            saved["fill"] = fill
+
+        def snapshot_position(self, *a, **k):  # noqa: ANN001,ANN003
+            return None
+
+    avg = 949.59
+    last = 938.40
+    atr = 1.41
+    ex = TargetPositionExecutor(SimpleNamespace(), "SHFE.au2610", align_tq_kline=False)
+    ex.active_intent = OrderIntent(
+        intent_id="intent-short",
+        decision_id="d-short",
+        symbol="SHFE.au2610",
+        current_position=0,
+        desired_position=-1,
+        urgency="NORMAL",
+        idempotency_key="k-short",
+        created_at=datetime.now(timezone.utc),
+        reason_codes=(),
+    )
+    fill = sim._try_confirm_fill(
+        executor=ex,
+        position=_FakePos(-1, avg=avg),
+        persist=_Persist(),
+        last_price=last,
+        atr=atr,
+        signal=-2,
+        pipeline=pipeline,
+        trade_symbol="SHFE.au2610",
+        config_hash="h",
+        last_bar_id="bar-short",
+        domestic_mark=last,
+        overseas_close=None,
+        signal_atr=atr,
+        sl_atr_mult=1.3,
+        tp_atr_mult=2.3,
+    )
+    assert fill is not None
+    assert fill.price == avg
+    assert saved["fill"].price == avg
+    assert saved["display"] is not None
+    assert saved["display"]["display_entry_price"] == avg
+    # Short: stop above avg, take below avg — never anchored to drifted last.
+    assert saved["display"]["display_stop_price"] == pytest.approx(avg + 1.3 * atr)
+    assert saved["display"]["display_take_price"] == pytest.approx(avg - 2.3 * atr)
+    assert saved["display"]["display_stop_price"] > avg
+    assert abs(saved["display"]["display_stop_price"] - (last + 1.3 * atr)) > 0.5
 
 
 def test_try_confirm_fill_flat_clears_stops(monkeypatch) -> None:

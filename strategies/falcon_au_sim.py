@@ -606,7 +606,16 @@ def _try_confirm_fill(
         net = _broker_net(position)
     except Exception:
         return None
-    fill = executor.poll_position(net, last_price=last_price, atr=atr, signal=signal)
+    # Lock SL/TP / fill ledger on broker average open — not confirm-time last.
+    avg_open = _broker_avg_entry_price(position, net)
+    confirmed_px = float(avg_open) if avg_open is not None else float(last_price)
+    fill = executor.poll_position(
+        net,
+        last_price=last_price,
+        atr=atr,
+        signal=signal,
+        fill_price=confirmed_px,
+    )
     if fill is None:
         return None
     if persist is not None:
@@ -618,9 +627,14 @@ def _try_confirm_fill(
             )
         except Exception as exc:  # noqa: BLE001
             print(f"[持仓快照] 成交后写入失败（忽略）: {exc}", flush=True)
+    avg_note = (
+        f" avg={avg_open:.2f}"
+        if avg_open is not None and abs(float(avg_open) - float(last_price)) > 1e-6
+        else ""
+    )
     print(
         f"  成交确认 {fill.side} {fill.qty}@{fill.price:.2f} "
-        f"intent={fill.intent_id} net={net}",
+        f"intent={fill.intent_id} net={net} last={float(last_price):.2f}{avg_note}",
         flush=True,
     )
 
