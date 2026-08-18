@@ -1679,6 +1679,7 @@ def session_summary(instance_id: str) -> dict[str, Any]:
         ).fetchone()
         if state is None:
             raise HTTPException(404, f"no strategy_state for {instance_id}")
+        launcher = SIM_LAUNCHERS.get(instance_id)
         updated = state["updated_at"]
         status = _status_from_updated(updated)
         proc = _process_status(instance_id)

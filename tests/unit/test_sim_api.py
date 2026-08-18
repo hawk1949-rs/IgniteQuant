@@ -257,6 +257,7 @@ def test_sim_sessions_and_summary(client: TestClient) -> None:
     assert body["status"] in {"RUNNING", "STALE", "IDLE"}
     assert body["status_label"] in {"运行中", "数据滞后", "未运行"}
     assert body["framework_label"] == "天勤模拟盘"
+    assert "falcon_au_sim.py" in body["cli_hint"]
     assert body["last_price"] == pytest.approx(880.0)
     assert body["last_price_source"] == "decision_close"
     assert len(body["open_positions"]) == 1
