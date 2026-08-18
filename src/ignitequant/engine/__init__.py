@@ -7,6 +7,7 @@ from ignitequant.engine.decision_pipeline import (
     close_of,
     score_parts,
 )
+from ignitequant.strategies.gma import GMADecisionPipeline
 from ignitequant.engine.runtime_bridge import (
     apply_pretrade,
     domestic_session_allows_orders,
@@ -30,6 +31,7 @@ from ignitequant.engine.local_sim import LocalSimAccount
 __all__ = [
     "BrokerFacts",
     "FalconDecisionPipeline",
+    "GMADecisionPipeline",
     "LocalProjection",
     "LocalSimAccount",
     "PositionStateMachine",

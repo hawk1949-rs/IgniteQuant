@@ -35,7 +35,7 @@ from dashboard.auth import (
 )
 from dashboard.catalog import ENGINES, STRATEGIES, SYMBOLS
 from dashboard.jobs import get_job_queue
-from dashboard.runners import run_falcon_local, run_falcon_v2, run_vwap_stub
+from dashboard.runners import run_falcon_local, run_falcon_v2, run_gma_v1, run_vwap_stub
 from dashboard.scoring import score_metrics
 from dashboard.sim_api import router as sim_router
 from dashboard.store import delete_run, get_run, list_runs, save_run, update_run
@@ -46,6 +46,7 @@ from ignitequant.market.cache import cache_status
 RUNNERS = {
     "run_falcon_v2": run_falcon_v2,
     "run_falcon_local": run_falcon_local,
+    "run_gma_v1": run_gma_v1,
     "run_vwap_stub": run_vwap_stub,
 }
 
@@ -202,6 +203,9 @@ def _execute_backtest_request(
         }
         if engine == "local" and strat.runner == "run_falcon_v2":
             kwargs["auto_download"] = auto_download
+        if strat.runner == "run_gma_v1":
+            kwargs["auto_download"] = auto_download
+            kwargs["engine"] = engine
 
         out = runner(**kwargs)
         scored = score_metrics(out.get("metrics") or {})

@@ -108,6 +108,10 @@ def run_local_falcon_backtest(
     config: DecisionConfig | None = None,
     record_decisions: bool = False,
     use_overseas: bool | None = None,
+    pipeline_factory: Callable[..., Any] | None = None,
+    strategy_id: str = "falcon_v2",
+    completed_bars: bool = False,
+    cache_warmup_bars: int | None = None,
 ) -> dict[str, Any]:
     """Mirror dashboard/runners.run_falcon_v2 semantics without tqsdk event loop."""
     flat_date = _last_business_day_on_or_before(end)
@@ -128,6 +132,7 @@ def run_local_falcon_backtest(
     source = resolve_signal_source(spec, use_overseas=use_overseas)
     domestic_bars: pd.DataFrame | None = None
     decision_symbol = signal_symbol
+    lookback = 400 if cache_warmup_bars is None else max(int(cache_warmup_bars), 0)
 
     if bars is None:
         if source.pricing_basis == "overseas" and source.overseas_signal_symbol:
@@ -164,6 +169,7 @@ def run_local_falcon_backtest(
                     duration_seconds=kline_seconds,
                     auto_download=auto_download,
                     progress_cb=progress_cb,
+                    warmup_bars=lookback,
                 )
             except Exception:
                 try:
@@ -178,6 +184,7 @@ def run_local_falcon_backtest(
                 duration_seconds=kline_seconds,
                 auto_download=auto_download,
                 progress_cb=progress_cb,
+                warmup_bars=lookback,
             )
     elif source.pricing_basis == "overseas":
         decision_symbol = source.overseas_signal_symbol or signal_symbol
@@ -200,7 +207,8 @@ def run_local_falcon_backtest(
     if not trade_indices:
         raise RuntimeError(f"no bars in range {start}..{end} for {signal_symbol}")
 
-    pipeline = FalconDecisionPipeline(cfg)
+    make_pipeline = pipeline_factory or FalconDecisionPipeline
+    pipeline = make_pipeline(cfg)
     risk_engine = make_risk_engine(cfg)
     roll = RollStateMachine()
     sim = LocalSimAccount(init_balance=init_balance, cost=cost)
@@ -285,7 +293,10 @@ def run_local_falcon_backtest(
                 roll.abort_to_idle()
 
         sim.mark(trade_symbol, decision_px)
-        window = _tq_datetime_change_window(bars, i, data_length)
+        if completed_bars:
+            window = _window(bars, i, data_length)
+        else:
+            window = _tq_datetime_change_window(bars, i, data_length)
         allow_trade = calendar_day < flat_date
         result = pipeline.on_bar_close(window, trade=allow_trade)
 
@@ -385,6 +396,13 @@ def run_local_falcon_backtest(
             if result.signal.legacy_signal is not None
             else None,
         )
+        confirm = getattr(pipeline, "confirm_local_fill", None)
+        if confirm is not None and desired != 0:
+            confirm(
+                price=float(decision_px),
+                atr=float(result.factors.values.get("atr") or 0.0),
+                signal=int(result.signal.legacy_signal or 0),
+            )
         _record_settle_day(
             sim, symbol=trade_symbol, settle_day=settle_day, mark_price=close_px
         )
@@ -403,7 +421,7 @@ def run_local_falcon_backtest(
     metrics["slippage_attr"] = attribution.slippage_pnl
 
     out: dict[str, Any] = {
-        "strategy_id": "falcon_v2",
+        "strategy_id": strategy_id,
         "engine": "local",
         "use_overseas": source.pricing_basis == "overseas",
         "signal_symbol": signal_symbol,

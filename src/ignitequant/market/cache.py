@@ -225,14 +225,20 @@ def ensure_cache(
     root: Path | None = None,
     auto_download: bool = True,
     progress_cb=None,
+    warmup_bars: int = 400,
 ) -> pd.DataFrame:
-    """Load cache; optionally download missing coverage via tqsdk."""
+    """Load cache; optionally download missing coverage via tqsdk.
+
+    ``warmup_bars`` defaults to 400 (Falcon MA52). Multi-TF strategies such as
+    GMA must pass a larger value so HTF indicators are ready at ``start``.
+    """
+    lookback = max(int(warmup_bars), 0)
     path = cache_path(signal_symbol, duration_seconds=duration_seconds, root=root)
     if path.is_file():
         bars = load_bars(signal_symbol, duration_seconds=duration_seconds, root=root)
         # Require data through the requested end (weekend gaps allowed via max_end_gap_days=3).
         if coverage_ok(bars, start=start, end=end, max_end_gap_days=3):
-            return slice_bars(bars, start=start, end=end, warmup_bars=400)
+            return slice_bars(bars, start=start, end=end, warmup_bars=lookback)
         if not auto_download:
             raise ValueError(
                 f"cache for {signal_symbol} does not cover [{start.isoformat()}, {end.isoformat()}]"
@@ -242,7 +248,9 @@ def ensure_cache(
 
     from ignitequant.market.download import download_klines
 
-    warm_start = start - dt.timedelta(days=45)
+    # ~40 completed 5m bars per SHFE session-day; keep Falcon's 45-day floor.
+    warm_days = max(45, int(lookback / 40) + 14)
+    warm_start = start - dt.timedelta(days=warm_days)
     if progress_cb is not None:
         progress_cb(
             0.02,
@@ -273,7 +281,7 @@ def ensure_cache(
             f"download finished but cache still missing coverage for "
             f"{signal_symbol} [{start.isoformat()}, {end.isoformat()}]"
         )
-    return slice_bars(bars, start=start, end=end, warmup_bars=400)
+    return slice_bars(bars, start=start, end=end, warmup_bars=lookback)
 
 
 def cache_status(*, root: Path | None = None) -> list[dict[str, Any]]:

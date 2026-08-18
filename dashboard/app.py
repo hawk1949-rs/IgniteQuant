@@ -22,13 +22,14 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from dashboard.catalog import ENGINES, STRATEGIES, SYMBOLS
-from dashboard.runners import run_falcon_local, run_falcon_v2, run_vwap_stub
+from dashboard.runners import run_falcon_local, run_falcon_v2, run_gma_v1, run_vwap_stub
 from dashboard.scoring import score_metrics
 from dashboard.store import delete_run, list_runs, save_run, update_run
 
 RUNNERS = {
     "run_falcon_v2": run_falcon_v2,
     "run_falcon_local": run_falcon_local,
+    "run_gma_v1": run_gma_v1,
     "run_vwap_stub": run_vwap_stub,
 }
 
@@ -306,6 +307,9 @@ def page_run() -> None:
             }
             if engine == "local" and strat.runner == "run_falcon_v2":
                 kwargs["auto_download"] = True
+            if strat.runner == "run_gma_v1":
+                kwargs["auto_download"] = True
+                kwargs["engine"] = engine
             out = runner(**kwargs)
         except NotImplementedError as e:
             st.warning(str(e))

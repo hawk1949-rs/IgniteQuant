@@ -73,6 +73,12 @@ const FALLBACK_STRATEGIES: Strategy[] = [
     ready: true,
   },
   {
+    id: 'gma_v1',
+    name: 'GMA v1',
+    description: '10W 多周期状态机 + 波动轨/加速轨 + 震荡/驱动/回踩',
+    ready: true,
+  },
+  {
     id: 'vwap_au',
     name: 'VWAP（沪金）',
     description: 'VWAP 偏离回归（看板内暂作占位）',

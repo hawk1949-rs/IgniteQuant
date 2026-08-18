@@ -34,6 +34,12 @@ STRATEGIES: dict[str, StrategyInfo] = {
         description="ADX 行情状态 + 格兰维尔/量能/KDJ 评分 + ATR 止盈止损（5 分钟）",
         runner="run_falcon_v2",
     ),
+    "gma_v1": StrategyInfo(
+        id="gma_v1",
+        name="GMA v1",
+        description="10W 多周期状态机 + 波动轨/加速轨 + 震荡/驱动/回踩（15m/1H/4H，5 分钟决策时钟）",
+        runner="run_gma_v1",
+    ),
     "vwap_au": StrategyInfo(
         id="vwap_au",
         name="VWAP（沪金）",

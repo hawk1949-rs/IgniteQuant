@@ -77,6 +77,13 @@ SIM_LAUNCHERS: dict[str, dict[str, Any]] = {
         "strategy_id": "falcon_v2",
         "framework": "tq",
     },
+    "gma_au_sim": {
+        "label": "GMA 沪金天勤模拟",
+        "script": ROOT / "strategies" / "gma_au_sim.py",
+        "symbol_id": "au",
+        "strategy_id": "gma_v1",
+        "framework": "tq",
+    },
 }
 
 router = APIRouter(prefix="/api/sim", tags=["sim"])
@@ -1605,7 +1612,8 @@ def list_sessions() -> dict[str, Any]:
                 sessions.append(
                     {
                         "instance_id": instance_id,
-                        "strategy_id": "falcon_v2" if "falcon" in instance_id else "",
+                        "strategy_id": (SIM_LAUNCHERS.get(instance_id) or {}).get("strategy_id")
+                        or ("falcon_v2" if "falcon" in instance_id else ""),
                         "symbol": "",
                         "runtime_state": "IDLE",
                         "status": "IDLE",
@@ -1744,7 +1752,7 @@ def session_summary(instance_id: str) -> dict[str, Any]:
             "last_price": live["last_price"],
             "last_price_source": live["last_price_source"],
             "last_price_as_of": live["last_price_as_of"],
-            "cli_hint": "python strategies/falcon_au_sim.py",
+            "cli_hint": f"python strategies/{Path(launcher['script']).name}" if launcher else "python strategies/falcon_au_sim.py",
             **proc,
         }
     finally:

@@ -75,6 +75,9 @@ def load_dotenv(path: Path) -> None:
 
 SIGNAL_SYMBOL = "KQ.m@SHFE.au"
 KLINE_SECONDS = 60 * 5
+DATA_LENGTH = 400
+STRATEGY_ID = "falcon_v2"
+STRATEGY_LABEL = "Falcon v2"
 WEB_GUI = ":9876"
 FLAT_ON_EXIT = True
 HEARTBEAT_SECONDS = 60
@@ -758,11 +761,11 @@ def main() -> None:
         persist = PersistenceSession.open(
             PERSIST_DB,
             instance_id=INSTANCE_ID,
-            strategy_id="falcon_v2",
+            strategy_id=STRATEGY_ID,
         )
     _write_pid_file()
 
-    print(f"启动 Falcon v2 快期模拟盘: 信号={SIGNAL_SYMBOL}", flush=True)
+    print(f"启动 {STRATEGY_LABEL} 快期模拟盘: 信号={SIGNAL_SYMBOL}", flush=True)
     instrument = resolve_instrument(SIGNAL_SYMBOL)
     signal_source = resolve_signal_source(instrument)
     overseas_mode = signal_source.pricing_basis == "overseas"
@@ -798,7 +801,7 @@ def main() -> None:
 
     try:
         main_quote = api.get_quote(SIGNAL_SYMBOL)
-        klines = api.get_kline_serial(SIGNAL_SYMBOL, KLINE_SECONDS, data_length=400)
+        klines = api.get_kline_serial(SIGNAL_SYMBOL, KLINE_SECONDS, data_length=DATA_LENGTH)
         decision_klines = klines
         last_progress_day = None
         last_heartbeat = 0.0

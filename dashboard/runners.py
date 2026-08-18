@@ -219,6 +219,11 @@ def run_falcon_v2(
     progress_cb=None,
     use_overseas: bool | None = None,
     auto_download: bool = True,
+    pipeline_factory=None,
+    strategy_id: str = "falcon_v2",
+    config: DecisionConfig | None = None,
+    completed_bars: bool = False,
+    cache_warmup_bars: int | None = None,
 ) -> dict[str, Any]:
     """跑完一次 Falcon 回测并返回指标（无 web_gui，结束后立即关闭）。
 
@@ -240,6 +245,11 @@ def run_falcon_v2(
             progress_cb=progress_cb,
             auto_download=auto_download,
             use_overseas=True,
+            pipeline_factory=pipeline_factory,
+            strategy_id=strategy_id,
+            config=config,
+            completed_bars=completed_bars,
+            cache_warmup_bars=cache_warmup_bars,
         )
         out["engine"] = "local_overseas"
         out["use_overseas"] = True
@@ -254,19 +264,20 @@ def run_falcon_v2(
         raise RuntimeError("缺少 TQ_USER / TQ_PASS，请配置项目根目录 .env")
 
     flat_date = _last_business_day_on_or_before(end)
-    cfg = DecisionConfig(entry_mode="fill_confirmed")
-    # Keep legacy risk/sizing numbers; only entry_mode changes for Phase 3 runners.
-    base = default_decision_config()
-    cfg = DecisionConfig(
-        decision_mode=base.decision_mode,
-        entry_mode="fill_confirmed",
-        config_version=base.config_version,
-        symbol=signal_symbol,
-        factor=base.factor,
-        signal=base.signal,
-        sizing=base.sizing,
-        risk=base.risk,
-    )
+    if config is not None:
+        cfg = config
+    else:
+        base = default_decision_config()
+        cfg = DecisionConfig(
+            decision_mode=base.decision_mode,
+            entry_mode="fill_confirmed",
+            config_version=base.config_version,
+            symbol=signal_symbol,
+            factor=base.factor,
+            signal=base.signal,
+            sizing=base.sizing,
+            risk=base.risk,
+        )
 
     cost = cost_model_for(spec, tq_align=True)
     commission_per_lot = cost.tq_commission_per_lot()
@@ -279,7 +290,8 @@ def run_falcon_v2(
         auth=TqAuth(user, password),
     )
 
-    pipeline = FalconDecisionPipeline(cfg)
+    make_pipeline = pipeline_factory or FalconDecisionPipeline
+    pipeline = make_pipeline(cfg)
     risk_engine = make_risk_engine(cfg)
     roll = RollStateMachine()
     executor: TargetPositionExecutor | None = None
@@ -517,7 +529,7 @@ def run_falcon_v2(
                 equity_curve.append({"t": str(day), "equity": float(bal)})
 
     return {
-        "strategy_id": "falcon_v2",
+        "strategy_id": strategy_id,
         "engine": "tq",
         "use_overseas": False,
         "signal_symbol": signal_symbol,
@@ -564,6 +576,11 @@ def run_falcon_local(
     progress_cb=None,
     auto_download: bool = True,
     use_overseas: bool | None = None,
+    pipeline_factory=None,
+    strategy_id: str = "falcon_v2",
+    config: DecisionConfig | None = None,
+    completed_bars: bool = False,
+    cache_warmup_bars: int | None = None,
 ) -> dict[str, Any]:
     """本地行情缓存 + 离线回放（含换月 / LocalSim 撮合）。"""
     from ignitequant.engine.local_replay import run_local_falcon_backtest
@@ -578,8 +595,62 @@ def run_falcon_local(
         progress_cb=progress_cb,
         auto_download=auto_download,
         use_overseas=use_overseas,
+        pipeline_factory=pipeline_factory,
+        strategy_id=strategy_id,
+        config=config,
+        completed_bars=completed_bars,
+        cache_warmup_bars=cache_warmup_bars,
     )
 
 
+def run_gma_v1(
+    *,
+    signal_symbol: str,
+    start: dt.date,
+    end: dt.date,
+    init_balance: float = 1_000_000,
+    kline_seconds: int = 300,
+    data_length: int = 8000,
+    progress_cb=None,
+    use_overseas: bool | None = None,
+    auto_download: bool = True,
+    engine: str = "local",
+) -> dict[str, Any]:
+    """GMA 完整策略回测（与模拟盘共用 GMADecisionPipeline）。"""
+    from dataclasses import replace
+
+    from ignitequant.strategies.gma import GMA_CACHE_WARMUP_BARS, GMADecisionPipeline, load_gma_runtime
+    from ignitequant.strategies.gma.config import GMARuntimeConfig
+
+    runtime = load_gma_runtime()
+    cfg = replace(runtime.decision, symbol=signal_symbol, entry_mode="fill_confirmed")
+
+    def factory(config: DecisionConfig) -> GMADecisionPipeline:
+        return GMADecisionPipeline(
+            config,
+            runtime=GMARuntimeConfig(indicators=runtime.indicators, decision=config),
+        )
+
+    kwargs = {
+        "signal_symbol": signal_symbol,
+        "start": start,
+        "end": end,
+        "init_balance": init_balance,
+        "kline_seconds": kline_seconds,
+        "data_length": data_length,
+        "progress_cb": progress_cb,
+        "use_overseas": False if use_overseas is None else use_overseas,
+        "auto_download": auto_download,
+        "pipeline_factory": factory,
+        "strategy_id": "gma_v1",
+        "config": cfg,
+        "completed_bars": True,
+        "cache_warmup_bars": max(int(data_length), GMA_CACHE_WARMUP_BARS),
+    }
+    if str(engine).lower() == "tq":
+        return run_falcon_v2(**kwargs)
+    return run_falcon_local(**kwargs)
+
+
 def run_vwap_stub(**kwargs) -> dict[str, Any]:
-    raise NotImplementedError("VWAP 看板接入尚未完成，请先用 Falcon v2。")
+    raise NotImplementedError("VWAP 看板接入尚未完成，请先用 Falcon v2 / GMA。")

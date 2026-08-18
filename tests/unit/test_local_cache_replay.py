@@ -69,6 +69,15 @@ def test_cache_merge_and_slice(tmp_path: Path) -> None:
     )
 
 
+def test_slice_bars_gma_warmup_keeps_more_history_than_falcon() -> None:
+    bars = _synthetic_bars(n=9000, roll_at=8000)
+    start = dt.date(2025, 1, 30)
+    end = dt.date(2025, 1, 31)
+    falcon = slice_bars(bars, start=start, end=end, warmup_bars=400)
+    gma = slice_bars(bars, start=start, end=end, warmup_bars=8000)
+    assert len(gma) - len(falcon) >= 7000
+
+
 def test_local_sim_roundtrip_pnl() -> None:
     cost = cost_model_for(instrument_by_id("au"))
     sim = LocalSimAccount(init_balance=1_000_000, cost=cost)
