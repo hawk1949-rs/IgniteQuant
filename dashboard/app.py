@@ -325,7 +325,7 @@ def page_run() -> None:
             "symbol_id": sid,
             "symbol_name": sym.name,
             "scorecard": scored,
-            "notes": "",
+            "notes": out.get("notes") or "",
         }
         path = save_run(record)
         results.append(record)

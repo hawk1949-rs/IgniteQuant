@@ -217,7 +217,7 @@ def _execute_backtest_request(
             "symbol_id": sid,
             "symbol_name": sym.name,
             "scorecard": scored,
-            "notes": "",
+            "notes": out.get("notes") or "",
             "schema_version": "backtest_run_v1",
         }
         path = save_run(record)

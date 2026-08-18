@@ -138,3 +138,66 @@ def test_local_replay_runs_offline_on_fixture_like_bars() -> None:
     assert out["metrics"]["final_balance"] is not None
     assert "cost_model" in out
     assert out["reproducibility"]["engine"] == "local"
+
+
+def test_overseas_out_of_range_falls_back_to_domestic(monkeypatch) -> None:
+    start = dt.date(2025, 1, 2)
+    end = dt.date(2025, 1, 5)
+    domestic = _synthetic_bars(n=500)
+    overseas = _synthetic_bars(n=80, start=dt.datetime(2026, 8, 1, 9, 0, 0))
+
+    monkeypatch.setattr(
+        "ignitequant.engine.local_replay.ensure_overseas_cache_bars",
+        lambda *args, **kwargs: overseas,
+    )
+    monkeypatch.setattr(
+        "ignitequant.engine.local_replay.ensure_cache",
+        lambda *args, **kwargs: domestic,
+    )
+
+    out = run_local_falcon_backtest(
+        signal_symbol="KQ.m@SHFE.au",
+        start=start,
+        end=end,
+        init_balance=1_000_000,
+        auto_download=False,
+        use_overseas=True,
+    )
+    assert out["use_overseas"] is False
+    assert out["pricing_basis"] == "domestic"
+    assert out["decision_symbol"] == "KQ.m@SHFE.au"
+    assert "外盘缓存未覆盖" in (out.get("notes") or "")
+    assert out["metrics"]["final_balance"] is not None
+
+
+def test_overseas_in_range_keeps_overseas_clock(monkeypatch) -> None:
+    start = dt.date(2025, 1, 2)
+    end = dt.date(2025, 1, 5)
+    bars = _synthetic_bars(n=500)
+    bars["underlying_symbol"] = "XAUUSD"
+
+    monkeypatch.setattr(
+        "ignitequant.engine.local_replay.ensure_overseas_cache_bars",
+        lambda *args, **kwargs: bars,
+    )
+    monkeypatch.setattr(
+        "ignitequant.engine.local_replay.ensure_cache",
+        lambda *args, **kwargs: bars,
+    )
+    monkeypatch.setattr(
+        "ignitequant.engine.local_replay.load_bars",
+        lambda *args, **kwargs: bars,
+    )
+
+    out = run_local_falcon_backtest(
+        signal_symbol="KQ.m@SHFE.au",
+        start=start,
+        end=end,
+        init_balance=1_000_000,
+        auto_download=False,
+        use_overseas=True,
+    )
+    assert out["use_overseas"] is True
+    assert out["pricing_basis"] == "overseas"
+    assert out["decision_symbol"] != "KQ.m@SHFE.au"
+    assert "外盘缓存未覆盖" not in (out.get("notes") or "")

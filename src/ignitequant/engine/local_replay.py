@@ -80,6 +80,62 @@ def _record_settle_day(
     sim.record_day(settle_day)
 
 
+def _range_ns(start: dt.date, end: dt.date) -> tuple[int, int]:
+    start_ns = int(dt.datetime.combine(start, dt.time.min).timestamp() * 1_000_000_000)
+    end_ns = int(
+        dt.datetime.combine(end + dt.timedelta(days=1), dt.time.min).timestamp() * 1_000_000_000
+    )
+    return start_ns, end_ns
+
+
+def _indices_in_range(frame: pd.DataFrame | None, start: dt.date, end: dt.date) -> list[int]:
+    if frame is None or frame.empty:
+        return []
+    start_ns, end_ns = _range_ns(start, end)
+    ts = pd.to_numeric(frame["datetime"], errors="coerce")
+    mask = (ts >= start_ns) & (ts < end_ns)
+    return [int(i) for i in mask.to_numpy().nonzero()[0]]
+
+
+def _coverage_label(frame: pd.DataFrame | None, symbol: str) -> str:
+    if frame is None or frame.empty:
+        return f"{symbol}: empty"
+    lo = int(frame["datetime"].iloc[0])
+    hi = int(frame["datetime"].iloc[-1])
+
+    def _day(ns: int) -> str:
+        return dt.datetime.fromtimestamp(ns / 1_000_000_000, tz=dt.timezone.utc).date().isoformat()
+
+    return f"{symbol}: {_day(lo)}..{_day(hi)} ({len(frame)} bars)"
+
+
+def _load_domestic_slice(
+    signal_symbol: str,
+    *,
+    start: dt.date,
+    end: dt.date,
+    kline_seconds: int,
+    auto_download: bool,
+    progress_cb: ProgressCb | None,
+    lookback: int,
+) -> pd.DataFrame | None:
+    try:
+        return ensure_cache(
+            signal_symbol,
+            start=start,
+            end=end,
+            duration_seconds=kline_seconds,
+            auto_download=auto_download,
+            progress_cb=progress_cb,
+            warmup_bars=lookback,
+        )
+    except Exception:
+        try:
+            return load_bars(signal_symbol, duration_seconds=kline_seconds)
+        except FileNotFoundError:
+            return None
+
+
 def _asof_domestic_row(
     domestic: pd.DataFrame | None, bar_ns: int
 ) -> tuple[float | None, float | None, str]:
@@ -133,6 +189,7 @@ def run_local_falcon_backtest(
     domestic_bars: pd.DataFrame | None = None
     decision_symbol = signal_symbol
     lookback = 400 if cache_warmup_bars is None else max(int(cache_warmup_bars), 0)
+    notes: list[str] = []
 
     if bars is None:
         if source.pricing_basis == "overseas" and source.overseas_signal_symbol:
@@ -147,7 +204,30 @@ def run_local_falcon_backtest(
                 bars = load_overseas_cache_bars(
                     source.overseas_signal_symbol, duration_seconds=kline_seconds
                 )
-            if bars.empty:
+            domestic_bars = _load_domestic_slice(
+                signal_symbol,
+                start=start,
+                end=end,
+                kline_seconds=kline_seconds,
+                auto_download=auto_download,
+                progress_cb=progress_cb,
+                lookback=lookback,
+            )
+            overseas_hits = _indices_in_range(bars, start, end)
+            domestic_hits = _indices_in_range(domestic_bars, start, end)
+            if not overseas_hits and domestic_hits:
+                cov = _coverage_label(bars, decision_symbol)
+                note = (
+                    f"外盘缓存未覆盖 {start.isoformat()}..{end.isoformat()}（{cov}），"
+                    f"已回退内盘 {signal_symbol}"
+                )
+                notes.append(note)
+                if progress_cb is not None:
+                    progress_cb(0.36, note)
+                bars = domestic_bars
+                decision_symbol = signal_symbol
+                source = resolve_signal_source(spec, use_overseas=False)
+            elif bars.empty:
                 hint = ""
                 errs = getattr(bars, "attrs", {}).get("ensure_errors") if hasattr(bars, "attrs") else None
                 if errs:
@@ -161,21 +241,6 @@ def run_local_falcon_backtest(
                     f"(ECS often blocks Yahoo; Eastmoney alone is too shallow for multi-month backtests)."
                     f"{hint}"
                 )
-            try:
-                domestic_bars = ensure_cache(
-                    signal_symbol,
-                    start=start,
-                    end=end,
-                    duration_seconds=kline_seconds,
-                    auto_download=auto_download,
-                    progress_cb=progress_cb,
-                    warmup_bars=lookback,
-                )
-            except Exception:
-                try:
-                    domestic_bars = load_bars(signal_symbol, duration_seconds=kline_seconds)
-                except FileNotFoundError:
-                    domestic_bars = None
         else:
             bars = ensure_cache(
                 signal_symbol,
@@ -186,26 +251,23 @@ def run_local_falcon_backtest(
                 progress_cb=progress_cb,
                 warmup_bars=lookback,
             )
+            domestic_bars = bars
     elif source.pricing_basis == "overseas":
         decision_symbol = source.overseas_signal_symbol or signal_symbol
         try:
             domestic_bars = load_bars(signal_symbol, duration_seconds=kline_seconds)
         except FileNotFoundError:
             domestic_bars = None
-    if bars.empty:
+    if bars is None or bars.empty:
         raise RuntimeError(f"no bars for {decision_symbol}")
 
-    start_ns = int(dt.datetime.combine(start, dt.time.min).timestamp() * 1_000_000_000)
-    end_ns = int(
-        dt.datetime.combine(end + dt.timedelta(days=1), dt.time.min).timestamp() * 1_000_000_000
-    )
-    trade_indices = [
-        i
-        for i in range(len(bars))
-        if start_ns <= int(bars.iloc[i]["datetime"]) < end_ns
-    ]
+    trade_indices = _indices_in_range(bars, start, end)
     if not trade_indices:
-        raise RuntimeError(f"no bars in range {start}..{end} for {signal_symbol}")
+        raise RuntimeError(
+            f"no bars in range {start}..{end} for {decision_symbol} "
+            f"({_coverage_label(bars, decision_symbol)}). "
+            f"东财外盘 5m 往往只有最近几天，跨年回测请先下载 Yahoo 缓存，或取消「参考外盘」改用 {signal_symbol}。"
+        )
 
     make_pipeline = pipeline_factory or FalconDecisionPipeline
     pipeline = make_pipeline(cfg)
@@ -427,6 +489,7 @@ def run_local_falcon_backtest(
         "signal_symbol": signal_symbol,
         "decision_symbol": decision_symbol,
         "pricing_basis": source.pricing_basis,
+        "notes": "；".join(notes),
         "trade_symbol": trade_symbol,
         "start": start.isoformat(),
         "end": end.isoformat(),

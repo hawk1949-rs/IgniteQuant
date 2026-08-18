@@ -251,8 +251,12 @@ def run_falcon_v2(
             completed_bars=completed_bars,
             cache_warmup_bars=cache_warmup_bars,
         )
-        out["engine"] = "local_overseas"
-        out["use_overseas"] = True
+        if out.get("pricing_basis") == "overseas":
+            out["engine"] = "local_overseas"
+            out["use_overseas"] = True
+        else:
+            out["engine"] = out.get("engine") or "local"
+            out["use_overseas"] = False
         return out
 
     from tqsdk import BacktestFinished, TqApi, TqAuth, TqBacktest, TqSim
@@ -616,7 +620,10 @@ def run_gma_v1(
     auto_download: bool = True,
     engine: str = "local",
 ) -> dict[str, Any]:
-    """GMA 完整策略回测（与模拟盘共用 GMADecisionPipeline）。"""
+    """GMA 完整策略回测（与模拟盘共用 GMADecisionPipeline）。
+
+    始终走本地回放。``engine=tq`` 仍被 API 接受，但不会连接天勤回测循环。
+    """
     from dataclasses import replace
 
     from ignitequant.strategies.gma import GMA_CACHE_WARMUP_BARS, GMADecisionPipeline, load_gma_runtime
@@ -624,6 +631,7 @@ def run_gma_v1(
 
     runtime = load_gma_runtime()
     cfg = replace(runtime.decision, symbol=signal_symbol, entry_mode="fill_confirmed")
+    _ = engine
 
     def factory(config: DecisionConfig) -> GMADecisionPipeline:
         return GMADecisionPipeline(
@@ -647,8 +655,7 @@ def run_gma_v1(
         "completed_bars": True,
         "cache_warmup_bars": max(int(data_length), GMA_CACHE_WARMUP_BARS),
     }
-    if str(engine).lower() == "tq":
-        return run_falcon_v2(**kwargs)
+    # GMA 只有本地回放核；天勤引擎对沪金「参考外盘」也会被折回本地缓存。
     return run_falcon_local(**kwargs)
 
 
