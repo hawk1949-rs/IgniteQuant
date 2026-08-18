@@ -22,6 +22,9 @@ data/research/*.json
 data/market_cache/**/*.csv
 data/market_cache/**/*.meta.json
 data/market_cache/download_log.txt
+# 用户提供的 XAUUSD 5m 历史（经纪商现货，无法从 Yahoo/东财复现）
+!data/market_cache/XAUUSD/300.csv
+!data/market_cache/XAUUSD/300.meta.json
 
 # Python
 __pycache__/

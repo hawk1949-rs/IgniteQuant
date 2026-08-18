@@ -1,0 +1,11 @@
+{
+  "signal_symbol": "XAUUSD",
+  "duration_seconds": 300,
+  "rows": 469145,
+  "start_dt": "2020-01-01T00:00:00+00:00",
+  "end_dt": "2026-08-01T04:55:00+00:00",
+  "source": "user_xauusd_csv",
+  "updated_at": "2026-08-18T14:04:12.644685+00:00",
+  "notes": "Only XAUUSD.csv 2020-01-01..2026-08-01 UTC. Eastmoney/COMEX tail after last user bar removed.",
+  "user_rows": 469145
+}

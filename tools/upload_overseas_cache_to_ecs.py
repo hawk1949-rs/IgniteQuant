@@ -59,10 +59,13 @@ def main() -> int:
             print(f"put {local} -> {host}:{remote}", flush=True)
             sftp.put(str(local), remote)
             uploaded += 1
-            # also upload meta.json if present
-            meta = local.with_name("meta.json")
+            meta = local.with_name(f"{local.stem}.meta.json")
             if meta.is_file():
-                sftp.put(str(meta), f"{remote_dir}/meta.json")
+                print(f"put {meta} -> {host}:{remote_dir}/{meta.name}", flush=True)
+                sftp.put(str(meta), f"{remote_dir}/{meta.name}")
+            legacy_meta = local.with_name("meta.json")
+            if legacy_meta.is_file():
+                sftp.put(str(legacy_meta), f"{remote_dir}/meta.json")
     finally:
         sftp.close()
         client.close()

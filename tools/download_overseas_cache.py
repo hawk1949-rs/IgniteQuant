@@ -95,12 +95,10 @@ def _http_get(url: str, *, timeout: int = 30) -> str:
     return ""
 
 
-# Spot Yahoo tickers (XAUUSD=X / XAGUSD=X) are often delisted; COMEX continuous
-# still provides deep 5m archives for Strategy Lab backtests.
-YAHOO_ARCHIVE_FALLBACK: dict[str, str] = {
-    "gc": "GC=F",
-    "si": "SI=F",
-}
+# Do not archive COMEX/NYMEX continuous (GC=F / SI=F) into the XAUUSD/XAGUSD
+# cache folders — those are futures and trade at a premium to London spot.
+# Yahoo spot tickers (XAUUSD=X) are often empty; 5m then uses Eastmoney 122.XAU.
+YAHOO_ARCHIVE_FALLBACK: dict[str, str] = {}
 
 
 def fetch_yahoo_bars(
