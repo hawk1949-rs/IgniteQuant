@@ -201,6 +201,7 @@ def volume_profile(
     bins: int = 48,
     value_pct: float = 0.70,
 ) -> VolumeProfile:
+    """Visible-window Volume Profile (能量分布): POC / 70% VA / histogram gaps."""
     if len(close) == 0:
         return VolumeProfile(None, None, None, None, None, None, None)
     lo = float(np.nanmin(low))

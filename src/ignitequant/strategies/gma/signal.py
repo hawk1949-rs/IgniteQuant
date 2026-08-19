@@ -76,8 +76,9 @@ def generate_signal(
     *,
     indicators: GMAIndicatorConfig,
     current_target: int,
+    bundle: dict | None = None,
 ) -> GMASignal:
-    bundle = resample_bundle(bars_5m)
+    bundle = bundle if bundle is not None else resample_bundle(bars_5m)
     m5 = bundle["5m"]
     m15 = bundle["15m"]
     m30 = bundle["30m"]
@@ -286,7 +287,24 @@ def generate_signal(
     if desired is None:
         reasons.append("HOLD")
 
-    return _pack(signal, desired, reasons, last_close, atr, align, s15, mid1, vp)
+    packed = _pack(signal, desired, reasons, last_close, atr, align, s15, mid1, vp)
+    if indicators.energy_enabled:
+        from ignitequant.strategies.gma.energy import apply_energy_overlay
+
+        vol5 = m5.volume.to_numpy(dtype=float) if not m5.empty and "volume" in m5.columns else np.array([])
+        packed = apply_energy_overlay(
+            packed,
+            vp=vp,
+            s5=s5,
+            align=align,
+            current_target=current_target,
+            high5=high5,
+            low5=low5,
+            close5=close5,
+            volume5=vol5,
+            indicators=indicators,
+        )
+    return packed
 
 
 def atr_series_safe(df, period: int) -> float:

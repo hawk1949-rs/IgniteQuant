@@ -40,6 +40,12 @@ STRATEGIES: dict[str, StrategyInfo] = {
         description="10W 多周期状态机 + 波动轨/加速轨 + 震荡/驱动/回踩（15m/1H/4H，5 分钟决策时钟）",
         runner="run_gma_v1",
     ),
+    "gma_v2": StrategyInfo(
+        id="gma_v2",
+        name="GMA v2",
+        description="GMA 2.0：v1 模板 + 能量分布（POC/价值区/缺口门禁，禁止追价）",
+        runner="run_gma_v2",
+    ),
     "vwap_au": StrategyInfo(
         id="vwap_au",
         name="VWAP（沪金）",

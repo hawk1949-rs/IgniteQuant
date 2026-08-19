@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Mapping
 
+import numpy as np
 import pandas as pd
 
 TF_MINUTES = {
@@ -13,6 +14,7 @@ TF_MINUTES = {
     "1h": 60,
     "4h": 240,
 }
+_NS_PER_MINUTE = 60_000_000_000
 
 
 def _to_shanghai(datetime_ns: pd.Series) -> pd.Series:
@@ -79,3 +81,61 @@ def resample_bundle(
         else:
             bundle[name] = resample_closed(bars_5m, minutes)
     return bundle
+
+
+def _closed_asof_frame(
+    frame: pd.DataFrame,
+    *,
+    minutes: int,
+    last_src_ns: int,
+    first_src_ns: int | None = None,
+) -> pd.DataFrame:
+    """HTF bars whose bucket has closed at ``last_src_ns`` (same rule as ``resample_closed``)."""
+    if frame is None or frame.empty:
+        return frame if frame is not None else pd.DataFrame()
+    ts = np.asarray(frame["datetime"], dtype=np.int64)
+    bucket_end = ts + int(minutes) * _NS_PER_MINUTE
+    right = int(np.searchsorted(bucket_end, int(last_src_ns), side="right"))
+    left = 0
+    if first_src_ns is not None:
+        left = int(np.searchsorted(ts, int(first_src_ns), side="left"))
+    if left >= right:
+        return frame.iloc[0:0]
+    return frame.iloc[left:right]
+
+
+def asof_bundle(
+    bundle: Mapping[str, pd.DataFrame],
+    *,
+    last_src_ns: int,
+    first_src_ns: int | None = None,
+    max_5m: int | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Slice a precomputed bundle so it matches ``resample_bundle(window)``.
+
+    Closed HTF buckets use ``bucket_end <= last_src_ns``. Optional ``first_src_ns``
+    drops HTF bars that start before the 5m window (left-edge parity).
+    """
+    out: dict[str, pd.DataFrame] = {}
+    for name, frame in bundle.items():
+        minutes = TF_MINUTES[name]
+        if minutes <= 5:
+            if frame is None or frame.empty:
+                out[name] = frame if frame is not None else pd.DataFrame()
+                continue
+            ts = np.asarray(frame["datetime"], dtype=np.int64)
+            right = int(np.searchsorted(ts, int(last_src_ns), side="right"))
+            left = 0
+            if first_src_ns is not None:
+                left = int(np.searchsorted(ts, int(first_src_ns), side="left"))
+            if max_5m is not None:
+                left = max(left, right - max(int(max_5m), 0))
+            out[name] = frame.iloc[left:right]
+        else:
+            out[name] = _closed_asof_frame(
+                frame,
+                minutes=minutes,
+                last_src_ns=last_src_ns,
+                first_src_ns=first_src_ns,
+            )
+    return out

@@ -1,0 +1,62 @@
+{
+  "profile_id": "gma_v2",
+  "decision_mode": "gma_v2",
+  "config_version": "gma_v2",
+  "description": "GMA 2.0：在 v1 的 10W/波动轨/加速轨之上加入能量分布（POC/VA/缺口）门禁与补进场。v1 默认关闭。",
+  "status": "research",
+  "indicators": {
+    "fast_period": 20,
+    "slow_period": 90,
+    "keltner_length": 14,
+    "keltner_inner_atr": 1.5,
+    "keltner_outer_atr": 2.5,
+    "accel_length": 20,
+    "accel_atr": 2.4,
+    "stoch_k": 5,
+    "stoch_d": 3,
+    "stoch_slowing": 2,
+    "stoch_overbought": 80.0,
+    "stoch_oversold": 20.0,
+    "rkk_period": 21,
+    "donchian_mid": 444,
+    "donchian_long": 1600,
+    "vp_lookback_15m": 96,
+    "vp_bins": 48,
+    "vp_value_pct": 0.7,
+    "pullback_near_pct": 0.002,
+    "breakout_lookback": 20,
+    "bias_atr_mult": 4.0,
+    "max_consecutive_losses": 2,
+    "energy_enabled": true
+  },
+  "factor": {
+    "warmup_bars": 200,
+    "subscription_bars": 8000,
+    "ma_fast": 20,
+    "ma_mid": 14,
+    "ma_slow": 90,
+    "atr_period": 14,
+    "adx_period": 14,
+    "adx_threshold": 25.0,
+    "vol_ma_period": 20,
+    "kdj_n": 9,
+    "kline_seconds": 300
+  },
+  "signal": {
+    "model_version": "gma_signal_v2",
+    "confirmation_bars": 1,
+    "signal_ttl_bars": 1
+  },
+  "sizing": {
+    "mode": "gma_fixed_lot",
+    "lot_scale": 1,
+    "lot_by_signal": {"1": 1, "2": 1, "3": 2}
+  },
+  "risk": {
+    "sl_atr_mult": 1.3,
+    "tp_atr_mult": 2.3,
+    "cooldown_bars": 4,
+    "max_bar_delay_seconds": 30.0,
+    "max_symbol_lots": 2
+  }
+}

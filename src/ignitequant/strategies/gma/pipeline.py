@@ -31,6 +31,7 @@ from ignitequant.strategies.gma.config import (
     load_gma_runtime,
 )
 from ignitequant.strategies.gma.regime import Alignment
+from ignitequant.strategies.gma.resample import asof_bundle, resample_bundle
 from ignitequant.strategies.gma.signal import generate_signal
 from ignitequant.strategies.gma.sizing import apply_hold_flat_and_no_flip, lots_from_gma_signal
 from strategies.falcon.risk import RiskAction as LegacyRiskAction
@@ -75,12 +76,24 @@ class GMADecisionPipeline:
         self.current_target = 0
         self._consecutive_losses = 0
         self._loss_pause_day = None
+        self._replay_bundle: dict[str, pd.DataFrame] | None = None
 
     def reset(self) -> None:
         self.risk = RiskManager(**self.config.risk_kwargs())
         self.current_target = 0
         self._consecutive_losses = 0
         self._loss_pause_day = None
+
+    def prepare_replay(self, bars: pd.DataFrame) -> None:
+        """Precompute HTF series once for local cache replay.
+
+        Per-bar ``on_bar_close`` still as-of slices so later 5m bars cannot leak
+        into earlier decisions.
+        """
+        if bars is None or bars.empty:
+            self._replay_bundle = None
+            return
+        self._replay_bundle = resample_bundle(bars)
 
     @property
     def gma(self) -> GMARuntimeConfig:
@@ -124,10 +137,19 @@ class GMADecisionPipeline:
         trade: bool = True,
     ) -> PipelineResult:
         del bar_index
+        bundle = None
+        if self._replay_bundle is not None and window is not None and not window.empty:
+            bundle = asof_bundle(
+                self._replay_bundle,
+                last_src_ns=int(window.iloc[-1]["datetime"]),
+                first_src_ns=int(window.iloc[0]["datetime"]),
+                max_5m=len(window),
+            )
         gma_sig = generate_signal(
             window,
             indicators=self.runtime.indicators,
             current_target=self.current_target,
+            bundle=bundle,
         )
         lot_map = {int(k): int(v) for k, v in self.config.sizing.lot_by_signal.items()}
         max_lots = int(self.config.risk.max_symbol_lots)

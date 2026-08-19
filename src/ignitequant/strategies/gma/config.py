@@ -51,6 +51,7 @@ class GMAIndicatorConfig:
     breakout_lookback: int = 20
     bias_atr_mult: float = 4.0
     max_consecutive_losses: int = 2
+    energy_enabled: bool = False
 
 
 @dataclass(frozen=True)

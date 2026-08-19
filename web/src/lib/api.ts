@@ -9,9 +9,13 @@ function notifyUnauthorized() {
   window.dispatchEvent(new CustomEvent('iq:unauthorized'))
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(
+  path: string,
+  init?: RequestInit & { timeoutMs?: number },
+): Promise<T> {
+  const timeoutMs = init?.timeoutMs ?? REQUEST_TIMEOUT_MS
   const ctrl = new AbortController()
-  const timer = window.setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
+  const timer = window.setTimeout(() => ctrl.abort(), timeoutMs)
   try {
     const token = getStoredToken()
     const headers: Record<string, string> = {
@@ -19,9 +23,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...(init?.headers as Record<string, string> | undefined),
     }
     if (token) headers.Authorization = `Bearer ${token}`
+    const { timeoutMs: _timeoutMs, ...rest } = init || {}
+    void _timeoutMs
 
     const res = await fetch(`${API_BASE}${path}`, {
-      ...init,
+      ...rest,
       headers,
       signal: ctrl.signal,
     })
@@ -42,7 +48,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     return res.json() as Promise<T>
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new Error('请求超时，请检查 API 是否已启动')
+      throw new Error('请求超时，请确认本机 API（端口 8787）已启动')
     }
     throw err
   } finally {
@@ -154,7 +160,81 @@ export function fetchRuns() {
 }
 
 export function fetchJob(jobId: string) {
-  return request<JobRecord>(`/api/jobs/${jobId}`)
+  return request<JobRecord>(`/api/jobs/${jobId}`, { timeoutMs: 120_000 })
+}
+
+const BACKTEST_JOB_STORAGE_KEY = 'iq:lab:backtestJobId'
+
+export function peekStoredBacktestJobId(): string | null {
+  try {
+    return window.sessionStorage.getItem(BACKTEST_JOB_STORAGE_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function rememberBacktestJobId(jobId: string) {
+  try {
+    window.sessionStorage.setItem(BACKTEST_JOB_STORAGE_KEY, jobId)
+  } catch {
+    /* private mode / quota */
+  }
+}
+
+export function forgetBacktestJobId() {
+  try {
+    window.sessionStorage.removeItem(BACKTEST_JOB_STORAGE_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
+export function isBacktestPollAbort(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === 'AbortError') return true
+  const msg = err instanceof Error ? err.message : String(err)
+  return /abort|Failed to fetch|network|Load failed/i.test(msg)
+}
+
+export async function waitForBacktestJob(
+  jobId: string,
+  onProgress?: (job: JobRecord) => void,
+): Promise<{ count: number; runs: RunRecord[]; job: JobRecord }> {
+  rememberBacktestJobId(jobId)
+  let job = await fetchJob(jobId)
+  onProgress?.(job)
+
+  if (job.status === 'SUCCEEDED') {
+    return {
+      count: (job.runs || []).length,
+      runs: job.runs || [],
+      job,
+    }
+  }
+  if (job.status === 'FAILED' || job.status === 'CANCELED') {
+    forgetBacktestJobId()
+    throw new Error(job.error_summary || `回测任务 ${job.status}`)
+  }
+
+  const started = Date.now()
+  for (;;) {
+    if (Date.now() - started > BACKTEST_POLL_MAX_MS) {
+      throw new Error('回测轮询超时（30 分钟），请稍后刷新页面接上任务进度')
+    }
+    await sleep(1500)
+    job = await fetchJob(jobId)
+    onProgress?.(job)
+    if (job.status === 'SUCCEEDED') {
+      return {
+        count: (job.runs || []).length,
+        runs: job.runs || [],
+        job,
+      }
+    }
+    if (job.status === 'FAILED' || job.status === 'CANCELED') {
+      forgetBacktestJobId()
+      throw new Error(job.error_summary || `回测任务 ${job.status}`)
+    }
+  }
 }
 
 /** 异步提交并轮询至完成（Phase 5：不阻塞 API 进程内同步等待 HTTP 线程）。 */
@@ -183,42 +263,12 @@ export async function runBacktest(body: {
   })
 
   if (submitted.mode === 'sync' || !submitted.job) {
+    forgetBacktestJobId()
     return { count: submitted.count, runs: submitted.runs, job: submitted.job }
   }
 
-  let job = submitted.job
-  onProgress?.(job)
-
-  // Idempotent hit: previous SUCCEEDED job returned immediately.
-  if (job.status === 'SUCCEEDED') {
-    job = await fetchJob(job.job_id)
-    onProgress?.(job)
-    return {
-      count: (job.runs || []).length,
-      runs: job.runs || [],
-      job,
-    }
-  }
-
-  const started = Date.now()
-  for (;;) {
-    if (Date.now() - started > BACKTEST_POLL_MAX_MS) {
-      throw new Error('回测轮询超时（30 分钟），请稍后在任务列表查看结果')
-    }
-    await sleep(1500)
-    job = await fetchJob(job.job_id)
-    onProgress?.(job)
-    if (job.status === 'SUCCEEDED') {
-      return {
-        count: (job.runs || []).length,
-        runs: job.runs || [],
-        job,
-      }
-    }
-    if (job.status === 'FAILED' || job.status === 'CANCELED') {
-      throw new Error(job.error_summary || `回测任务 ${job.status}`)
-    }
-  }
+  onProgress?.(submitted.job)
+  return waitForBacktestJob(submitted.job.job_id, onProgress)
 }
 
 export function patchNotes(runId: string, notes: string) {

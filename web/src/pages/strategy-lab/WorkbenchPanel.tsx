@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type MouseEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import {
   App,
   Alert,
@@ -26,7 +26,16 @@ import {
   SaveOutlined,
 } from '@ant-design/icons'
 import dayjs, { type Dayjs } from 'dayjs'
-import { fetchCatalog, runBacktest, type RunRecord, type Strategy } from '@/lib/api'
+import {
+  fetchCatalog,
+  forgetBacktestJobId,
+  isBacktestPollAbort,
+  peekStoredBacktestJobId,
+  runBacktest,
+  waitForBacktestJob,
+  type RunRecord,
+  type Strategy,
+} from '@/lib/api'
 import {
   BACKTEST_ENGINE_OPTIONS,
   CHART_METRIC_OPTIONS,
@@ -76,6 +85,12 @@ const FALLBACK_STRATEGIES: Strategy[] = [
     id: 'gma_v1',
     name: 'GMA v1',
     description: '10W 多周期状态机 + 波动轨/加速轨 + 震荡/驱动/回踩',
+    ready: true,
+  },
+  {
+    id: 'gma_v2',
+    name: 'GMA v2',
+    description: 'GMA 2.0：v1 模板 + 能量分布（POC/价值区/缺口）',
     ready: true,
   },
   {
@@ -331,6 +346,7 @@ export function WorkbenchPanel() {
   const [page, setPage] = useState(1)
   const [chartMetric, setChartMetric] = useState<ChartMetric>('equity')
   const [chartPeriod, setChartPeriod] = useState<ChartPeriod>('day')
+  const applyCompletedRef = useRef<(rec: RunRecord) => void>(() => {})
 
   useEffect(() => {
     let cancelled = false
@@ -352,6 +368,50 @@ export function WorkbenchPanel() {
     }
   }, [])
 
+  useEffect(() => {
+    const jobId = peekStoredBacktestJobId()
+    if (!jobId) return
+    let cancelled = false
+    setBusy(true)
+    setProgress(2)
+    setProgressMsg('正在接上后台回测进度…')
+    void waitForBacktestJob(jobId, (job) => {
+      if (cancelled) return
+      const pct = Math.max(0, Math.min(100, Math.round(Number(job.progress || 0) * 100)))
+      setProgress(pct)
+      setProgressMsg(
+        job.progress_msg ||
+          (job.status === 'QUEUED'
+            ? '排队中…'
+            : job.status === 'RUNNING'
+              ? '回测运行中…'
+              : job.status),
+      )
+    })
+      .then((out) => {
+        if (cancelled) return
+        const rec = out.runs[0]
+        if (!rec) throw new Error('回测完成但未返回结果记录')
+        applyCompletedRef.current(rec)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        if (isBacktestPollAbort(e)) {
+          setProgressMsg('进度连接中断，刷新页面可重新接上')
+          return
+        }
+        forgetBacktestJobId()
+        setProgressMsg('回测失败')
+        message.error(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [message])
+
   const engineMeta =
     BACKTEST_ENGINE_OPTIONS.find((o) => o.id === account.engine) ??
     BACKTEST_ENGINE_OPTIONS[0]
@@ -360,6 +420,66 @@ export function WorkbenchPanel() {
     catalogStrategies.find((s) => s.id === strategyId) ?? catalogStrategies[0]
 
   const overseasSupported = defaultUseOverseas(account.symbolId)
+
+  applyCompletedRef.current = (rec: RunRecord) => {
+    const initBalance =
+      typeof rec.init_balance === 'number' && rec.init_balance > 0
+        ? rec.init_balance
+        : account.initBalance
+    const strategyLabel = strategyMeta?.name || strategyId
+    const curve = seriesFromRun(rec, initBalance)
+    const metrics = kpisFromRun(rec, initBalance)
+    const symbolName =
+      WORKBENCH_SYMBOLS.find((s) => s.id === account.symbolId)?.name ||
+      rec.symbol_name ||
+      account.symbolId
+    const multRaw = rec.cost_model?.multiplier
+    const multiplier =
+      typeof multRaw === 'number' && Number.isFinite(multRaw) && multRaw > 0
+        ? multRaw
+        : 1000
+    const tradeRows = tradesFromRunFills(rec.fills, {
+      symbolFallback: String(rec.trade_symbol || symbolName),
+      multiplier,
+    })
+    setSeries(curve)
+    setTrades(tradeRows)
+    setKpis(metrics)
+
+    const engineLabel = account.engine === 'tq' ? '天勤' : '缓存'
+    const run: BacktestRun = {
+      id: rec.run_id || newId('run'),
+      name: `${strategyLabel} · ${engineLabel} · ${rec.start || account.start}~${rec.end || account.end}`,
+      savedAt: rec.saved_at || new Date().toISOString(),
+      strategyId,
+      strategyName: strategyLabel,
+      account: { ...account },
+      nodes: { ...nodes },
+      series: curve,
+      trades: tradeRows,
+      kpis: metrics,
+    }
+
+    setProgress(100)
+    setProgressMsg(`回测完成 ${run.name}`)
+    forgetBacktestJobId()
+
+    if (account.persistDb) {
+      const nextRuns = [run, ...runs].slice(0, 50)
+      setRuns(nextRuns)
+      try {
+        persistBacktestRuns(nextRuns)
+      } catch (saveErr) {
+        message.error(saveErr instanceof Error ? saveErr.message : String(saveErr))
+      }
+      setSelectedRunId(run.id)
+      message.success(`${engineLabel}回测完成（区间 ${account.start}～${account.end}）`)
+    } else {
+      message.success(
+        `${engineLabel}回测完成（区间 ${account.start}～${account.end}；未写入本地历史列表）`,
+      )
+    }
+  }
 
   const chartSeries = useMemo(
     () => aggregateSeries(series, chartPeriod),
@@ -507,11 +627,12 @@ export function WorkbenchPanel() {
     setPage(1)
     setProgress(2)
     setProgressMsg(
-      `提交回测 ${account.start} → ${account.end}（${account.engine === 'tq' ? '天勤' : '本地缓存'}）…`,
+      `提交回测 ${account.start} → ${account.end}（${account.engine === 'tq' ? '天勤' : '本地缓存'}${
+        overseasSupported && account.useOverseas ? '，外盘约 10 分钟请勿关闭本页' : ''
+      }）…`,
     )
     try {
       const engineApi = account.engine === 'tq' ? 'tq' : 'local'
-      const strategyLabel = strategyMeta?.name || strategyId
       const out = await runBacktest({
         strategy_id: strategyId,
         symbol_ids: [account.symbolId],
@@ -540,60 +661,12 @@ export function WorkbenchPanel() {
       if (!rec) {
         throw new Error('回测完成但未返回结果记录')
       }
-
-      const curve = seriesFromRun(rec, account.initBalance)
-      const metrics = kpisFromRun(rec, account.initBalance)
-      const symbolName =
-        WORKBENCH_SYMBOLS.find((s) => s.id === account.symbolId)?.name ||
-        rec.symbol_name ||
-        account.symbolId
-      const multRaw = (rec as { cost_model?: { multiplier?: number } }).cost_model
-        ?.multiplier
-      const multiplier =
-        typeof multRaw === 'number' && Number.isFinite(multRaw) && multRaw > 0
-          ? multRaw
-          : 1000
-      const tradeRows = tradesFromRunFills(rec.fills, {
-        symbolFallback: String(rec.trade_symbol || symbolName),
-        multiplier,
-      })
-      setSeries(curve)
-      setTrades(tradeRows)
-      setKpis(metrics)
-
-      const engineLabel = account.engine === 'tq' ? '天勤' : '缓存'
-      const run: BacktestRun = {
-        id: rec.run_id || newId('run'),
-        name: `${strategyLabel} · ${engineLabel} · ${rec.start || account.start}~${rec.end || account.end}`,
-        savedAt: rec.saved_at || new Date().toISOString(),
-        strategyId,
-        strategyName: strategyLabel,
-        account: { ...account },
-        nodes: { ...nodes },
-        series: curve,
-        trades: tradeRows,
-        kpis: metrics,
-      }
-
-      setProgress(100)
-      setProgressMsg(`回测完成 ${run.name}`)
-
-      if (account.persistDb) {
-        const nextRuns = [run, ...runs].slice(0, 50)
-        setRuns(nextRuns)
-        try {
-          persistBacktestRuns(nextRuns)
-        } catch (saveErr) {
-          message.error(saveErr instanceof Error ? saveErr.message : String(saveErr))
-        }
-        setSelectedRunId(run.id)
-        message.success(`${engineLabel}回测完成（区间 ${account.start}～${account.end}）`)
-      } else {
-        message.success(
-          `${engineLabel}回测完成（区间 ${account.start}～${account.end}；未写入本地历史列表）`,
-        )
-      }
+      applyCompletedRef.current(rec)
     } catch (e) {
+      if (isBacktestPollAbort(e)) {
+        setProgressMsg('进度连接中断，刷新页面可重新接上')
+        return
+      }
       setProgressMsg('回测失败')
       message.error(e instanceof Error ? e.message : String(e))
     } finally {
@@ -751,7 +824,7 @@ export function WorkbenchPanel() {
                   style={{ fontSize: 12, display: 'block', marginTop: 6 }}
                 >
                   {overseasSupported
-                    ? '外盘信号 + 内盘市价；内盘休市不开仓'
+                    ? '外盘信号 + 内盘市价；内盘休市不开仓。GMA 外盘约需 10 分钟，刷新会中断进度条但不会取消后台任务。'
                     : '该品种无外盘对照'}
                 </Text>
               </Col>

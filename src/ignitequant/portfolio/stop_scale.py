@@ -16,6 +16,31 @@ def scale_atr_to_entry(
     return float(entry_price) * (float(atr_overseas) / float(overseas_close))
 
 
+def map_fill_to_signal_price(
+    fill_price: float,
+    *,
+    domestic_mark: float | None,
+    overseas_close: float | None,
+    ratio_tol: float = 0.05,
+) -> float:
+    """Map a domestic fill into overseas signal space for ``risk.check``.
+
+    Live sim and local replay arm SL/TP in the same units as the decision
+    window high/low (XAUUSD). Without this remap, a ~2900 overseas high
+    immediately hits a ~680 yuan stop.
+    """
+    fill = float(fill_price)
+    if (
+        overseas_close is not None
+        and overseas_close > 0
+        and domestic_mark is not None
+        and domestic_mark > 0
+        and abs(float(overseas_close) / float(domestic_mark) - 1.0) > float(ratio_tol)
+    ):
+        return fill * (float(overseas_close) / float(domestic_mark))
+    return fill
+
+
 def relative_atr_fraction(atr: float, close: float) -> float:
     if atr <= 0 or close <= 0:
         return 0.0

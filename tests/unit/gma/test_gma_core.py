@@ -185,11 +185,12 @@ def test_confirm_local_fill_arms_stop() -> None:
 
 
 def test_gma_modules_do_not_import_tqsdk() -> None:
+    import ignitequant.strategies.gma.energy as energy
     import ignitequant.strategies.gma.indicators as indicators
     import ignitequant.strategies.gma.pipeline as pipeline
     import ignitequant.strategies.gma.signal as signal
 
-    for mod in (indicators, pipeline, signal):
+    for mod in (energy, indicators, pipeline, signal):
         src = inspect.getsource(mod)
         assert "import tqsdk" not in src
         assert "from tqsdk" not in src
@@ -221,6 +222,8 @@ def test_catalog_and_sim_launcher_register_gma() -> None:
 
     assert "gma_v1" in STRATEGIES
     assert STRATEGIES["gma_v1"].runner == "run_gma_v1"
+    assert "gma_v2" in STRATEGIES
+    assert STRATEGIES["gma_v2"].runner == "run_gma_v2"
     sim_src = (ROOT / "dashboard" / "sim_api.py").read_text(encoding="utf-8")
     assert '"gma_au_sim"' in sim_src
     assert "gma_au_sim.py" in sim_src

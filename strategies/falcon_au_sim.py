@@ -163,18 +163,15 @@ def _arm_entry_after_fill(
 
     Returns domestic display levels for the cockpit (same units as fill_price).
     """
-    entry_px = float(fill_price)
+    from ignitequant.portfolio.stop_scale import map_fill_to_signal_price
+
+    entry_px = map_fill_to_signal_price(
+        float(fill_price),
+        domestic_mark=domestic_mark,
+        overseas_close=overseas_close,
+    )
     entry_atr = float(signal_atr)
-    ratio = 1.0
-    if (
-        overseas_close is not None
-        and overseas_close > 0
-        and domestic_mark is not None
-        and domestic_mark > 0
-        and abs(float(overseas_close) / float(domestic_mark) - 1.0) > 0.05
-    ):
-        ratio = float(overseas_close) / float(domestic_mark)
-        entry_px = float(fill_price) * ratio
+    ratio = (float(entry_px) / float(fill_price)) if fill_price else 1.0
     pipeline.risk.on_entry(int(side_lots), entry_px, entry_atr, int(signal))
 
     domestic_atr = float(signal_atr) / ratio if ratio > 0 else float(signal_atr)

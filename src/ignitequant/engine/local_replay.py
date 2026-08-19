@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import datetime as dt
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
 
 from ignitequant.analytics import (
@@ -24,7 +26,7 @@ from ignitequant.engine.runtime_bridge import (
     make_risk_engine,
 )
 from ignitequant.execution.roll import RollStateMachine
-from ignitequant.market.cache import ensure_cache, load_bars, resolve_instrument
+from ignitequant.market.cache import ensure_cache, load_bars, resolve_instrument, slice_bars
 from ignitequant.market.overseas_bars import ensure_overseas_cache_bars, load_overseas_cache_bars
 from ignitequant.market.session import (
     TRADE_STATUS_CLOSED,
@@ -33,6 +35,7 @@ from ignitequant.market.session import (
 )
 from ignitequant.market.symbols import cost_model_for, resolve_signal_source
 from ignitequant.market.trading_day import trading_day_from_timestamp_ns
+from ignitequant.portfolio.stop_scale import map_fill_to_signal_price
 import ignitequant as _iq
 
 ProgressCb = Callable[[float, str], None]
@@ -140,14 +143,46 @@ def _asof_domestic_row(
     domestic: pd.DataFrame | None, bar_ns: int
 ) -> tuple[float | None, float | None, str]:
     """Latest domestic bar at or before overseas bar time → (open, close, underlying)."""
+    return _domestic_asof_index(domestic).lookup(bar_ns)
+
+
+@dataclass(frozen=True)
+class _DomesticAsof:
+    ts: np.ndarray
+    open: np.ndarray
+    close: np.ndarray
+    under: np.ndarray | None
+
+    def lookup(self, bar_ns: int) -> tuple[float | None, float | None, str]:
+        if self.ts.size == 0:
+            return None, None, ""
+        idx = int(np.searchsorted(self.ts, int(bar_ns), side="right") - 1)
+        if idx < 0:
+            return None, None, ""
+        under = ""
+        if self.under is not None:
+            under = str(self.under[idx] or "").strip()
+        return float(self.open[idx]), float(self.close[idx]), under
+
+
+def _domestic_asof_index(domestic: pd.DataFrame | None) -> _DomesticAsof:
     if domestic is None or domestic.empty:
-        return None, None, ""
-    eligible = domestic[domestic["datetime"] <= bar_ns]
-    if eligible.empty:
-        return None, None, ""
-    row = eligible.iloc[-1]
-    underlying = str(row.get("underlying_symbol") or "").strip()
-    return float(row["open"]), float(row["close"]), underlying
+        return _DomesticAsof(
+            ts=np.array([], dtype=np.int64),
+            open=np.array([], dtype=float),
+            close=np.array([], dtype=float),
+            under=None,
+        )
+    ts = pd.to_numeric(domestic["datetime"], errors="coerce").to_numpy(dtype=np.int64)
+    under = None
+    if "underlying_symbol" in domestic.columns:
+        under = domestic["underlying_symbol"].to_numpy()
+    return _DomesticAsof(
+        ts=ts,
+        open=domestic["open"].to_numpy(dtype=float),
+        close=domestic["close"].to_numpy(dtype=float),
+        under=under,
+    )
 
 
 def run_local_falcon_backtest(
@@ -227,6 +262,8 @@ def run_local_falcon_backtest(
                 bars = domestic_bars
                 decision_symbol = signal_symbol
                 source = resolve_signal_source(spec, use_overseas=False)
+            elif not bars.empty and overseas_hits:
+                bars = slice_bars(bars, start=start, end=end, warmup_bars=lookback)
             elif bars.empty:
                 hint = ""
                 errs = getattr(bars, "attrs", {}).get("ensure_errors") if hasattr(bars, "attrs") else None
@@ -271,6 +308,11 @@ def run_local_falcon_backtest(
 
     make_pipeline = pipeline_factory or FalconDecisionPipeline
     pipeline = make_pipeline(cfg)
+    prepare_replay = getattr(pipeline, "prepare_replay", None)
+    if prepare_replay is not None:
+        if progress_cb is not None:
+            progress_cb(0.37, "预计算多周期指标…")
+        prepare_replay(bars)
     risk_engine = make_risk_engine(cfg)
     roll = RollStateMachine()
     sim = LocalSimAccount(init_balance=init_balance, cost=cost)
@@ -283,6 +325,7 @@ def run_local_falcon_backtest(
     # Respect profile warmup; do not force ma_slow/60 floor (smoke/test may use warmup=5).
     warmup = max(int(cfg.factor.warmup_bars), 1)
     decisions: list[dict[str, Any]] = []
+    domestic_asof = _domestic_asof_index(domestic_bars)
 
     for i in trade_indices:
         if i + 1 < warmup:
@@ -304,10 +347,11 @@ def run_local_falcon_backtest(
         close_px = float(row["close"])
         # Tq decides on datetime-change using the new bar's open as last/close.
         decision_px = float(row["open"])
+        signal_close = close_px
         overseas_mode = source.pricing_basis == "overseas"
         session_open = is_session_open_at(bar_ns) if overseas_mode else True
         trade_status = TRADE_STATUS_OPEN if session_open else TRADE_STATUS_CLOSED
-        fill_open, fill_close, dom_underlying = _asof_domestic_row(domestic_bars, bar_ns)
+        fill_open, fill_close, dom_underlying = domestic_asof.lookup(bar_ns)
         if overseas_mode and dom_underlying:
             underlying = dom_underlying
         if overseas_mode and fill_open is not None:
@@ -460,8 +504,15 @@ def run_local_falcon_backtest(
         )
         confirm = getattr(pipeline, "confirm_local_fill", None)
         if confirm is not None and desired != 0:
+            arm_price = float(decision_px)
+            if overseas_mode:
+                arm_price = map_fill_to_signal_price(
+                    arm_price,
+                    domestic_mark=float(decision_px),
+                    overseas_close=float(signal_close),
+                )
             confirm(
-                price=float(decision_px),
+                price=arm_price,
                 atr=float(result.factors.values.get("atr") or 0.0),
                 signal=int(result.signal.legacy_signal or 0),
             )

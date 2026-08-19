@@ -607,7 +607,9 @@ def run_falcon_local(
     )
 
 
-def run_gma_v1(
+def _run_gma_profile(
+    profile_id: str,
+    strategy_id: str,
     *,
     signal_symbol: str,
     start: dt.date,
@@ -620,16 +622,12 @@ def run_gma_v1(
     auto_download: bool = True,
     engine: str = "local",
 ) -> dict[str, Any]:
-    """GMA 完整策略回测（与模拟盘共用 GMADecisionPipeline）。
-
-    始终走本地回放。``engine=tq`` 仍被 API 接受，但不会连接天勤回测循环。
-    """
     from dataclasses import replace
 
     from ignitequant.strategies.gma import GMA_CACHE_WARMUP_BARS, GMADecisionPipeline, load_gma_runtime
     from ignitequant.strategies.gma.config import GMARuntimeConfig
 
-    runtime = load_gma_runtime()
+    runtime = load_gma_runtime(profile_id)
     cfg = replace(runtime.decision, symbol=signal_symbol, entry_mode="fill_confirmed")
     _ = engine
 
@@ -650,13 +648,75 @@ def run_gma_v1(
         "use_overseas": False if use_overseas is None else use_overseas,
         "auto_download": auto_download,
         "pipeline_factory": factory,
-        "strategy_id": "gma_v1",
+        "strategy_id": strategy_id,
         "config": cfg,
         "completed_bars": True,
         "cache_warmup_bars": max(int(data_length), GMA_CACHE_WARMUP_BARS),
     }
-    # GMA 只有本地回放核；天勤引擎对沪金「参考外盘」也会被折回本地缓存。
     return run_falcon_local(**kwargs)
+
+
+def run_gma_v1(
+    *,
+    signal_symbol: str,
+    start: dt.date,
+    end: dt.date,
+    init_balance: float = 1_000_000,
+    kline_seconds: int = 300,
+    data_length: int = 8000,
+    progress_cb=None,
+    use_overseas: bool | None = None,
+    auto_download: bool = True,
+    engine: str = "local",
+) -> dict[str, Any]:
+    """GMA v1 完整策略回测（与模拟盘共用 GMADecisionPipeline）。
+
+    始终走本地回放。``engine=tq`` 仍被 API 接受，但不会连接天勤回测循环。
+    """
+    return _run_gma_profile(
+        "gma_v1",
+        "gma_v1",
+        signal_symbol=signal_symbol,
+        start=start,
+        end=end,
+        init_balance=init_balance,
+        kline_seconds=kline_seconds,
+        data_length=data_length,
+        progress_cb=progress_cb,
+        use_overseas=use_overseas,
+        auto_download=auto_download,
+        engine=engine,
+    )
+
+
+def run_gma_v2(
+    *,
+    signal_symbol: str,
+    start: dt.date,
+    end: dt.date,
+    init_balance: float = 1_000_000,
+    kline_seconds: int = 300,
+    data_length: int = 8000,
+    progress_cb=None,
+    use_overseas: bool | None = None,
+    auto_download: bool = True,
+    engine: str = "local",
+) -> dict[str, Any]:
+    """GMA 2.0：v1 模板 + 能量分布门禁。"""
+    return _run_gma_profile(
+        "gma_v2",
+        "gma_v2",
+        signal_symbol=signal_symbol,
+        start=start,
+        end=end,
+        init_balance=init_balance,
+        kline_seconds=kline_seconds,
+        data_length=data_length,
+        progress_cb=progress_cb,
+        use_overseas=use_overseas,
+        auto_download=auto_download,
+        engine=engine,
+    )
 
 
 def run_vwap_stub(**kwargs) -> dict[str, Any]:
