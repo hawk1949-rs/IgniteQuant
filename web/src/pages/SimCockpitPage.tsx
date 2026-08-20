@@ -76,15 +76,15 @@ function SimCockpitInner({ onBackHome }: Props) {
   const [section, setSection] = useState<SimSection>('overview')
 
   return (
-    <div className="mx-auto min-h-screen max-w-[92rem] px-3 pb-14 pt-4 sm:px-5 lg:px-6">
-      <header className="mb-3 rounded-xl border border-line bg-panel/90 px-4 py-3.5 sm:px-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
+    <div className="mx-auto min-h-screen max-w-[92rem] overflow-x-hidden px-3 pb-[max(3.5rem,env(safe-area-inset-bottom))] pt-4 sm:px-5 lg:px-6">
+      <header className="mb-3 rounded-xl border border-line bg-panel/90 px-3 py-3 sm:px-5 sm:py-3.5">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between">
+          <div className="min-w-0 flex-1">
             {onBackHome ? (
               <button
                 type="button"
                 onClick={onBackHome}
-                className="mb-1.5 text-xs font-medium text-blue hover:opacity-80"
+                className="mb-1.5 min-h-11 text-xs font-medium text-blue hover:opacity-80 sm:min-h-0"
               >
                 ← 返回首页
               </button>
@@ -95,7 +95,7 @@ function SimCockpitInner({ onBackHome }: Props) {
               </h1>
               <p className="text-xs text-faint">天勤模拟 · 5 分钟节奏</p>
             </div>
-            <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted sm:text-sm">
+            <p className="mt-1 hidden max-w-2xl text-xs leading-relaxed text-muted sm:block sm:text-sm">
               一页看完行情、账户、思考链路与委托成交；可一键启动，按 K 线自动刷新。
             </p>
             <div className="mt-2">
@@ -104,7 +104,7 @@ function SimCockpitInner({ onBackHome }: Props) {
           </div>
 
           <nav
-            className="flex shrink-0 rounded-lg border border-line bg-surface/50 p-0.5"
+            className="flex w-full shrink-0 rounded-lg border border-line bg-surface/50 p-0.5 sm:w-auto"
             aria-label="座舱分区"
           >
             {SIM_NAV.map((item) => {
@@ -115,14 +115,14 @@ function SimCockpitInner({ onBackHome }: Props) {
                   type="button"
                   onClick={() => setSection(item.id)}
                   className={cn(
-                    'rounded-md px-3 py-1.5 text-left transition',
+                    'min-h-11 flex-1 rounded-md px-3 py-1.5 text-left transition sm:min-h-0 sm:flex-none',
                     active ? 'bg-blue text-white' : 'text-muted hover:text-ink',
                   )}
                 >
                   <p className="text-sm font-medium leading-none">{item.label}</p>
                   <p
                     className={cn(
-                      'mt-1 text-xs leading-none',
+                      'mt-1 hidden text-xs leading-none sm:block',
                       active ? 'text-white/75' : 'text-faint',
                     )}
                   >
@@ -135,7 +135,7 @@ function SimCockpitInner({ onBackHome }: Props) {
         </div>
       </header>
 
-      <main>{section === 'overview' ? <OverviewPanel /> : <ReplayPanel />}</main>
+      <main className="min-w-0">{section === 'overview' ? <OverviewPanel /> : <ReplayPanel />}</main>
     </div>
   )
 }

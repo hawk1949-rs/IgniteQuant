@@ -324,6 +324,29 @@ export type SimCatalog = {
   read_only_hint?: string | null
 }
 
+export type SimBookLeg = {
+  instance_id: string
+  symbol_id?: string | null
+  strategy_id?: string | null
+  label?: string
+  process_running?: boolean
+  pid?: number | null
+  status?: string
+  net_position?: number
+  unrealized_pnl?: number
+  equity?: number | null
+  symbol?: string | null
+  open_positions?: SimSummary['open_positions']
+}
+
+export type SimBook = {
+  strategy_id: string
+  legs: SimBookLeg[]
+  open_positions: NonNullable<SimSummary['open_positions']>
+  running_count: number
+  unrealized_pnl: number
+}
+
 export type SimSession = {
   instance_id: string
   db_path?: string
@@ -414,6 +437,7 @@ export type SimSummary = {
   data_source?: 'cloud' | 'local' | string
   read_only?: boolean
   read_only_hint?: string | null
+  book?: SimBook | null
 }
 
 export type SimMetrics = {
@@ -446,11 +470,16 @@ export type SimDecision = {
   target_after: number
   legacy_signal: number
   created_at: string
+  strategy_id?: string
   regime?: string
   factor_values?: Record<string, number>
   factor_quality?: string
+  factor_summary?: string
   reason_codes?: string[]
   score_parts?: number[] | null
+  score_parts_schema?: string
+  score_parts_label?: string
+  pipeline_risk_label?: string | null
   signal?: Record<string, unknown>
   target?: Record<string, unknown>
   risk?: {
@@ -522,8 +551,12 @@ export type SimPositionHistoryRow = {
 }
 
 export type SimChartContext = {
+  strategy_id?: string
   regime?: string
   short_bias?: string
+  factor_summary?: string
+  score_parts_schema?: string
+  source?: string
   close?: number
   ma52?: number | null
   adx?: number | null
@@ -531,27 +564,26 @@ export type SimChartContext = {
   conflict?: boolean
 }
 
+export type SimOverlaySpec = {
+  key: string
+  label: string
+  color: string
+  pane: 'main' | 'signal' | string
+}
+
 export type SimBarMeta = {
   time: number
   signal?: number | null
   score_parts?: number[] | null
+  score_parts_label?: string | null
   regime?: string | null
-  ma7?: number | null
-  ma14?: number | null
-  ma52?: number | null
-  atr?: number | null
-  adx?: number | null
   source?: 'live' | 'replay' | string
   applied_action?: string | null
   target_after?: number | null
+  [key: string]: unknown
 }
 
-export type SimChartOverlays = {
-  ma7: { time: number; value: number }[]
-  ma14: { time: number; value: number }[]
-  ma52: { time: number; value: number }[]
-  signal: { time: number; value: number }[]
-}
+export type SimChartOverlays = Record<string, { time: number; value: number }[]>
 
 export type SimPriceLine = {
   price: number
@@ -563,6 +595,7 @@ export type SimBarsResponse = {
   instance_id?: string
   symbol_id?: string
   name?: string
+  strategy_id?: string
   signal_symbol: string
   trade_symbol: string
   bars: {
@@ -584,6 +617,8 @@ export type SimBarsResponse = {
     qty?: number
   }[]
   overlays?: SimChartOverlays
+  overlay_specs?: SimOverlaySpec[]
+  score_parts_schema?: string
   bar_meta?: SimBarMeta[]
   price_lines?: SimPriceLine[]
   has_more?: boolean
@@ -621,6 +656,7 @@ export type SimOverseasBars = {
     volume: number
   }[]
   overlays?: SimChartOverlays
+  overlay_specs?: SimOverlaySpec[]
   bar_meta?: SimBarMeta[]
   has_more?: boolean
   last_price?: number | null
@@ -663,7 +699,9 @@ export function fetchSimCatalog() {
 }
 
 export function fetchSimSessions() {
-  return request<{ sessions: SimSession[]; count: number }>('/api/sim/sessions')
+  return request<{ sessions: SimSession[]; count: number; fleet?: SimBookLeg[] }>(
+    '/api/sim/sessions',
+  )
 }
 
 export function fetchSimSummary(instanceId: string) {
@@ -712,7 +750,13 @@ export function repairSimFills(instanceId: string) {
   )
 }
 
-export function catchUpSimBars(instanceId: string) {
+export function catchUpSimBars(
+  instanceId: string,
+  opts?: { bootstrapToday?: boolean },
+) {
+  const q = new URLSearchParams()
+  if (opts?.bootstrapToday) q.set('bootstrap_today', 'true')
+  const suffix = q.toString() ? `?${q}` : ''
   return request<{
     instance_id: string
     missed: number
@@ -727,7 +771,7 @@ export function catchUpSimBars(instanceId: string) {
     process_running?: boolean
     hint?: string | null
     bar_ids?: string[]
-  }>(`/api/sim/sessions/${encodeURIComponent(instanceId)}/catch-up-bars`, { method: 'POST' })
+  }>(`/api/sim/sessions/${encodeURIComponent(instanceId)}/catch-up-bars${suffix}`, { method: 'POST' })
 }
 
 export function fetchSimBars(
@@ -759,7 +803,29 @@ export function startSimSession(instanceId: string) {
     pid?: number
     process_running?: boolean
     label?: string
+    instance_id?: string
   }>(`/api/sim/sessions/${encodeURIComponent(instanceId)}/start`, { method: 'POST' })
+}
+
+export function startSimStrategy(strategyId: string, symbolIds: string[]) {
+  return request<{
+    ok: boolean
+    strategy_id: string
+    symbol_ids: string[]
+    started: number
+    running: number
+    message: string
+    results: Array<{
+      ok: boolean
+      instance_id?: string
+      already_running?: boolean
+      message?: string
+      process_running?: boolean
+    }>
+  }>(`/api/sim/strategies/${encodeURIComponent(strategyId)}/start`, {
+    method: 'POST',
+    body: JSON.stringify({ symbol_ids: symbolIds }),
+  })
 }
 
 export function fetchSimOverseasBars(
@@ -779,13 +845,14 @@ export function fetchSimOverseasBars(
 
 export function fetchSimMarketBars(
   symbolId: string,
-  opts?: { limit?: number; before?: number },
+  opts?: { limit?: number; before?: number; strategyId?: string },
 ) {
   const limit = opts?.limit ?? 100
   const q = new URLSearchParams()
   q.set('symbol_id', symbolId)
   q.set('limit', String(limit))
   if (opts?.before != null) q.set('before', String(opts.before))
+  if (opts?.strategyId) q.set('strategy_id', opts.strategyId)
   return request<SimBarsResponse & { symbol_id?: string; name?: string }>(
     `/api/sim/market/bars?${q}`,
   )

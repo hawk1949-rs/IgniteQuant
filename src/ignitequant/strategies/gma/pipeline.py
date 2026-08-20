@@ -83,6 +83,10 @@ class GMADecisionPipeline:
         self.current_target = 0
         self._consecutive_losses = 0
         self._loss_pause_day = None
+        self._replay_bundle = None
+
+    def clear_replay(self) -> None:
+        self._replay_bundle = None
 
     def prepare_replay(self, bars: pd.DataFrame) -> None:
         """Precompute HTF series once for local cache replay.

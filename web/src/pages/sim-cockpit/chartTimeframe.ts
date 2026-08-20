@@ -1,6 +1,7 @@
 /** Chart timeframe helpers for Sim Cockpit candle panels. */
 
-import type { SimBarMeta, SimChartOverlays, SimPriceLine } from '../../lib/api'
+import type { SimBarMeta, SimChartOverlays, SimOverlaySpec, SimPriceLine } from '../../lib/api'
+import { overlayKeys, resolveOverlaySpecs } from './strategyPresentation'
 
 export type ChartTimeframe = '5m' | '15m' | '1h' | '1d'
 
@@ -104,34 +105,48 @@ export function aggregateMarkers(
 export function aggregateOverlaySeries(
   points: { time: number; value: number }[] | undefined,
   bars: OhlcBar[],
+  tf: ChartTimeframe = '5m',
 ): { time: number; value: number }[] {
   if (!points?.length || !bars.length) return []
-  const out: { time: number; value: number }[] = []
-  let pi = 0
-  for (const bar of bars) {
-    let last: { time: number; value: number } | null = null
-    while (pi < points.length && points[pi].time <= bar.time) {
-      last = points[pi]
-      pi += 1
+  if (tf === '5m') {
+    const out: { time: number; value: number }[] = []
+    let pi = 0
+    for (const bar of bars) {
+      let last: { time: number; value: number } | null = null
+      while (pi < points.length && points[pi].time <= bar.time) {
+        last = points[pi]
+        pi += 1
+      }
+      if (last) out.push({ time: bar.time, value: last.value })
     }
-    if (last) out.push({ time: bar.time, value: last.value })
+    return out
   }
-  return out
+  const byBucket = new Map<number, number>()
+  for (const p of points) {
+    byBucket.set(bucketStart(p.time, tf), p.value)
+  }
+  return bars
+    .map((b) => {
+      const value = byBucket.get(b.time)
+      return value == null ? null : { time: b.time, value }
+    })
+    .filter(Boolean) as { time: number; value: number }[]
 }
 
 export function aggregateOverlays(
   overlays: SimChartOverlays | null | undefined,
   bars: OhlcBar[],
   tf: ChartTimeframe,
+  keys?: string[],
 ): SimChartOverlays | null {
   if (!overlays) return null
   if (tf === '5m') return overlays
-  return {
-    ma7: aggregateOverlaySeries(overlays.ma7, bars),
-    ma14: aggregateOverlaySeries(overlays.ma14, bars),
-    ma52: aggregateOverlaySeries(overlays.ma52, bars),
-    signal: aggregateOverlaySeries(overlays.signal, bars),
+  const useKeys = keys?.length ? keys : Object.keys(overlays)
+  const out: SimChartOverlays = {}
+  for (const key of useKeys) {
+    out[key] = aggregateOverlaySeries(overlays[key], bars, tf)
   }
+  return out
 }
 
 /** Use the last 5m meta inside each aggregated bar. */
@@ -154,6 +169,7 @@ export type AggregatedChart = {
   bars: OhlcBar[]
   markers: ChartMarker[]
   overlays: SimChartOverlays | null
+  overlaySpecs: SimOverlaySpec[]
   barMeta: SimBarMeta[]
   priceLines: SimPriceLine[]
 }
@@ -162,15 +178,19 @@ export function aggregateChartBundle(input: {
   bars?: OhlcBar[] | null
   markers?: ChartMarker[] | null
   overlays?: SimChartOverlays | null
+  overlaySpecs?: SimOverlaySpec[] | null
   barMeta?: SimBarMeta[] | null
   priceLines?: SimPriceLine[] | null
   tf: ChartTimeframe
 }): AggregatedChart {
   const aggBars = aggregateBars(input.bars || [], input.tf)
+  const specs = resolveOverlaySpecs(input.overlaySpecs)
+  const keys = overlayKeys(specs, input.overlays)
   return {
     bars: aggBars,
     markers: aggregateMarkers(input.markers || undefined, aggBars),
-    overlays: aggregateOverlays(input.overlays, aggBars, input.tf),
+    overlays: aggregateOverlays(input.overlays, aggBars, input.tf, keys),
+    overlaySpecs: specs,
     barMeta: aggregateBarMeta(input.barMeta, aggBars, input.tf),
     priceLines: input.priceLines || [],
   }

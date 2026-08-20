@@ -23,6 +23,7 @@ import {
   fetchSimPositionHistory,
   repairSimFills,
   type SimBarsResponse,
+  type SimBookLeg,
   type SimCatalog,
   type SimDecision,
   type SimFill,
@@ -34,10 +35,13 @@ import {
   type SimSummary,
   type SimReplay,
 } from '@/lib/api'
+import { mergeOverlayMaps, overlayKeys as collectOverlayKeys } from './strategyPresentation'
+import { instanceIdFor, readJsonLs, symbolIdsKey, writeJsonLs } from './simSessions'
 
 type Ctx = {
   catalog: SimCatalog | null
   sessions: SimSession[]
+  fleet: SimBookLeg[]
   instanceId: string
   setInstanceId: (id: string) => void
   framework: string
@@ -46,6 +50,8 @@ type Ctx = {
   setStrategyId: (id: string) => void
   symbolId: string
   setSymbolId: (id: string) => void
+  symbolIds: string[]
+  setSymbolIds: (ids: string[]) => void
   summary: SimSummary | null
   metrics: SimMetrics | null
   decisions: SimDecision[]
@@ -86,6 +92,7 @@ const LIGHT_POLL_MS = 2_000
 const HEAVY_POLL_MS = 15_000
 const LS_INSTANCE = 'ignitequant.sim.instanceId'
 const LS_SYMBOL = 'ignitequant.sim.symbolId'
+const LS_STRATEGY = 'ignitequant.sim.strategyId'
 
 type BarLike = {
   time: number
@@ -136,20 +143,8 @@ function mergePreserveHistory(
   for (const m of prev.bar_meta || []) {
     if (!metaMap.has(m.time)) metaMap.set(m.time, m)
   }
-  const overlayKeys = ['ma7', 'ma14', 'ma52', 'signal'] as const
-  const overlays = {
-    ma7: [] as { time: number; value: number }[],
-    ma14: [] as { time: number; value: number }[],
-    ma52: [] as { time: number; value: number }[],
-    signal: [] as { time: number; value: number }[],
-  }
-  for (const key of overlayKeys) {
-    const map = new Map((next.overlays?.[key] || []).map((p) => [p.time, p]))
-    for (const p of prev.overlays?.[key] || []) {
-      if (!map.has(p.time)) map.set(p.time, p)
-    }
-    overlays[key] = [...map.values()].sort((a, b) => a.time - b.time)
-  }
+  const keys = collectOverlayKeys(next.overlay_specs, next.overlays)
+  const overlays = mergeOverlayMaps(prev.overlays, next.overlays, keys)
   return {
     ...next,
     bars,
@@ -158,6 +153,7 @@ function mergePreserveHistory(
     has_more: prev.has_more ?? next.has_more,
     markers: next.markers?.length ? next.markers : prev.markers,
     price_lines: next.price_lines?.length ? next.price_lines : prev.price_lines,
+    overlay_specs: next.overlay_specs?.length ? next.overlay_specs : prev.overlay_specs,
   }
 }
 
@@ -182,26 +178,15 @@ function mergePreserveOverseas(
   for (const m of prev.bar_meta || []) {
     if (!metaMap.has(m.time)) metaMap.set(m.time, m)
   }
-  const overlayKeys = ['ma7', 'ma14', 'ma52', 'signal'] as const
-  const overlays = {
-    ma7: [] as { time: number; value: number }[],
-    ma14: [] as { time: number; value: number }[],
-    ma52: [] as { time: number; value: number }[],
-    signal: [] as { time: number; value: number }[],
-  }
-  for (const key of overlayKeys) {
-    const map = new Map((next.overlays?.[key] || []).map((p) => [p.time, p]))
-    for (const p of prev.overlays?.[key] || []) {
-      if (!map.has(p.time)) map.set(p.time, p)
-    }
-    overlays[key] = [...map.values()].sort((a, b) => a.time - b.time)
-  }
+  const keys = collectOverlayKeys(next.overlay_specs, next.overlays)
+  const overlays = mergeOverlayMaps(prev.overlays, next.overlays, keys)
   return {
     ...next,
     bars,
     bar_meta: bars.map((b) => metaMap.get(b.time) || { time: b.time, source: 'replay' }),
     overlays,
     has_more: Boolean(prev.has_more) || Boolean(next.has_more),
+    overlay_specs: next.overlay_specs?.length ? next.overlay_specs : prev.overlay_specs,
   }
 }
 
@@ -217,15 +202,11 @@ function mergeOlderOverseas(
   const mergedBars = [...prependBars, ...prev.bars].slice(-OVERSEAS_CHART_BAR_MAX)
   const metaMap = new Map((prev.bar_meta || []).map((m) => [m.time, m]))
   for (const m of older.bar_meta || []) metaMap.set(m.time, m)
-  const overlayKeys = ['ma7', 'ma14', 'ma52', 'signal'] as const
-  const overlays = {
-    ...(prev.overlays || { ma7: [], ma14: [], ma52: [], signal: [] }),
-  }
-  for (const key of overlayKeys) {
-    const map = new Map((overlays[key] || []).map((p) => [p.time, p]))
-    for (const p of older.overlays?.[key] || []) map.set(p.time, p)
-    overlays[key] = [...map.values()].sort((a, b) => a.time - b.time)
-  }
+  const keys = collectOverlayKeys(prev.overlay_specs ?? older.overlay_specs, {
+    ...older.overlays,
+    ...prev.overlays,
+  })
+  const overlays = mergeOverlayMaps(older.overlays, prev.overlays, keys)
   return {
     ...prev,
     bars: mergedBars,
@@ -235,16 +216,25 @@ function mergeOlderOverseas(
     overlays,
     has_more: Boolean(older.has_more) && mergedBars.length < OVERSEAS_CHART_BAR_MAX,
     hint: older.hint || prev.hint,
+    overlay_specs: prev.overlay_specs?.length ? prev.overlay_specs : older.overlay_specs,
   }
 }
 
 export function SimCockpitProvider({ children }: { children: ReactNode }) {
   const [catalog, setCatalog] = useState<SimCatalog | null>(null)
   const [sessions, setSessions] = useState<SimSession[]>([])
+  const [fleet, setFleet] = useState<SimBookLeg[]>([])
   const [instanceId, setInstanceId] = useState(() => readLs(LS_INSTANCE, 'falcon_au_sim'))
   const [framework, setFramework] = useState('tq')
-  const [strategyId, setStrategyId] = useState('falcon_v2')
+  const [strategyId, setStrategyIdState] = useState(() => readLs(LS_STRATEGY, 'falcon_v2'))
   const [symbolId, setSymbolId] = useState(() => readLs(LS_SYMBOL, 'au'))
+  const [symbolIds, setSymbolIdsState] = useState<string[]>(() => {
+    const strat = readLs(LS_STRATEGY, 'falcon_v2')
+    const saved = readJsonLs<string[]>(symbolIdsKey(strat), [])
+    const current = readLs(LS_SYMBOL, 'au')
+    const ids = saved.length ? saved : [current]
+    return ids.includes(current) ? ids : [...ids, current]
+  })
   const [summary, setSummary] = useState<SimSummary | null>(null)
   const [metrics, setMetrics] = useState<SimMetrics | null>(null)
   const [decisions, setDecisions] = useState<SimDecision[]>([])
@@ -273,6 +263,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
   const selectInstance = useCallback(
     (id: string) => {
       setInstanceId(id)
+      repairedRef.current = false
       try {
         localStorage.setItem(LS_INSTANCE, id)
       } catch {
@@ -286,21 +277,116 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
         } catch {
           /* ignore */
         }
-        setStrategyId(launcher.strategy_id)
+        setStrategyIdState(launcher.strategy_id)
+        try {
+          localStorage.setItem(LS_STRATEGY, launcher.strategy_id)
+        } catch {
+          /* ignore */
+        }
         setFramework(launcher.framework)
+        const saved = readJsonLs<string[]>(
+          symbolIdsKey(launcher.strategy_id),
+          [launcher.symbol_id],
+        )
+        const next = saved.includes(launcher.symbol_id)
+          ? saved
+          : [...saved, launcher.symbol_id]
+        setSymbolIdsState(next)
+        writeJsonLs(symbolIdsKey(launcher.strategy_id), next)
       }
     },
     [catalog],
   )
 
-  const selectSymbol = useCallback((id: string) => {
-    setSymbolId(id)
+  const persistSymbolIds = useCallback(
+    (ids: string[], strat = strategyId) => {
+      const next = ids.length ? ids : ['au']
+      setSymbolIdsState(next)
+      writeJsonLs(symbolIdsKey(strat), next)
+    },
+    [strategyId],
+  )
+
+  const selectSymbol = useCallback(
+    (id: string) => {
+      setSymbolId(id)
+      try {
+        localStorage.setItem(LS_SYMBOL, id)
+      } catch {
+        /* ignore */
+      }
+      persistSymbolIds(
+        symbolIds.includes(id) ? symbolIds : [...symbolIds, id],
+      )
+      const iid = instanceIdFor(catalog, strategyId, id)
+      if (iid !== instanceId) {
+        setInstanceId(iid)
+        repairedRef.current = false
+        try {
+          localStorage.setItem(LS_INSTANCE, iid)
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+    [catalog, instanceId, persistSymbolIds, strategyId, symbolIds],
+  )
+
+  const selectStrategy = useCallback(
+    (id: string) => {
+      setStrategyIdState(id)
+      try {
+        localStorage.setItem(LS_STRATEGY, id)
+      } catch {
+        /* ignore */
+      }
+      const saved = readJsonLs<string[]>(symbolIdsKey(id), ['au'])
+      const nextIds = saved.length ? saved : ['au']
+      persistSymbolIds(nextIds, id)
+      const focus = nextIds.includes(symbolId) ? symbolId : nextIds[0]
+      const iid = instanceIdFor(catalog, id, focus)
+      setSymbolId(focus)
+      try {
+        localStorage.setItem(LS_SYMBOL, focus)
+      } catch {
+        /* ignore */
+      }
+      if (iid !== instanceId) {
+        setInstanceId(iid)
+        repairedRef.current = false
+        try {
+          localStorage.setItem(LS_INSTANCE, iid)
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+    [catalog, instanceId, persistSymbolIds, symbolId],
+  )
+
+  const resolvedInstanceId = instanceIdFor(catalog, strategyId, symbolId)
+
+  useEffect(() => {
+    if (!resolvedInstanceId || resolvedInstanceId === instanceId) return
+    setInstanceId(resolvedInstanceId)
+    repairedRef.current = false
     try {
-      localStorage.setItem(LS_SYMBOL, id)
+      localStorage.setItem(LS_INSTANCE, resolvedInstanceId)
     } catch {
       /* ignore */
     }
-  }, [])
+  }, [instanceId, resolvedInstanceId])
+
+  useEffect(() => {
+    setSummary(null)
+    setMetrics(null)
+    setDecisions([])
+    setIntents([])
+    setFills([])
+    setPositionHistory([])
+    setError(null)
+    setWarn(null)
+  }, [instanceId])
 
   const ensureCatalog = useCallback(async (force = false) => {
     if (catalogLoadedRef.current && !force && catalogRef.current) {
@@ -311,6 +397,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
     catalogRef.current = cat
     setCatalog(cat)
     setSessions(sess.sessions || [])
+    setFleet(sess.fleet || [])
     return cat
   }, [])
 
@@ -325,9 +412,12 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
         setLoading(false)
         return
       }
-      const sum = await fetchSimSummary(id)
+      const [sum, sess] = await Promise.all([fetchSimSummary(id), fetchSimSessions()])
       if (stale()) return
+      if (sum.instance_id && sum.instance_id !== id) return
       setSummary(sum)
+      setSessions(sess.sessions || [])
+      setFleet(sess.fleet || [])
       setError(null)
       const livePrice = sum.last_price ?? null
       if (livePrice != null) {
@@ -336,6 +426,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
     } catch (e) {
       if (!stale()) {
         const msg = e instanceof Error ? e.message : String(e)
+        setSummary(null)
         setError(
           msg.includes('404') || msg.includes('not found')
             ? '尚未启动或暂无会话数据。当前为云端只读时请确认交易机已同步；本机可启动模拟盘。'
@@ -343,8 +434,10 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
         )
       }
     } finally {
-      lightInFlightRef.current = false
-      if (!stale()) setLoading(false)
+      if (gen === refreshGenRef.current) {
+        lightInFlightRef.current = false
+        setLoading(false)
+      }
     }
   }, [instanceId, replayAt])
 
@@ -419,7 +512,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
               pnl: rp.metrics_snapshot.pnl,
               pnl_pct: rp.metrics_snapshot.pnl / (prev?.init_balance ?? 1_000_000),
               trade_count: prev?.trade_count ?? 0,
-              fill_count: rp.metrics_snapshot.fills_count,
+              fill_count: rp.metrics_snapshot.fill_count,
               wins: prev?.wins ?? 0,
               losses: prev?.losses ?? 0,
               win_rate: prev?.win_rate ?? 0,
@@ -440,6 +533,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       // Heavy path: K-lines + overseas HTTP. Do not await on the light quote path.
       const marketBarsPromise = fetchSimMarketBars(symbolId, {
         limit: CHART_BAR_LIMIT,
+        strategyId,
       }).catch(() => null)
       const overseasPromise = fetchSimOverseasBars(symbolId, {
         limit: OVERSEAS_CHART_BAR_LIMIT,
@@ -465,11 +559,14 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
 
       const partial: string[] = []
 
-      if (sumR.status === 'fulfilled') {
+      if (sumR.status === 'fulfilled' && sumR.value.instance_id === id) {
         setSummary(sumR.value)
         setError(null)
+      } else if (sumR.status === 'fulfilled') {
+        setSummary(null)
       } else {
         const msg = sumR.reason instanceof Error ? sumR.reason.message : String(sumR.reason)
+        setSummary(null)
         setError(
           msg.includes('404') || msg.includes('not found')
             ? '尚未启动或暂无会话数据。当前为云端只读时请确认交易机已同步；本机可启动模拟盘。'
@@ -477,24 +574,43 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
         )
       }
 
-      if (metR.status === 'fulfilled') setMetrics(metR.value)
-      else partial.push('绩效指标')
+      if (metR.status === 'fulfilled' && metR.value.instance_id === id) {
+        setMetrics(metR.value)
+      } else {
+        setMetrics(null)
+        if (metR.status === 'rejected') partial.push('绩效指标')
+      }
 
       if (decR.status === 'fulfilled') setDecisions(decR.value.decisions || [])
-      else partial.push('决策链')
+      else {
+        setDecisions([])
+        partial.push('决策链')
+      }
 
       if (intentR.status === 'fulfilled') setIntents(intentR.value.intents || [])
-      else partial.push('订单意图')
+      else {
+        setIntents([])
+        partial.push('订单意图')
+      }
 
       if (fillR.status === 'fulfilled') setFills(fillR.value.fills || [])
-      else partial.push('成交记录')
+      else {
+        setFills([])
+        partial.push('成交记录')
+      }
 
       if (histR.status === 'fulfilled') setPositionHistory(histR.value.positions || [])
-      else partial.push('历史持仓')
+      else {
+        setPositionHistory([])
+        partial.push('历史持仓')
+      }
 
-      if (sessR.status === 'fulfilled') setSessions(sessR.value.sessions || [])
+      if (sessR.status === 'fulfilled') {
+        setSessions(sessR.value.sessions || [])
+        setFleet(sessR.value.fleet || [])
+      }
 
-      setWarn(partial.length ? `部分数据加载失败：${partial.join('、')}（已保留上次成功数据）` : null)
+      setWarn(partial.length ? `部分数据加载失败：${partial.join('、')}` : null)
 
       if (overseasR.status === 'fulfilled' && overseasR.value) {
         const next = overseasR.value
@@ -550,6 +666,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
             bars: market.bars,
             markers: [],
             overlays: market.overlays,
+            overlay_specs: market.overlay_specs,
             bar_meta: market.bar_meta,
             price_lines: market.price_lines,
             has_more: market.has_more,
@@ -572,6 +689,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
           bars: [],
           markers: [],
           overlays: market.overlays,
+          overlay_specs: market.overlay_specs,
           bar_meta: market.bar_meta,
           price_lines: market.price_lines,
           has_more: false,
@@ -604,8 +722,10 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
     } catch (e) {
       if (!stale()) setError(e instanceof Error ? e.message : String(e))
     } finally {
-      heavyInFlightRef.current = false
-      if (!stale()) setLoading(false)
+      if (gen === refreshGenRef.current) {
+        heavyInFlightRef.current = false
+        setLoading(false)
+      }
     }
   }, [ensureCatalog, instanceId, replayAt, symbolId])
 
@@ -623,13 +743,11 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
     const mergedBars = [...prependBars, ...prev.bars].slice(-CHART_BAR_MAX)
     const metaMap = new Map((prev.bar_meta || []).map((m) => [m.time, m]))
     for (const m of older.bar_meta || []) metaMap.set(m.time, m)
-    const overlayKeys = ['ma7', 'ma14', 'ma52', 'signal'] as const
-    const overlays = { ...(prev.overlays || { ma7: [], ma14: [], ma52: [], signal: [] }) }
-    for (const key of overlayKeys) {
-      const map = new Map((overlays[key] || []).map((p) => [p.time, p]))
-      for (const p of older.overlays?.[key] || []) map.set(p.time, p)
-      overlays[key] = [...map.values()].sort((a, b) => a.time - b.time)
-    }
+    const keys = collectOverlayKeys(prev.overlay_specs ?? older.overlay_specs, {
+      ...older.overlays,
+      ...prev.overlays,
+    })
+    const overlays = mergeOverlayMaps(older.overlays, prev.overlays, keys)
     return {
       ...prev,
       bars: mergedBars,
@@ -639,6 +757,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       overlays,
       has_more: Boolean(older.has_more) && mergedBars.length < CHART_BAR_MAX,
       hint: older.hint || prev.hint,
+      overlay_specs: prev.overlay_specs?.length ? prev.overlay_specs : older.overlay_specs,
     }
   }, [])
 
@@ -658,7 +777,11 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       const sessionMatchesSymbol = launcherSymbolId != null && launcherSymbolId === symbolId
       const older = sessionMatchesSymbol
         ? await fetchSimBars(instanceId, { limit: CHART_BAR_CHUNK, before })
-        : await fetchSimMarketBars(symbolId, { limit: CHART_BAR_CHUNK, before })
+        : await fetchSimMarketBars(symbolId, {
+            limit: CHART_BAR_CHUNK,
+            before,
+            strategyId,
+          })
       if (gen !== refreshGenRef.current) return
       setBars((prev) => (prev ? mergeOlderBars(prev, older) : older))
     } catch {
@@ -667,7 +790,7 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
       historyInFlightRef.current = false
       setHistoryLoading(false)
     }
-  }, [bars, instanceId, mergeOlderBars, replayAt, symbolId])
+  }, [bars, instanceId, mergeOlderBars, replayAt, symbolId, strategyId])
 
   const loadMoreOverseasHistory = useCallback(async () => {
     if (overseasHistoryInFlightRef.current || replayAt) return
@@ -697,12 +820,14 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // Invalidate in-flight responses when session/symbol/replay changes.
     refreshGenRef.current += 1
+    lightInFlightRef.current = false
+    heavyInFlightRef.current = false
   }, [instanceId, symbolId, replayAt])
 
   useEffect(() => {
     setOverseas(null)
     setBars(null)
-  }, [symbolId])
+  }, [instanceId, symbolId])
 
   useEffect(() => {
     void refreshHeavy()
@@ -746,14 +871,17 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
     () => ({
       catalog,
       sessions,
+      fleet,
       instanceId,
       setInstanceId: selectInstance,
       framework,
       setFramework,
       strategyId,
-      setStrategyId,
+      setStrategyId: selectStrategy,
       symbolId,
       setSymbolId: selectSymbol,
+      symbolIds,
+      setSymbolIds: persistSymbolIds,
       summary,
       metrics,
       decisions,
@@ -779,12 +907,16 @@ export function SimCockpitProvider({ children }: { children: ReactNode }) {
     [
       catalog,
       sessions,
+      fleet,
       instanceId,
       selectInstance,
       framework,
       strategyId,
+      selectStrategy,
       symbolId,
       selectSymbol,
+      symbolIds,
+      persistSymbolIds,
       summary,
       metrics,
       decisions,

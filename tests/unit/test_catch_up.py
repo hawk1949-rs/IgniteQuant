@@ -10,8 +10,10 @@ import pandas as pd
 
 from ignitequant.config import default_decision_config
 from ignitequant.engine.catch_up import (
+    build_catch_up_pipeline,
     catch_up_missed_bars,
     catch_up_session_db,
+    cst_day_start_ns,
     klines_snapshot_to_frame,
     parse_bar_id_ns,
 )
@@ -144,6 +146,62 @@ def test_klines_snapshot_to_frame() -> None:
     df = klines_snapshot_to_frame(snap)
     assert len(df) == 1
     assert int(df.iloc[0]["datetime"]) == 1_700_000_000_000_000_000
+
+
+def test_build_catch_up_pipeline_gma() -> None:
+    pipeline, data_length, sid = build_catch_up_pipeline("gma_v1", "KQ.m@SHFE.au")
+    from ignitequant.strategies.gma import GMADecisionPipeline
+
+    assert isinstance(pipeline, GMADecisionPipeline)
+    assert data_length == 8000
+    assert sid == "gma_v1"
+
+
+def test_catch_up_bootstrap_today(tmp_path: Path) -> None:
+    db = tmp_path / "gma_au_sim.sqlite"
+    conn_setup = __import__("sqlite3").connect(str(db))
+    conn_setup.executescript(DDL)
+    now = _now()
+    day_start = cst_day_start_ns()
+    bars = _bars(120, start_ns=day_start)
+    conn_setup.execute(
+        """
+        INSERT INTO strategy_state(
+            instance_id, strategy_id, account_id, symbol, runtime_state,
+            payload_json, state_version, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (
+            "gma_au_sim",
+            "gma_v1",
+            "local",
+            "SHFE.au2610",
+            "READY",
+            json.dumps({"current_target": 0, "confirmed_net": 0}),
+            1,
+            now,
+        ),
+    )
+    conn_setup.commit()
+    conn_setup.close()
+
+    session = PersistenceSession.open(db, instance_id="gma_au_sim", strategy_id="gma_v1")
+    pipeline, data_length, _ = build_catch_up_pipeline("gma_v1", "KQ.m@SHFE.au")
+    pipeline.restore_runtime(current_target=0)
+    out = catch_up_missed_bars(
+        session=session,
+        pipeline=pipeline,
+        bars=bars,
+        last_bar_id=None,
+        confirmed_net=0,
+        data_length=data_length,
+        source="test",
+        bootstrap_today=True,
+    )
+    session.close()
+    assert out.missed == len(bars)
+    assert out.recorded > 0
+    assert "当日补信号" in out.message
 
 
 def test_catch_up_session_db_no_bars(tmp_path: Path, monkeypatch) -> None:

@@ -43,6 +43,7 @@ def runtime_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                     "confirmed_net": 1,
                     "cooldown_left": 0,
                     "config_hash": "abc",
+                    "init_balance": 1_000_000.0,
                     "entry_price": 870.0,
                     "stop_price": 860.0,
                     "take_price": 900.0,
@@ -191,6 +192,10 @@ def client(runtime_db: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.delenv("COCKPIT_PASSWORD", raising=False)
     monkeypatch.setenv("COCKPIT_AUTH_SECRET", "unit-test-secret")
     import dashboard.auth as auth
+    import dashboard.sim_cloud_read as sim_cloud_read
+
+    # Unit tests must not inherit SIM_DATA_SOURCE=cloud from the developer .env.
+    monkeypatch.setattr(sim_cloud_read, "_ensure_dotenv", lambda **kwargs: None)
 
     auth._enabled_cache = None
     auth._warned_open = False
@@ -215,6 +220,9 @@ def test_sim_catalog(client: TestClient) -> None:
     au = next(s for s in body["symbols"] if s["id"] == "au")
     assert au["overseas_pair"]["display_symbol"] == "XAUUSD"
     assert any(l["instance_id"] == "falcon_au_sim" for l in body["launchers"])
+    assert any(l["instance_id"] == "gma_au_sim" for l in body["launchers"])
+    assert any(l["instance_id"] == "gma_v2_au_sim" for l in body["launchers"])
+    assert any(l["instance_id"] == "falcon_v2_ag_sim" for l in body["launchers"])
 
 
 def test_catch_up_bars_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -493,6 +501,81 @@ def test_sim_start_unknown_session(client: TestClient) -> None:
     assert res.status_code == 400
 
 
+def test_unstarted_symbol_session_is_empty_not_gold(client: TestClient) -> None:
+    au = client.get("/api/sim/sessions/falcon_au_sim/summary")
+    assert au.status_code == 200
+    assert au.json()["open_positions"][0]["symbol"] == "SHFE.au2608"
+
+    ag = client.get("/api/sim/sessions/falcon_v2_ag_sim/summary")
+    assert ag.status_code == 200
+    body = ag.json()
+    assert body["instance_id"] == "falcon_v2_ag_sim"
+    assert body["open_positions"] == []
+    assert body["status"] == "IDLE"
+    assert body.get("book", {}).get("strategy_id") == "falcon_v2"
+    legs = {row["instance_id"]: row for row in body["book"]["legs"]}
+    assert "falcon_au_sim" in legs
+    assert "falcon_v2_ag_sim" in legs
+
+    metrics = client.get("/api/sim/sessions/falcon_v2_ag_sim/metrics")
+    assert metrics.status_code == 200
+    assert metrics.json()["trade_count"] == 0
+    assert metrics.json()["open_position"] == 0
+
+    decisions = client.get("/api/sim/sessions/falcon_v2_ag_sim/decisions")
+    assert decisions.status_code == 200
+    assert decisions.json()["decisions"] == []
+
+    fills = client.get("/api/sim/sessions/falcon_v2_ag_sim/fills")
+    assert fills.status_code == 200
+    assert fills.json()["fills"] == []
+
+
+def test_sim_start_strategy_keeps_other_instances(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[tuple[str, dict[str, str]]] = []
+
+    class _Proc:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+    def _fake_popen(args, **kwargs):  # noqa: ANN001
+        env = kwargs.get("env") or {}
+        started.append((str(args[1]), dict(env)))
+        return _Proc(41000 + len(started))
+
+    monkeypatch.setattr(
+        "dashboard.sim_api._process_status",
+        lambda iid: {
+            "process_running": False,
+            "pid": None,
+            "label": iid,
+            "can_start": True,
+        },
+    )
+    monkeypatch.setattr("dashboard.sim_api.subprocess.Popen", _fake_popen)
+
+    falcon = client.post(
+        "/api/sim/strategies/falcon_v2/start",
+        json={"symbol_ids": ["au", "ag"]},
+    )
+    gma = client.post(
+        "/api/sim/strategies/gma_v1/start",
+        json={"symbol_ids": ["au"]},
+    )
+    assert falcon.status_code == 200, falcon.text
+    assert gma.status_code == 200, gma.text
+    assert falcon.json()["ok"] is True
+    assert gma.json()["ok"] is True
+    instance_ids = [env["IQ_SIM_INSTANCE_ID"] for _, env in started]
+    assert instance_ids == ["falcon_au_sim", "falcon_v2_ag_sim", "gma_au_sim"]
+    assert started[1][1]["IQ_SIM_SYMBOL_ID"] == "ag"
+    assert started[2][1]["IQ_SIM_STRATEGY_ID"] == "gma_v1"
+    assert started[0][1]["IQ_SIM_ACCOUNT"] == "tqsim"
+    assert len(started) == 3
+
+
 def test_sim_backfills_fills_from_submitted_intents(
     client: TestClient, runtime_db: Path
 ) -> None:
@@ -602,3 +685,46 @@ def test_sim_backfills_fills_from_submitted_intents(
 def test_sim_rejects_path_traversal_instance_id(client: TestClient) -> None:
     res = client.get("/api/sim/sessions/../../tmp/evil/summary")
     assert res.status_code in {400, 404}
+
+
+def test_init_balance_tqkq_reset_not_counted_as_nine_million_loss(
+    tmp_path: Path,
+) -> None:
+    from dashboard.sim_api import _init_balance_for_instance
+
+    db_path = tmp_path / "gma_v2_au_sim.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(DDL)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO strategy_state(
+            instance_id, strategy_id, account_id, symbol, runtime_state,
+            payload_json, state_version, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "gma_v2_au_sim",
+            "gma_v2",
+            "local",
+            "SHFE.au2608",
+            "READY",
+            json.dumps({"current_target": 0, "confirmed_net": 0}),
+            1,
+            now,
+        ),
+    )
+    for seq, equity in ((1, 10_000_000.0), (2, 1_000_000.0)):
+        conn.execute(
+            """
+            INSERT INTO account_snapshot_event(
+                instance_id, account_id, equity, available, margin, margin_ratio,
+                as_of, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("gma_v2_au_sim", "local", equity, equity, 0.0, 0.0, now, "{}", now),
+        )
+    conn.commit()
+    init = _init_balance_for_instance(conn, "gma_v2_au_sim")
+    assert init == 1_000_000.0

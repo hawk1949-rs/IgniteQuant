@@ -12,7 +12,8 @@ import {
   type LineData,
   type Time,
 } from 'lightweight-charts'
-import type { SimBarMeta, SimChartOverlays, SimPriceLine } from '../../lib/api'
+import type { SimBarMeta, SimChartOverlays, SimOverlaySpec, SimPriceLine } from '../../lib/api'
+import { DEFAULT_OVERLAY_SPECS, resolveOverlaySpecs } from './strategyPresentation'
 
 export type MiniBar = {
   time: number
@@ -35,6 +36,7 @@ type Props = {
   bars: MiniBar[]
   markers?: MiniMarker[]
   overlays?: SimChartOverlays | null
+  overlaySpecs?: SimOverlaySpec[] | null
   barMeta?: SimBarMeta[] | null
   priceLines?: SimPriceLine[] | null
   height?: number
@@ -170,20 +172,20 @@ export function MiniCandleChart({
   bars,
   markers = [],
   overlays = null,
+  overlaySpecs = null,
   barMeta = null,
   priceLines = null,
   height = 280,
   showSignalPane = true,
   onLoadMore,
 }: Props) {
+  const specs = resolveOverlaySpecs(overlaySpecs)
+  const hasSignalPane = showSignalPane && specs.some((s) => s.pane === 'signal')
   const containerRef = useRef<HTMLDivElement | null>(null)
   const tooltipRef = useRef<HTMLDivElement | null>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
-  const ma7Ref = useRef<ISeriesApi<'Line'> | null>(null)
-  const ma14Ref = useRef<ISeriesApi<'Line'> | null>(null)
-  const ma52Ref = useRef<ISeriesApi<'Line'> | null>(null)
-  const signalRef = useRef<ISeriesApi<'Line'> | null>(null)
+  const overlaySeriesRef = useRef<Map<string, ISeriesApi<'Line'>>>(new Map())
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null)
   const priceLineObjsRef = useRef<IPriceLine[]>([])
   const appliedRef = useRef<AppliedSnapshot | null>(null)
@@ -236,41 +238,24 @@ export function MiniCandleChart({
       wickDownColor: '#ff453a',
     })
     series.priceScale().applyOptions({
-      scaleMargins: { top: 0.05, bottom: showSignalPane ? 0.22 : 0.05 },
+      scaleMargins: { top: 0.05, bottom: hasSignalPane ? 0.22 : 0.05 },
     })
 
-    const ma7 = chart.addSeries(LineSeries, {
-      color: '#64d2ff',
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      crosshairMarkerVisible: false,
-    })
-    const ma14 = chart.addSeries(LineSeries, {
-      color: '#bf5af2',
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      crosshairMarkerVisible: false,
-    })
-    const ma52 = chart.addSeries(LineSeries, {
-      color: '#ffd60a',
-      lineWidth: 2,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      crosshairMarkerVisible: false,
-    })
-
-    let signal: ISeriesApi<'Line'> | null = null
-    if (showSignalPane) {
-      signal = chart.addSeries(LineSeries, {
-        color: '#ff9f0a',
-        lineWidth: 2,
-        priceScaleId: 'signal',
+    const lineMap = new Map<string, ISeriesApi<'Line'>>()
+    for (const spec of specs) {
+      const isSignal = spec.pane === 'signal'
+      if (isSignal && !hasSignalPane) continue
+      const line = chart.addSeries(LineSeries, {
+        color: spec.color,
+        lineWidth: isSignal ? 2 : spec.key.includes('mid') || spec.key.includes('52') ? 2 : 1,
+        priceScaleId: isSignal ? 'signal' : 'right',
         priceLineVisible: false,
-        lastValueVisible: true,
-        crosshairMarkerVisible: true,
+        lastValueVisible: isSignal,
+        crosshairMarkerVisible: isSignal,
       })
+      lineMap.set(spec.key, line)
+    }
+    if (hasSignalPane) {
       chart.priceScale('signal').applyOptions({
         scaleMargins: { top: 0.82, bottom: 0.02 },
         borderVisible: false,
@@ -279,10 +264,7 @@ export function MiniCandleChart({
 
     chartRef.current = chart
     seriesRef.current = series
-    ma7Ref.current = ma7
-    ma14Ref.current = ma14
-    ma52Ref.current = ma52
-    signalRef.current = signal
+    overlaySeriesRef.current = lineMap
     markersRef.current = createSeriesMarkers(series, [])
     appliedRef.current = null
     fittedRef.current = false
@@ -310,18 +292,23 @@ export function MiniCandleChart({
         tip.style.display = 'none'
         return
       }
-      const parts = meta?.score_parts
       const partsText =
-        parts && parts.length >= 4
-          ? `gv=${parts[0]} vol=${parts[1]} kdj=${parts[2]} pen=${parts[3]}`
-          : '—'
+        typeof meta?.score_parts_label === 'string' && meta.score_parts_label
+          ? meta.score_parts_label
+          : meta?.score_parts && Array.isArray(meta.score_parts)
+            ? meta.score_parts.join('/')
+            : '—'
+      const overlayHints = specs
+        .filter((s) => s.pane !== 'signal')
+        .slice(0, 4)
+        .map((s) => `${s.label} ${formatNum(meta?.[s.key] as number | null | undefined)}`)
+        .join(' · ')
       tip.innerHTML = [
         `<div class="font-medium text-slate-100">${new Date(bar.time * 1000).toLocaleString('zh-CN')}</div>`,
         `<div>O ${formatNum(bar.open)}  H ${formatNum(bar.high)}  L ${formatNum(bar.low)}  C ${formatNum(bar.close)}</div>`,
         `<div>信号 <b>${meta?.signal ?? '—'}</b> · ${partsText}</div>`,
         `<div>regime ${meta?.regime ?? '—'} · ${sourceLabel(meta?.source)}</div>`,
-        `<div>MA7 ${formatNum(meta?.ma7)} · MA14 ${formatNum(meta?.ma14)} · MA52 ${formatNum(meta?.ma52)}</div>`,
-        `<div>ATR ${formatNum(meta?.atr)} · ADX ${formatNum(meta?.adx)}</div>`,
+        overlayHints ? `<div>${overlayHints}</div>` : '',
       ].join('')
       tip.style.display = 'block'
       const left = Math.min(param.point.x + 16, el.clientWidth - 240)
@@ -352,16 +339,13 @@ export function MiniCandleChart({
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
-      ma7Ref.current = null
-      ma14Ref.current = null
-      ma52Ref.current = null
-      signalRef.current = null
+      overlaySeriesRef.current = new Map()
       markersRef.current = null
       priceLineObjsRef.current = []
       appliedRef.current = null
       fittedRef.current = false
     }
-  }, [height, showSignalPane])
+  }, [height, hasSignalPane, specs.map((s) => s.key).join('|')])
 
   useEffect(() => {
     const series = seriesRef.current
@@ -371,10 +355,7 @@ export function MiniCandleChart({
 
     if (!bars.length) {
       series.setData([])
-      ma7Ref.current?.setData([])
-      ma14Ref.current?.setData([])
-      ma52Ref.current?.setData([])
-      signalRef.current?.setData([])
+      for (const line of overlaySeriesRef.current.values()) line.setData([])
       markersApi.setMarkers([])
       appliedRef.current = null
       fittedRef.current = false
@@ -437,10 +418,11 @@ export function MiniCandleChart({
       appliedRef.current = remember()
     }
 
-    ma7Ref.current?.setData(toLine(overlays?.ma7))
-    ma14Ref.current?.setData(toLine(overlays?.ma14))
-    ma52Ref.current?.setData(toLine(overlays?.ma52))
-    signalRef.current?.setData(toLine(overlays?.signal))
+    for (const spec of specs) {
+      overlaySeriesRef.current
+        .get(spec.key)
+        ?.setData(toLine(overlays?.[spec.key]))
+    }
 
     for (const line of priceLineObjsRef.current) {
       try {
@@ -464,30 +446,22 @@ export function MiniCandleChart({
       applyMarkers(markersApi, data, markers)
       markersCacheRef.current = markers
     }
-  }, [bars, markers, overlays, barMeta, priceLines, chartReady])
+  }, [bars, markers, overlays, overlaySpecs, barMeta, priceLines, chartReady, specs])
 
   return (
     <div className="relative w-full">
       <div ref={containerRef} className="w-full overflow-hidden rounded-xl" />
       <div
         ref={tooltipRef}
-        className="pointer-events-none absolute z-10 hidden min-w-[220px] rounded-lg border border-white/10 bg-[#0f1a2c]/95 px-2.5 py-2 text-xs leading-5 text-slate-200 shadow-lg backdrop-blur"
+        className="pointer-events-none absolute z-10 hidden max-w-[min(220px,calc(100vw-2rem))] min-w-0 rounded-lg border border-white/10 bg-[#0f1a2c]/95 px-2.5 py-2 text-xs leading-5 text-slate-200 shadow-lg backdrop-blur sm:min-w-[220px]"
       />
       <div className="mt-1 flex flex-wrap gap-3 px-1 text-xs text-faint">
-        <span className="inline-flex items-center gap-1">
-          <i className="inline-block h-0.5 w-3 bg-[#64d2ff]" /> MA7
-        </span>
-        <span className="inline-flex items-center gap-1">
-          <i className="inline-block h-0.5 w-3 bg-[#bf5af2]" /> MA14
-        </span>
-        <span className="inline-flex items-center gap-1">
-          <i className="inline-block h-0.5 w-3 bg-[#ffd60a]" /> MA52
-        </span>
-        {showSignalPane ? (
-          <span className="inline-flex items-center gap-1">
-            <i className="inline-block h-0.5 w-3 bg-[#ff9f0a]" /> 信号
+        {(specs.length ? specs : DEFAULT_OVERLAY_SPECS).map((spec) => (
+          <span key={spec.key} className="inline-flex items-center gap-1">
+            <i className="inline-block h-0.5 w-3" style={{ backgroundColor: spec.color }} />{' '}
+            {spec.label}
           </span>
-        ) : null}
+        ))}
       </div>
     </div>
   )

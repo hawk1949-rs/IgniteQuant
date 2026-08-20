@@ -224,8 +224,12 @@ def test_catalog_and_sim_launcher_register_gma() -> None:
     assert STRATEGIES["gma_v1"].runner == "run_gma_v1"
     assert "gma_v2" in STRATEGIES
     assert STRATEGIES["gma_v2"].runner == "run_gma_v2"
-    sim_src = (ROOT / "dashboard" / "sim_api.py").read_text(encoding="utf-8")
-    assert '"gma_au_sim"' in sim_src
-    assert "gma_au_sim.py" in sim_src
+    from dashboard.sim_launchers import SIM_LAUNCHERS
+
+    assert "gma_au_sim" in SIM_LAUNCHERS
+    assert SIM_LAUNCHERS["gma_au_sim"]["strategy_id"] == "gma_v1"
+    assert SIM_LAUNCHERS["gma_v2_au_sim"]["strategy_id"] == "gma_v2"
+    assert SIM_LAUNCHERS["gma_au_sim"]["script"].name == "gma_au_sim.py"
     assert (ROOT / "strategies" / "gma_au_sim.py").is_file()
+    assert (ROOT / "strategies" / "gma_v2_sim.py").is_file()
     assert (ROOT / "strategies" / "gma_au_backtest.py").is_file()

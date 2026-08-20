@@ -74,68 +74,15 @@ def _nan_to_none(value: float) -> float | None:
     return float(value)
 
 
-def replay_series(bars: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Compute MA / regime / legacy signal for every bar (chart-only replay)."""
-    if not bars:
-        return []
+def replay_series(
+    bars: Sequence[Mapping[str, Any]],
+    *,
+    strategy_id: str = "falcon_v2",
+) -> list[dict[str, Any]]:
+    """Compute per-bar chart meta (strategy-specific replay)."""
+    from dashboard.sim_strategy_ui import resolve_strategy_ui
 
-    from strategies.falcon import compute_indicators, detect_regime
-    from strategies.falcon.score import score_signal
-
-    rows: list[dict[str, Any]] = []
-    for b in bars:
-        ns = bar_datetime_ns(b)
-        if ns is None:
-            continue
-        rows.append(
-            {
-                "datetime": int(ns),
-                "open": float(b["open"]),
-                "high": float(b["high"]),
-                "low": float(b["low"]),
-                "close": float(b["close"]),
-                "volume": float(b.get("volume") or 0),
-            }
-        )
-    if not rows:
-        return []
-
-    df = pd.DataFrame(rows)
-    ind = compute_indicators(df)
-    out: list[dict[str, Any]] = []
-    for i in range(len(rows)):
-        t = int(rows[i]["datetime"] // 1_000_000_000)
-        meta: dict[str, Any] = {
-            "time": t,
-            "signal": None,
-            "score_parts": None,
-            "regime": None,
-            "ma7": _nan_to_none(float(ind.ma7[i])),
-            "ma14": _nan_to_none(float(ind.ma14[i])),
-            "ma52": _nan_to_none(float(ind.ma52[i])),
-            "atr": _nan_to_none(float(ind.atr[i])),
-            "adx": _nan_to_none(float(ind.adx[i])),
-            "source": "replay",
-        }
-        if i < 2:
-            out.append(meta)
-            continue
-        sliced = _slice_bundle(ind, i)
-        try:
-            detail = score_signal(sliced)
-            regime = detect_regime(sliced)
-            meta["signal"] = int(detail.signal)
-            meta["score_parts"] = [
-                int(detail.granville),
-                int(detail.volume),
-                int(detail.kdj),
-                int(detail.conflict_penalty),
-            ]
-            meta["regime"] = regime.value
-        except Exception:
-            pass
-        out.append(meta)
-    return out
+    return resolve_strategy_ui(strategy_id).replay_bar_meta(bars)
 
 
 def _decision_time_sec(decision: Mapping[str, Any]) -> int | None:
@@ -177,14 +124,14 @@ def _score_parts_from_decision(decision: Mapping[str, Any]) -> list[int] | None:
 def merge_live_decisions(
     replay_meta: Sequence[Mapping[str, Any]],
     decisions: Sequence[Mapping[str, Any]],
+    *,
+    strategy_id: str = "falcon_v2",
+    candle_closes: Mapping[int, float] | None = None,
 ) -> list[dict[str, Any]]:
-    """Prefer persisted decision signal/regime when bar times align.
+    """Prefer persisted decision signal/regime when bar times align."""
+    from dashboard.sim_strategy_ui import resolve_strategy_ui
 
-    Do **not** overwrite MA/ATR from live factor_values onto chart meta: Falcon may
-    decide on overseas prices (XAU ~4000) while the cockpit candle pane shows
-    domestic SHFE.au (~880). Mixing those onto one price scale collapses the K-lines.
-    Keep MA/ATR from replay computed on the visible bars.
-    """
+    profile = resolve_strategy_ui(strategy_id)
     by_time: dict[int, Mapping[str, Any]] = {}
     for d in decisions:
         t = _decision_time_sec(d)
@@ -195,8 +142,12 @@ def merge_live_decisions(
     merged: list[dict[str, Any]] = []
     for row in replay_meta:
         item = dict(row)
-        live = by_time.get(int(item["time"]))
+        t = int(item["time"])
+        if candle_closes and t in candle_closes:
+            item["_candle_close"] = float(candle_closes[t])
+        live = by_time.get(t)
         if live is None:
+            item.pop("_candle_close", None)
             merged.append(item)
             continue
         payload = live.get("payload") if isinstance(live.get("payload"), dict) else {}
@@ -213,39 +164,27 @@ def merge_live_decisions(
         regime = live.get("regime") or (factors.get("regime") if isinstance(factors, dict) else None)
         if regime:
             item["regime"] = str(regime)
-        # ADX is scale-free; safe to show strategy's ADX even when pricing_basis=overseas.
-        if values:
+        profile.enrich_live_meta(item, live, values if isinstance(values, dict) else {})
+        # ADX is scale-free; safe for Falcon overseas pricing.
+        if values and profile.family == "falcon":
             adx = _finite(values.get("adx"))
             if adx is not None:
                 item["adx"] = adx
         item["applied_action"] = live.get("applied_action")
         item["target_after"] = live.get("target_after")
+        item.pop("_candle_close", None)
         merged.append(item)
     return merged
 
 
-def overlays_from_meta(bar_meta: Sequence[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    def series(key: str) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for row in bar_meta:
-            val = row.get(key)
-            if val is None:
-                continue
-            try:
-                f = float(val)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(f):
-                continue
-            out.append({"time": int(row["time"]), "value": f})
-        return out
+def overlays_from_meta(
+    bar_meta: Sequence[Mapping[str, Any]],
+    *,
+    strategy_id: str = "falcon_v2",
+) -> dict[str, list[dict[str, Any]]]:
+    from dashboard.sim_strategy_ui import resolve_strategy_ui
 
-    return {
-        "ma7": series("ma7"),
-        "ma14": series("ma14"),
-        "ma52": series("ma52"),
-        "signal": series("signal"),
-    }
+    return resolve_strategy_ui(strategy_id).overlays_from_meta(bar_meta)
 
 
 def cache_bars_as_cockpit(
@@ -370,24 +309,41 @@ def build_chart_enrichment(
     visible_bars: Sequence[Mapping[str, Any]],
     compute_bars: Sequence[Mapping[str, Any]],
     *,
+    strategy_id: str = "falcon_v2",
     decisions: Sequence[Mapping[str, Any]] | None = None,
     price_lines: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build overlays + bar_meta aligned to ``visible_bars``."""
+    from dashboard.sim_strategy_ui import resolve_strategy_ui
+
+    profile = resolve_strategy_ui(strategy_id)
     if not visible_bars:
         return {
-            "overlays": {"ma7": [], "ma14": [], "ma52": [], "signal": []},
+            "overlays": profile.empty_overlays(),
+            "overlay_specs": profile.overlay_specs_public(),
             "bar_meta": [],
             "price_lines": list(price_lines or []),
+            "score_parts_schema": profile.score_parts_schema,
         }
 
-    replay = replay_series(compute_bars or visible_bars)
+    replay = replay_series(compute_bars or visible_bars, strategy_id=strategy_id)
+    candle_closes: dict[int, float] = {}
+    for b in list(compute_bars or []) + list(visible_bars):
+        t = bar_time_sec(b)
+        try:
+            candle_closes[t] = float(b["close"])
+        except (TypeError, ValueError, KeyError):
+            continue
     if decisions:
-        replay = merge_live_decisions(replay, decisions)
+        replay = merge_live_decisions(
+            replay,
+            decisions,
+            strategy_id=strategy_id,
+            candle_closes=candle_closes,
+        )
 
     visible_times = {bar_time_sec(b) for b in visible_bars}
     bar_meta = [dict(m) for m in replay if int(m["time"]) in visible_times]
-    # Keep order of visible bars
     by_t = {int(m["time"]): m for m in bar_meta}
     ordered = []
     for b in visible_bars:
@@ -395,9 +351,11 @@ def build_chart_enrichment(
         ordered.append(by_t.get(t) or {"time": t, "source": "replay", "signal": None})
 
     return {
-        "overlays": overlays_from_meta(ordered),
+        "overlays": overlays_from_meta(ordered, strategy_id=strategy_id),
+        "overlay_specs": profile.overlay_specs_public(),
         "bar_meta": ordered,
         "price_lines": list(price_lines or []),
+        "score_parts_schema": profile.score_parts_schema,
     }
 
 

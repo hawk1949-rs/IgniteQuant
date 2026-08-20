@@ -21,7 +21,31 @@ def test_bars_dicts_to_dataframe_deterministic() -> None:
     assert df.iloc[-1]["underlying_symbol"] == "GC=F"
 
 
-def test_normalize_and_drop_forming() -> None:
+def test_merge_overseas_bars_newer_wins() -> None:
+    from ignitequant.market.overseas_bars import merge_overseas_bars
+
+    older = [
+        {"time": 100, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},
+        {"time": 200, "open": 2, "high": 2, "low": 2, "close": 2, "volume": 1},
+    ]
+    newer = [
+        {"time": 200, "open": 2.5, "high": 2.5, "low": 2.5, "close": 2.5, "volume": 2},
+        {"time": 300, "open": 3, "high": 3, "low": 3, "close": 3, "volume": 3},
+    ]
+    merged = merge_overseas_bars(older, newer, limit=10)
+    assert [b["time"] for b in merged] == [100, 200, 300]
+    assert merged[1]["close"] == 2.5
+
+
+def test_merge_overseas_bars_respects_limit() -> None:
+    from ignitequant.market.overseas_bars import merge_overseas_bars
+
+    older = [
+        {"time": t, "open": 1, "high": 1, "low": 1, "close": float(t), "volume": 1}
+        for t in (100, 200, 300, 400)
+    ]
+    merged = merge_overseas_bars(older, [], limit=2)
+    assert [b["time"] for b in merged] == [300, 400]
     from ignitequant.market.overseas_bars import drop_forming_5m_bar, normalize_5m_bars
 
     t0 = 1_700_000_100 - (1_700_000_100 % 300)  # aligned 5m open

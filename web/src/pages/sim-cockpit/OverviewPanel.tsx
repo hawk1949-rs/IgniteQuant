@@ -10,6 +10,7 @@ import {
   message,
   Tooltip,
 } from 'antd'
+import { useIsBelowXl, useIsPhone } from '@/hooks/useMediaQuery'
 import { useSimCockpit } from './SimCockpitContext'
 import { MiniCandleChart } from './MiniCandleChart'
 import {
@@ -23,7 +24,7 @@ import {
   tradeActionTagColor,
   intentActionCode,
 } from './labels'
-import { catchUpSimBars, startSimSession } from '@/lib/api'
+import { catchUpSimBars, startSimStrategy } from '@/lib/api'
 import { formatLocalDateTime } from './time'
 import { useSimTablePagination } from './tablePagination'
 import { HeartbeatBoard } from './HeartbeatBoard'
@@ -32,6 +33,7 @@ import {
   aggregateChartBundle,
   type ChartTimeframe,
 } from './chartTimeframe'
+import { focusedOpenPositions } from './simSessions'
 
 function pct(n: number) {
   return `${(n * 100).toFixed(1)}%`
@@ -136,8 +138,12 @@ export function OverviewPanel() {
     setInstanceId,
     framework,
     strategyId,
+    setStrategyId,
     symbolId,
     setSymbolId,
+    symbolIds,
+    setSymbolIds,
+    fleet,
     summary,
     metrics,
     decisions,
@@ -161,9 +167,19 @@ export function OverviewPanel() {
   } = useSimCockpit()
 
   const latest = replay?.decision || decisions[0]
-  const status = summary?.status || 'IDLE'
-  const statusText = summary?.status_label || statusLabel(status)
-  const processRunning = Boolean(summary?.process_running)
+  const focusedSummary = summary?.instance_id === instanceId ? summary : null
+  const status = focusedSummary?.status || 'IDLE'
+  const statusText = focusedSummary?.status_label || statusLabel(status)
+  const processRunning = Boolean(focusedSummary?.process_running)
+  const selectedLaunchers = (catalog?.launchers || []).filter(
+    (l) => l.strategy_id === strategyId && symbolIds.includes(l.symbol_id),
+  )
+  const selectedRunningCount = selectedLaunchers.filter((l) =>
+    fleet.some((row) => row.instance_id === l.instance_id && row.process_running),
+  ).length
+  const allSelectedRunning =
+    selectedLaunchers.length > 0 && selectedRunningCount === selectedLaunchers.length
+  const runningFleet = fleet.filter((row) => row.process_running)
   const cloudReadOnly = Boolean(
     catalog?.read_only ||
       catalog?.data_source === 'cloud' ||
@@ -174,19 +190,21 @@ export function OverviewPanel() {
     catalog?.read_only_hint ||
     summary?.read_only_hint ||
     '当前为云端只读座舱：决策/意图/成交来自 Supabase 投影；请在交易机运行模拟盘推送。'
+  const isGmaStrategy = strategyId.startsWith('gma')
   const [catchingUp, setCatchingUp] = useState(false)
   const selectedSymbol = catalog?.symbols?.find((s) => s.id === symbolId)
   const launcherSymbolId =
     catalog?.launchers?.find((l) => l.instance_id === instanceId)?.symbol_id ?? null
   const symbolMismatch = Boolean(launcherSymbolId && launcherSymbolId !== symbolId)
+  const focusedMetrics = metrics?.instance_id === instanceId ? metrics : null
   const lastPrice =
-    summary?.last_price ??
+    focusedSummary?.last_price ??
     bars?.last_price ??
     (bars?.bars?.length ? bars.bars[bars.bars.length - 1].close : null)
-  const pnl = metrics?.pnl ?? 0
+  const pnl = focusedMetrics?.pnl ?? 0
   const realizedClosed =
-    metrics?.realized_pnl_closed ??
-    (pnl - Number(metrics?.unrealized_pnl || 0))
+    focusedMetrics?.realized_pnl_closed ??
+    (pnl - Number(focusedMetrics?.unrealized_pnl || 0))
   const historyClosePnl = positionHistory
     .filter((r) => (r.action || 'CLOSE') === 'CLOSE')
     .reduce((s, r) => s + Number(r.realized_pnl || 0), 0)
@@ -194,26 +212,37 @@ export function OverviewPanel() {
     positionHistory.map((r) => r.round_id).filter(Boolean),
   ).size || Math.ceil(positionHistory.length / 2)
   // Prefer live strategy_state.confirmed_net (heartbeat); position snapshot was historically boot-only.
-  const confirmedNet = summary?.payload?.confirmed_net
+  const confirmedNet = focusedSummary?.payload?.confirmed_net
   const net =
     confirmedNet != null && confirmedNet !== ''
       ? Number(confirmedNet)
-      : (summary?.position?.net_position ?? 0)
-  const target = Number(summary?.payload?.current_target ?? 0)
-  const margin = Number(summary?.account?.margin ?? 0)
-  const marginRatio = Number(summary?.account?.margin_ratio ?? 0)
+      : (focusedSummary?.position?.net_position ?? 0)
+  const target = Number(focusedSummary?.payload?.current_target ?? 0)
+  const margin = Number(focusedSummary?.account?.margin ?? 0)
+  const marginRatio = Number(focusedSummary?.account?.margin_ratio ?? 0)
   const pendingDesired =
-    summary?.payload?.pending_desired != null && summary.payload.pending_desired !== ''
-      ? Number(summary.payload.pending_desired)
+    focusedSummary?.payload?.pending_desired != null &&
+    focusedSummary.payload.pending_desired !== ''
+      ? Number(focusedSummary.payload.pending_desired)
       : null
   const targetNetDesync = net !== target
   const chartCtx = bars?.chart_context
-  const displayRegime = chartCtx?.regime || latest?.regime
+  const displayRegime = latest?.regime ?? chartCtx?.regime
   const shortBias = chartCtx?.short_bias
-  const regimeConflict = Boolean(chartCtx?.conflict)
-  const session = summary?.market_session || bars?.market_session
-  const positionNote = summary?.position_note
-  const openPositions = summary?.open_positions ?? []
+  const regimeConflict = Boolean(
+    chartCtx?.conflict &&
+      latest?.regime &&
+      chartCtx?.regime &&
+      latest.regime !== chartCtx.regime,
+  )
+  const session = focusedSummary?.market_session || bars?.market_session
+  const positionNote = focusedSummary?.position_note
+  const openPositions = focusedOpenPositions(focusedSummary)
+  const otherLegs = (focusedSummary?.book?.legs || []).filter(
+    (leg) =>
+      leg.instance_id !== instanceId &&
+      Number(leg.net_position || 0) !== 0,
+  )
   const decisionsPagination = useSimTablePagination('decisions', 10, decisions.length)
   const intentsPagination = useSimTablePagination('intents', 10, intents.length)
   const fillsPagination = useSimTablePagination('fills', 10, fills.length)
@@ -224,6 +253,11 @@ export function OverviewPanel() {
   const liveFills = fills.length - backfillFills.length
   const [chartTf, setChartTf] = useState<ChartTimeframe>('5m')
   const [positionTab, setPositionTab] = useState('current')
+  const [chartPane, setChartPane] = useState<'domestic' | 'overseas'>('domestic')
+  const isPhone = useIsPhone()
+  const isBelowXl = useIsBelowXl()
+  const chartHeight = isPhone ? 260 : 420
+  const showChartTabs = Boolean(overseas?.supported) && isBelowXl
 
   const domesticChart = useMemo(
     () =>
@@ -231,6 +265,7 @@ export function OverviewPanel() {
         bars: bars?.bars,
         markers: bars?.markers,
         overlays: bars?.overlays,
+        overlaySpecs: bars?.overlay_specs,
         barMeta: bars?.bar_meta,
         priceLines: bars?.price_lines,
         tf: chartTf,
@@ -239,6 +274,7 @@ export function OverviewPanel() {
       bars?.bars,
       bars?.markers,
       bars?.overlays,
+      bars?.overlay_specs,
       bars?.bar_meta,
       bars?.price_lines,
       chartTf,
@@ -250,29 +286,19 @@ export function OverviewPanel() {
       aggregateChartBundle({
         bars: overseas?.bars,
         overlays: overseas?.overlays,
+        overlaySpecs: overseas?.overlay_specs,
         barMeta: overseas?.bar_meta,
         tf: chartTf,
       }),
-    [overseas?.bars, overseas?.overlays, overseas?.bar_meta, chartTf],
+    [overseas?.bars, overseas?.overlays, overseas?.overlay_specs, overseas?.bar_meta, chartTf],
   )
 
   const tfLabel = CHART_TIMEFRAMES.find((t) => t.value === chartTf)?.label || chartTf
 
-  const launcherOptions = useMemo(() => {
-    const fromCatalog = catalog?.launchers || []
-    if (fromCatalog.length) {
-      return fromCatalog.map((l) => ({
-        value: l.instance_id,
-        label: l.label,
-      }))
-    }
-    return [{ value: 'falcon_au_sim', label: 'Falcon 沪金天勤模拟' }]
-  }, [catalog])
-
   const onStart = async () => {
     setStarting(true)
     try {
-      const res = await startSimSession(instanceId)
+      const res = await startSimStrategy(strategyId, symbolIds)
       message.success(res.message || '已发出启动指令')
       await refresh()
     } catch (e) {
@@ -285,9 +311,11 @@ export function OverviewPanel() {
   const onCatchUp = async () => {
     setCatchingUp(true)
     try {
-      const res = await catchUpSimBars(instanceId)
-      const base = res.message || '补跑完成'
-      if (res.hint) message.warning(`${base}；${res.hint}`)
+      const res = await catchUpSimBars(instanceId, { bootstrapToday: isGmaStrategy })
+      const base = res.message || (isGmaStrategy ? '补信号完成' : '补跑完成')
+      if (res.recorded === 0 && res.missed === 0) {
+        message.info(base)
+      } else if (res.hint) message.warning(`${base}；${res.hint}`)
       else message.success(base)
       await refresh()
     } catch (e) {
@@ -298,6 +326,8 @@ export function OverviewPanel() {
   }
 
   const factorDetail = (() => {
+    if (latest?.factor_summary) return latest.factor_summary
+    if (chartCtx?.factor_summary) return chartCtx.factor_summary
     const parts = [
       `策略${regimeLabel(displayRegime)}`,
       shortBias ? shortBiasLabel(shortBias) : null,
@@ -318,7 +348,11 @@ export function OverviewPanel() {
         {
           step: '信号',
           detail: `分数 ${latest.legacy_signal}${
-            latest.score_parts ? ` · ${JSON.stringify(latest.score_parts)}` : ''
+            latest.score_parts_label
+              ? ` · ${latest.score_parts_label}`
+              : latest.score_parts
+                ? ` · ${JSON.stringify(latest.score_parts)}`
+                : ''
           }`,
         },
         {
@@ -332,9 +366,14 @@ export function OverviewPanel() {
         },
         {
           step: '风控',
-          detail: latest.risk
-            ? `${riskActionLabel(latest.risk.action)} · 批准 ${latest.risk.approved_position}`
-            : '未触发事前风控',
+          detail: [
+            latest.risk
+              ? `${riskActionLabel(latest.risk.action)} · 批准 ${latest.risk.approved_position}`
+              : '未触发事前风控',
+            latest.pipeline_risk_label,
+          ]
+            .filter(Boolean)
+            .join(' · '),
         },
       ]
     : chartCtx
@@ -361,33 +400,100 @@ export function OverviewPanel() {
       : []
 
   const symbolOptions = catalog?.symbols || []
+  const strategyOptions = (catalog?.strategies || []).filter((s) =>
+    (catalog?.launchers || []).some((l) => l.strategy_id === s.id),
+  )
 
   return (
     <div className="flex flex-col gap-3">
+      {runningFleet.length ? (
+        <section className="rounded-xl border border-line bg-panel/90 px-3.5 py-2.5">
+          <p className="text-xs font-medium tracking-wide text-faint">并行运行中</p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {runningFleet.map((row) => {
+              const active = row.instance_id === instanceId
+              return (
+                <button
+                  key={row.instance_id}
+                  type="button"
+                  onClick={() => setInstanceId(row.instance_id)}
+                  className={`rounded-md border px-2 py-1 text-left text-xs transition-colors ${
+                    active
+                      ? 'border-blue bg-blue-soft text-blue'
+                      : 'border-line bg-surface/60 text-muted hover:border-blue/50 hover:text-ink'
+                  }`}
+                >
+                  <span className="font-medium">{row.label || row.instance_id}</span>
+                  {row.net_position ? (
+                    <span className="ml-1 tabular-nums">
+                      {row.net_position > 0 ? '+' : ''}
+                      {row.net_position}手
+                    </span>
+                  ) : null}
+                </button>
+              )
+            })}
+          </div>
+        </section>
+      ) : null}
+
       {/* 品种主筛选 */}
       <section className="rounded-xl border border-line bg-panel/90 px-3.5 py-3.5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-medium tracking-wide text-faint">品种</p>
+            <p className="text-xs font-medium tracking-wide text-faint">
+              交易品种（可多选，点击查看该品种持仓）
+            </p>
             <div className="mt-2 flex flex-wrap gap-2">
               {symbolOptions.map((s) => {
-                const active = s.id === symbolId
+                const selected = symbolIds.includes(s.id)
+                const focused = s.id === symbolId
+                const running = fleet.some(
+                  (row) =>
+                    row.strategy_id === strategyId &&
+                    row.symbol_id === s.id &&
+                    row.process_running,
+                )
                 return (
-                  <button
-                    key={s.id}
-                    type="button"
-                    onClick={() => setSymbolId(s.id)}
-                    className={`rounded-lg border px-3.5 py-2 text-left transition-colors ${
-                      active
-                        ? 'border-blue bg-blue-soft text-blue shadow-sm'
-                        : 'border-line bg-surface/60 text-muted hover:border-blue/50 hover:text-ink'
-                    }`}
-                  >
-                    <span className="block text-sm font-semibold leading-none">{s.name}</span>
-                    <span className="mt-1 block text-xs tabular-nums text-faint">
-                      {s.signal_symbol || s.id}
-                    </span>
-                  </button>
+                  <div key={s.id} className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setSymbolId(s.id)}
+                      className={`rounded-lg border px-3.5 py-2 pr-7 text-left transition-colors ${
+                        focused
+                          ? 'border-blue bg-blue-soft text-blue shadow-sm'
+                          : selected
+                            ? 'border-blue/40 bg-blue-soft/40 text-ink'
+                            : 'border-line bg-surface/60 text-muted hover:border-blue/50 hover:text-ink'
+                      }`}
+                    >
+                      <span className="block text-sm font-semibold leading-none">
+                        {s.name}
+                        {running ? (
+                          <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-good align-middle" />
+                        ) : null}
+                      </span>
+                      <span className="mt-1 block text-xs tabular-nums text-faint">
+                        {s.signal_symbol || s.id}
+                        {selected ? ' · 已选' : ''}
+                      </span>
+                    </button>
+                    {selected && symbolIds.length > 1 ? (
+                      <button
+                        type="button"
+                        aria-label={`取消选择 ${s.name}`}
+                        className="absolute right-1 top-1 rounded px-1 text-[10px] text-faint hover:text-ink"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          const next = symbolIds.filter((id) => id !== s.id)
+                          setSymbolIds(next)
+                          if (focused && next[0]) setSymbolId(next[0])
+                        }}
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </div>
                 )
               })}
             </div>
@@ -425,12 +531,12 @@ export function OverviewPanel() {
             </Tag>
           </div>
         </div>
-        <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
+        <div className="flex flex-col gap-y-2 sm:flex-row sm:flex-wrap sm:items-end sm:gap-x-3 sm:gap-y-2">
           <Field label="框架">
             <Tooltip title="跟随运行会话配置，暂不可单独修改">
               <Select
                 size="small"
-                className="min-w-[9.5rem]"
+                className="w-full sm:min-w-[9.5rem] sm:w-auto"
                 value={framework}
                 disabled
                 options={(catalog?.frameworks || []).map((f) => ({
@@ -441,43 +547,53 @@ export function OverviewPanel() {
             </Tooltip>
           </Field>
           <Field label="策略">
-            <Tooltip title="跟随运行会话配置，回测/启动均使用 launcher 绑定策略">
-              <Select
-                size="small"
-                className="min-w-[8.5rem]"
-                value={strategyId}
-                disabled
-                options={(catalog?.strategies || []).map((s) => ({
-                  value: s.id,
-                  label: s.ready ? s.name : `${s.name}（占位）`,
-                }))}
-              />
-            </Tooltip>
-          </Field>
-          <Field label="运行会话">
             <Select
               size="small"
-              className="min-w-[11rem]"
-              value={instanceId}
-              onChange={setInstanceId}
-              options={launcherOptions}
+              className="w-full sm:min-w-[8.5rem] sm:w-auto"
+              value={strategyId}
+              onChange={setStrategyId}
+              options={strategyOptions.map((s) => ({
+                value: s.id,
+                label: s.ready ? s.name : `${s.name}（占位）`,
+                disabled: !s.ready,
+              }))}
             />
           </Field>
-          <div className="flex items-center gap-2 pb-0.5">
+          <Field label="当前品种会话">
+            <Select
+              size="small"
+              className="w-full sm:min-w-[11rem] sm:w-auto"
+              value={instanceId}
+              onChange={setInstanceId}
+              options={(catalog?.launchers || [])
+                .filter((l) => l.strategy_id === strategyId)
+                .map((l) => ({
+                  value: l.instance_id,
+                  label: l.label,
+                }))}
+            />
+          </Field>
+          <div className="flex flex-wrap items-center gap-2 pb-0.5">
             <Button
               type="primary"
               size="small"
               onClick={() => void onStart()}
               loading={starting}
-              disabled={processRunning || cloudReadOnly}
+              disabled={allSelectedRunning || cloudReadOnly || symbolIds.length === 0}
             >
-              {processRunning ? '已在运行' : cloudReadOnly ? '仅交易机可启动' : '启动'}
+              {allSelectedRunning
+                ? '所选品种已在运行'
+                : cloudReadOnly
+                  ? '仅交易机可启动'
+                  : `启动所选 ${symbolIds.length} 个品种`}
             </Button>
             <Tooltip
               title={
                 cloudReadOnly
                   ? '云端只读：补跑会改交易机本地决策链，请在交易机执行'
-                  : '从 last_bar_id 补跑漏掉的已完成 5 分钟 K 线决策（中间 K 只记决策；对齐下单请重启/启动模拟盘）'
+                  : isGmaStrategy
+                    ? '从当日 0 点（CST）补齐已完成 5 分钟 K 的 GMA 信号决策，使小时级因子连续；仅记决策不下单'
+                    : '从 last_bar_id 补跑漏掉的已完成 5 分钟 K 线决策（中间 K 只记决策；对齐下单请重启/启动模拟盘）'
               }
             >
               <Button
@@ -486,7 +602,7 @@ export function OverviewPanel() {
                 loading={catchingUp}
                 disabled={cloudReadOnly}
               >
-                补跑漏 K
+                {isGmaStrategy ? '补信号' : '补跑漏 K'}
               </Button>
             </Tooltip>
             <Button size="small" onClick={() => void refresh()} loading={loading}>
@@ -497,7 +613,7 @@ export function OverviewPanel() {
                 云端只读
               </Tag>
             ) : null}
-            <Tooltip title="品种切换只改图表对照；内盘实时 K 线与成交标记来自当前「运行会话」对应品种的天勤快照。会话是沪金时，选螺纹钢不会继续画沪金图。">
+            <Tooltip title="品种可多选：启动后每个品种独立心跳与持仓。点击品种卡片会载入该策略×品种的盈亏；切换策略则载入对应策略账本。座舱并行启动使用本地 TqSim 账户隔离，避免多策略抢同一合约。">
               <span className="cursor-help text-xs text-faint underline decoration-dotted">
                 说明
               </span>
@@ -578,8 +694,8 @@ export function OverviewPanel() {
 
       <HeartbeatBoard />
 
-      {/* 指标条 */}
-      <section className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line/40 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-11">
+      {/* 指标条：手机横滑卡片，≥sm 恢复网格（桌面 xl 仍 12 列） */}
+      <section className="flex gap-px overflow-x-auto overscroll-x-contain rounded-xl border border-line bg-line/40 sm:grid sm:grid-cols-3 sm:overflow-visible lg:grid-cols-4 xl:grid-cols-12">
         {[
           <Metric key="sym" label="交易合约" value={summary?.symbol || '—'} />,
           <Metric
@@ -602,7 +718,7 @@ export function OverviewPanel() {
           <Metric
             key="eq"
             label="权益"
-            value={`¥${money(metrics?.equity ?? summary?.account?.equity ?? 0)}`}
+            value={`¥${money(focusedMetrics?.equity ?? focusedSummary?.account?.equity ?? 0)}`}
             tip="天勤模拟账户权益快照"
           />,
           <Metric
@@ -622,7 +738,22 @@ export function OverviewPanel() {
             label="账户盈亏"
             value={money(pnl)}
             tone={pnl > 0 ? 'good' : pnl < 0 ? 'bad' : 'none'}
-            tip="权益−初始100万。当前无仓时，应与「已实现」一致。"
+            tip="当前查看品种的独立模拟账户：权益−初始100万。当前无仓时，应与「已实现」一致。"
+          />,
+          <Metric
+            key="book"
+            label="浮动盈亏"
+            value={money(
+              Number(focusedMetrics?.unrealized_pnl ?? focusedSummary?.position?.unrealized_pnl ?? 0),
+            )}
+            tone={
+              Number(focusedMetrics?.unrealized_pnl ?? 0) > 0
+                ? 'good'
+                : Number(focusedMetrics?.unrealized_pnl ?? 0) < 0
+                  ? 'bad'
+                  : 'none'
+            }
+            tip="当前查看品种的浮动盈亏，不含本策略其他品种"
           />,
           <Metric
             key="realized"
@@ -634,17 +765,20 @@ export function OverviewPanel() {
           <Metric
             key="wr"
             label="胜率"
-            value={pct(metrics?.win_rate ?? 0)}
-            tip={`按完整开平回合统计（${metrics?.wins ?? 0}胜/${metrics?.trade_count ?? 0}回合）；依赖成交记录完整性`}
+            value={pct(focusedMetrics?.win_rate ?? 0)}
+            tip={`按完整开平回合统计（${focusedMetrics?.wins ?? 0}胜/${focusedMetrics?.trade_count ?? 0}回合）；依赖成交记录完整性`}
           />,
           <Metric
             key="dd"
             label="最大回撤"
-            value={pct(metrics?.max_drawdown_pct ?? 0)}
+            value={pct(focusedMetrics?.max_drawdown_pct ?? 0)}
             tip="基于账户权益快照曲线；快照过少时会低估"
           />,
         ].map((node, i) => (
-          <div key={i} className="bg-panel px-3 py-2.5">
+          <div
+            key={i}
+            className="w-[7.75rem] shrink-0 bg-panel px-3 py-2.5 sm:w-auto sm:min-w-0"
+          >
             {node}
           </div>
         ))}
@@ -655,7 +789,7 @@ export function OverviewPanel() {
         title="持仓"
         extra={
           <span className="text-faint">
-            当前 {openPositions.length} · 历史 {historyRoundCount} 回合 / {positionHistory.length} 笔
+            当前品种 {openPositions.length} · 历史 {historyRoundCount} 回合 / {positionHistory.length} 笔
           </span>
         }
       >
@@ -664,8 +798,19 @@ export function OverviewPanel() {
           type="info"
           showIcon
           banner
-          message="历史按开仓/平仓记录：开仓盈亏为 0，平仓盈亏为开平价差。账户总盈亏仍看顶部「已实现」。"
+          message="以下仅当前查看品种。切换沪银/螺纹不会继续显示沪金持仓与盈亏。"
         />
+        {otherLegs.length ? (
+          <Alert
+            className="mb-2"
+            type="success"
+            showIcon
+            banner
+            message={`本策略其他品种仍持仓：${otherLegs
+              .map((leg) => `${leg.label || leg.symbol_id || leg.instance_id} ${leg.net_position}手`)
+              .join('、')}。点击顶部品种卡片可查看对应数据。`}
+          />
+        ) : null}
         <Tabs
           size="small"
           activeKey={positionTab}
@@ -675,11 +820,13 @@ export function OverviewPanel() {
               key: 'current',
               label: `当前${openPositions.length ? ` ${openPositions.length}` : ''}`,
               children: openPositions.length ? (
+                <div className="overflow-x-auto">
                 <Table
                   size="small"
                   pagination={false}
                   rowKey={(r) => `${r.symbol}-${r.side}`}
                   dataSource={openPositions}
+                  scroll={{ x: 720 }}
                   columns={[
                     {
                       title: '合约',
@@ -750,6 +897,7 @@ export function OverviewPanel() {
                     },
                   ]}
                 />
+                </div>
               ) : (
                 <p className="m-0 text-sm text-muted">
                   {net === 0 && pendingDesired != null && pendingDesired !== 0
@@ -764,11 +912,13 @@ export function OverviewPanel() {
               key: 'history',
               label: `历史 ${historyRoundCount} 回合`,
               children: positionHistory.length ? (
+                <div className="overflow-x-auto">
                 <Table
                   size="small"
                   pagination={historyPagination}
                   rowKey={(r, i) => r.leg_id || `${r.action}-${r.trade_time || ''}-${i}`}
                   dataSource={positionHistory}
+                  scroll={{ x: 800 }}
                   summary={() => {
                     const fees = positionHistory.reduce(
                       (s, r) => s + Number(r.fees || 0),
@@ -882,6 +1032,7 @@ export function OverviewPanel() {
                     },
                   ]}
                 />
+                </div>
               ) : (
                 <p className="m-0 text-sm text-muted">暂无已平仓记录。</p>
               ),
@@ -890,22 +1041,36 @@ export function OverviewPanel() {
         />
       </Section>
 
-      {/* 双图 */}
+      {/* 双图：<xl 用 Tab 切换内外盘；≥xl 并排（桌面不变） */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-[13px] font-semibold text-ink">K 线对照</p>
-        <Segmented
-          size="small"
-          value={chartTf}
-          onChange={(v) => setChartTf(v as ChartTimeframe)}
-          options={CHART_TIMEFRAMES.map((t) => ({
-            value: t.value,
-            label: t.label,
-          }))}
-        />
+        <div className="flex flex-wrap items-center gap-2">
+          {showChartTabs ? (
+            <Segmented
+              size="small"
+              value={chartPane}
+              onChange={(v) => setChartPane(v as 'domestic' | 'overseas')}
+              options={[
+                { value: 'domestic', label: '内盘' },
+                { value: 'overseas', label: '外盘' },
+              ]}
+            />
+          ) : null}
+          <Segmented
+            size="small"
+            value={chartTf}
+            onChange={(v) => setChartTf(v as ChartTimeframe)}
+            options={CHART_TIMEFRAMES.map((t) => ({
+              value: t.value,
+              label: t.label,
+            }))}
+          />
+        </div>
       </div>
       <div
-        className={`grid gap-3 ${overseas?.supported ? 'xl:grid-cols-2' : 'grid-cols-1'}`}
+        className={`grid min-w-0 gap-3 ${overseas?.supported && !showChartTabs ? 'xl:grid-cols-2' : 'grid-cols-1'}`}
       >
+        {!showChartTabs || chartPane === 'domestic' ? (
         <Section
           title={`内盘 · ${selectedSymbol?.name || '品种'}（天勤模拟）`}
           extra={
@@ -924,9 +1089,10 @@ export function OverviewPanel() {
               bars={domesticChart.bars}
               markers={domesticChart.markers}
               overlays={domesticChart.overlays}
+              overlaySpecs={domesticChart.overlaySpecs}
               barMeta={domesticChart.barMeta}
               priceLines={domesticChart.priceLines}
-              height={420}
+              height={chartHeight}
               onLoadMore={() => {
                 void loadMoreHistory()
               }}
@@ -941,8 +1107,9 @@ export function OverviewPanel() {
             {bars?.has_more ? ' · 向左拖动可加载更多' : ''}
           </p>
         </Section>
+        ) : null}
 
-        {overseas?.supported ? (
+        {overseas?.supported && (!showChartTabs || chartPane === 'overseas') ? (
           <Section
             title={`外盘对照 · ${overseas.pair?.name || '国际品种'}`}
             extra={
@@ -973,8 +1140,9 @@ export function OverviewPanel() {
                 key={`os-${symbolId}-${chartTf}`}
                 bars={overseasChart.bars}
                 overlays={overseasChart.overlays}
+                overlaySpecs={overseasChart.overlaySpecs}
                 barMeta={overseasChart.barMeta}
-                height={420}
+                height={chartHeight}
                 onLoadMore={() => {
                   void loadMoreOverseasHistory()
                 }}
@@ -997,7 +1165,7 @@ export function OverviewPanel() {
       </div>
 
       {/* 思考链路 + 委托成交 */}
-      <div className="grid gap-3 xl:grid-cols-2">
+      <div className="grid min-w-0 gap-3 xl:grid-cols-2">
         <Section
           title="思考链路"
           extra={
@@ -1348,7 +1516,7 @@ export function OverviewPanel() {
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label className="flex flex-col gap-1">
+    <label className="flex w-full min-w-0 flex-col gap-1 sm:w-auto">
       <span className="text-xs text-faint">{label}</span>
       {children}
     </label>

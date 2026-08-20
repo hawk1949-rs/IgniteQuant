@@ -1,6 +1,8 @@
 import { Alert, Button, Slider, Space } from 'antd'
 import dayjs from 'dayjs'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useIsPhone } from '@/hooks/useMediaQuery'
+import { aggregateChartBundle } from './chartTimeframe'
 import { useSimCockpit } from './SimCockpitContext'
 import { MiniCandleChart } from './MiniCandleChart'
 import { qualityLabel, regimeLabel, riskActionLabel, tradeActionLabel } from './labels'
@@ -10,6 +12,29 @@ export function ReplayPanel() {
   const [idx, setIdx] = useState(0)
   const debounceRef = useRef(0)
   const focus = replay?.decision || decisions[0]
+  const isPhone = useIsPhone()
+  const chartHeight = isPhone ? 240 : 220
+
+  const replayChart = useMemo(
+    () =>
+      aggregateChartBundle({
+        bars: bars?.bars,
+        markers: bars?.markers,
+        overlays: bars?.overlays,
+        overlaySpecs: bars?.overlay_specs,
+        barMeta: bars?.bar_meta,
+        priceLines: bars?.price_lines,
+        tf: '5m',
+      }),
+    [
+      bars?.bars,
+      bars?.markers,
+      bars?.overlays,
+      bars?.overlay_specs,
+      bars?.bar_meta,
+      bars?.price_lines,
+    ],
+  )
 
   const timeline = useMemo(() => {
     const stamps = new Set<string>()
@@ -100,7 +125,7 @@ export function ReplayPanel() {
                 </li>
                 <li>
                   <span className="text-faint">信号 </span>
-                  {focus.legacy_signal} · {JSON.stringify(focus.score_parts)}
+                  {focus.score_parts_label || JSON.stringify(focus.score_parts)}
                 </li>
                 <li>
                   <span className="text-faint">目标 </span>
@@ -125,8 +150,16 @@ export function ReplayPanel() {
           </section>
           <section className="rounded-xl border border-line bg-panel/90 p-3.5">
             <h2 className="mb-2 text-[13px] font-semibold text-ink">截至该时刻 K 线</h2>
-            {bars?.bars?.length ? (
-              <MiniCandleChart bars={bars.bars} markers={bars.markers} height={220} />
+            {replayChart.bars.length ? (
+              <MiniCandleChart
+                bars={replayChart.bars}
+                markers={replayChart.markers}
+                overlays={replayChart.overlays}
+                overlaySpecs={replayChart.overlaySpecs}
+                barMeta={replayChart.barMeta}
+                priceLines={replayChart.priceLines}
+                height={chartHeight}
+              />
             ) : (
               <p className="py-8 text-center text-sm text-muted">暂无 K 线</p>
             )}

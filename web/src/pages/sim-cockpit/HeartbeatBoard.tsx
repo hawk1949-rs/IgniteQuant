@@ -275,7 +275,7 @@ export function HeartbeatBoard() {
       <div className="grid gap-2 p-3.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         <Cell
           title="模拟进程"
-          tip="操作系统里 falcon_au_sim 是否仍在运行"
+          tip="操作系统里当前策略×品种模拟进程是否仍在运行"
           asOf={stateAsOf}
           ageSec={summary?.process_running ? stateAge : null}
           health={processHealth}

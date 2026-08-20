@@ -18,9 +18,21 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from dashboard.safe_path import resolve_runtime_db
 from dashboard.catalog import STRATEGIES, SYMBOLS
+from dashboard.sim_launchers import (
+    READY_SIM_STRATEGIES,
+    SIM_LAUNCHERS,
+    sim_instance_id,
+)
+from dashboard.sim_strategy_ui import (
+    build_chart_context,
+    format_pipeline_risk,
+    presentation_catalog,
+    resolve_strategy_ui,
+)
 from dashboard import sim_cloud_read
 from dashboard.open_positions import open_positions_view as _open_positions_view
 from dashboard.position_history import (
@@ -34,6 +46,7 @@ from dashboard.position_history import (
 )
 from ignitequant.market.chart_series import (
     DEFAULT_VISIBLE_BARS,
+    WARMUP_BARS,
     assemble_visible_bars,
     build_chart_enrichment,
     price_lines_from_strategy_payload,
@@ -68,25 +81,11 @@ OVERSEAS_PAIRS: dict[str, dict[str, str]] = {
     "ag": _cockpit_overseas_pair("ag") or {},
 }
 
-# instance_id → launcher
-SIM_LAUNCHERS: dict[str, dict[str, Any]] = {
-    "falcon_au_sim": {
-        "label": "Falcon 沪金天勤模拟",
-        "script": ROOT / "strategies" / "falcon_au_sim.py",
-        "symbol_id": "au",
-        "strategy_id": "falcon_v2",
-        "framework": "tq",
-    },
-    "gma_au_sim": {
-        "label": "GMA 沪金天勤模拟",
-        "script": ROOT / "strategies" / "gma_au_sim.py",
-        "symbol_id": "au",
-        "strategy_id": "gma_v1",
-        "framework": "tq",
-    },
-}
-
 router = APIRouter(prefix="/api/sim", tags=["sim"])
+
+
+class StrategyStartBody(BaseModel):
+    symbol_ids: list[str] = Field(min_length=1, max_length=8)
 
 _start_locks: dict[str, threading.Lock] = {}
 _start_locks_guard = threading.Lock()
@@ -462,16 +461,8 @@ def _process_status(instance_id: str) -> dict[str, Any]:
         except ValueError:
             pid = None
     alive = bool(pid and _process_alive(pid))
-    if not alive:
-        scanned = _find_sim_pids(Path(launcher["script"]).name if launcher else "falcon_au_sim.py")
-        if scanned:
-            pid = scanned[0]
-            alive = True
-            try:
-                RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-                pid_file.write_text(str(pid), encoding="utf-8")
-            except OSError:
-                pass
+    # Multiple launchers share falcon_au_sim.py / gma_au_sim.py. Never steal
+    # another instance's PID from a process-name scan.
     return {
         "process_running": alive,
         "pid": pid if alive else None,
@@ -790,6 +781,18 @@ def _status_from_updated(updated_at: str | None) -> str:
     return "STALE"
 
 
+def _strategy_id_for_instance(instance_id: str) -> str:
+    meta = SIM_LAUNCHERS.get(instance_id) or {}
+    sid = meta.get("strategy_id")
+    if sid:
+        return str(sid)
+    if "gma" in instance_id:
+        return "gma_v1"
+    if "falcon" in instance_id:
+        return "falcon_v2"
+    return "falcon_v2"
+
+
 def _short_bias_from_closes(closes: list[float], *, lookback: int = 12) -> str:
     """Visual near-term bias from recent closes (for cockpit, not strategy regime)."""
     if len(closes) < 3:
@@ -806,63 +809,14 @@ def _short_bias_from_closes(closes: list[float], *, lookback: int = 12) -> str:
     return "FLAT"
 
 
-def _chart_context_from_bars(bars: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Compute strategy regime + short-term bias from the same bars shown on chart."""
-    if len(bars) < 60:
-        return None
-    try:
-        import pandas as pd
-
-        from strategies.falcon import compute_indicators, detect_regime
-    except Exception:
-        return None
-
-    rows = []
-    for b in bars:
-        ns = b.get("datetime_ns")
-        if ns is None and b.get("time") is not None:
-            ns = int(b["time"]) * 1_000_000_000
-        if ns is None:
-            continue
-        rows.append(
-            {
-                "datetime": int(ns),
-                "open": float(b["open"]),
-                "high": float(b["high"]),
-                "low": float(b["low"]),
-                "close": float(b["close"]),
-                "volume": float(b.get("volume") or 0),
-            }
-        )
-    if len(rows) < 60:
-        return None
-    try:
-        df = pd.DataFrame(rows)
-        ind = compute_indicators(df)
-        regime = detect_regime(ind).value
-        closes = [float(x) for x in ind.close.tolist()]
-        short_bias = _short_bias_from_closes(closes)
-        return {
-            "regime": regime,
-            "short_bias": short_bias,
-            "close": float(ind.close[-1]),
-            "ma52": float(ind.ma52[-1]) if ind.ma52[-1] == ind.ma52[-1] else None,
-            "adx": float(ind.adx[-1]) if ind.adx[-1] == ind.adx[-1] else None,
-            "bar_time": int(rows[-1]["datetime"] // 1_000_000_000),
-            "conflict": (
-                (regime == "TREND_UP" and short_bias == "DOWN")
-                or (regime == "TREND_DOWN" and short_bias == "UP")
-            ),
-        }
-    except Exception:
-        return None
-
-
-def _empty_chart_enrichment() -> dict[str, Any]:
+def _empty_chart_enrichment(strategy_id: str = "falcon_v2") -> dict[str, Any]:
+    profile = resolve_strategy_ui(strategy_id)
     return {
-        "overlays": {"ma7": [], "ma14": [], "ma52": [], "signal": []},
+        "overlays": profile.empty_overlays(),
+        "overlay_specs": profile.overlay_specs_public(),
         "bar_meta": [],
         "price_lines": [],
+        "score_parts_schema": profile.score_parts_schema,
     }
 
 
@@ -916,22 +870,32 @@ def _enrich_visible_chart(
     hot_bars: list[dict[str, Any]],
     *,
     signal_symbol: str,
+    strategy_id: str,
     limit: int,
     before_sec: int | None,
     decisions: list[dict[str, Any]] | None = None,
     price_lines: list[dict[str, Any]] | None = None,
     use_cache: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
+    from dashboard.sim_strategy_ui import resolve_strategy_ui
+
+    profile = resolve_strategy_ui(strategy_id)
+    warmup = max(WARMUP_BARS, int(getattr(profile, "warmup_bars", WARMUP_BARS) or WARMUP_BARS))
+    # Chart overlays only need 15m HMA(90) / 1H Keltner / VP lookback — not HTF decision depth.
+    if profile.family == "gma":
+        warmup = max(warmup, 320)
     visible, compute, source = assemble_visible_bars(
         hot_bars,
         signal_symbol=signal_symbol,
         limit=limit,
         before_sec=before_sec,
+        warmup=warmup,
         use_cache=use_cache,
     )
     enrichment = build_chart_enrichment(
         visible,
         compute,
+        strategy_id=strategy_id,
         decisions=decisions or [],
         price_lines=price_lines or [],
     )
@@ -1051,6 +1015,48 @@ def _latest_decision_at(conn: sqlite3.Connection, instance_id: str) -> str | Non
 
 def _resolve_db(instance_id: str) -> Path:
     return resolve_runtime_db(RUNTIME_DIR, instance_id)
+
+
+def _db_path(instance_id: str) -> Path:
+    from dashboard.safe_path import validate_safe_id
+
+    safe_id = validate_safe_id(instance_id, field="instance_id")
+    return RUNTIME_DIR / f"{safe_id}.sqlite"
+
+
+def _open_session_ro(instance_id: str) -> sqlite3.Connection | None:
+    """Open sqlite when it exists. Known launchers with no db are idle (None)."""
+    path = _db_path(instance_id)
+    if path.is_file():
+        return _open_ro(path)
+    if instance_id in SIM_LAUNCHERS:
+        return None
+    raise HTTPException(404, f"session not found: {instance_id}")
+
+
+def _idle_metrics(instance_id: str) -> dict[str, Any]:
+    return {
+        "instance_id": instance_id,
+        "equity": 0.0,
+        "init_balance": DEFAULT_INIT_BALANCE,
+        "pnl": 0.0,
+        "pnl_pct": 0.0,
+        "realized_pnl_proxy": 0.0,
+        "realized_pnl_closed": 0.0,
+        "realized_pnl_fills": 0.0,
+        "unrealized_pnl": 0.0,
+        "pnl_residual": 0.0,
+        "trade_count": 0,
+        "fill_count": 0,
+        "wins": 0,
+        "losses": 0,
+        "win_rate": 0.0,
+        "max_drawdown_pct": 0.0,
+        "open_position": 0,
+        "equity_curve": [],
+        "history_source": "idle",
+        "pnl_note": "该策略×品种尚未启动，没有独立账户快照。",
+    }
 
 
 def _signal_symbol_for_trade(symbol: str) -> str:
@@ -1175,8 +1181,58 @@ def _load_broker_rounds(
     return _iter_closed_rounds(prepared), "fills_fallback"
 
 
+def _init_balance_for_instance(conn: sqlite3.Connection, instance_id: str) -> float:
+    """Per strategy×symbol baseline stored in strategy_state, with safe legacy fallbacks."""
+    row = conn.execute(
+        """
+        SELECT payload_json FROM strategy_state
+        WHERE instance_id = ?
+        ORDER BY updated_at DESC LIMIT 1
+        """,
+        (instance_id,),
+    ).fetchone()
+    if row and row["payload_json"]:
+        payload = _loads(row["payload_json"])
+        raw = payload.get("init_balance")
+        if raw is not None:
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+    first = conn.execute(
+        """
+        SELECT equity FROM account_snapshot_event
+        WHERE instance_id = ?
+        ORDER BY seq ASC LIMIT 1
+        """,
+        (instance_id,),
+    ).fetchone()
+    last = conn.execute(
+        """
+        SELECT equity FROM account_snapshot_event
+        WHERE instance_id = ?
+        ORDER BY seq DESC LIMIT 1
+        """,
+        (instance_id,),
+    ).fetchone()
+    if first is not None and last is not None:
+        first_eq = float(first["equity"])
+        last_eq = float(last["equity"])
+        # TqKq default 1000万 → later TqSim/reset 100万 without clearing sqlite history.
+        if (
+            first_eq >= 9_500_000
+            and abs(last_eq - DEFAULT_INIT_BALANCE) <= DEFAULT_INIT_BALANCE * 0.05
+        ):
+            return DEFAULT_INIT_BALANCE
+        return first_eq
+    if first is not None:
+        return float(first["equity"])
+    return DEFAULT_INIT_BALANCE
+
+
 def _compute_metrics(conn: sqlite3.Connection, instance_id: str) -> dict[str, Any]:
     fill_rows = _load_fills_prepared(conn, instance_id)
+    init_balance = _init_balance_for_instance(conn, instance_id)
     rounds, rounds_source = _load_broker_rounds(conn, instance_id)
     summary = _closed_rounds_summary(rounds)
     # Residual open position after walking fills (for metrics.open_position).
@@ -1200,8 +1256,8 @@ def _compute_metrics(conn: sqlite3.Connection, instance_id: str) -> dict[str, An
     equity_curve = [
         {"t": r["as_of"] or r["created_at"], "equity": float(r["equity"])} for r in equities
     ]
-    current_equity = float(equities[-1]["equity"]) if equities else DEFAULT_INIT_BALANCE
-    peak = DEFAULT_INIT_BALANCE
+    current_equity = float(equities[-1]["equity"]) if equities else init_balance
+    peak = init_balance
     max_dd = 0.0
     for pt in equity_curve:
         eq = float(pt["equity"])
@@ -1229,18 +1285,18 @@ def _compute_metrics(conn: sqlite3.Connection, instance_id: str) -> dict[str, An
         except (TypeError, ValueError):
             pass
 
-    pnl = current_equity - DEFAULT_INIT_BALANCE
+    pnl = current_equity - init_balance
     realized_account = _account_realized_pnl(
         equity=current_equity,
-        init_balance=DEFAULT_INIT_BALANCE,
+        init_balance=init_balance,
         unrealized=unrealized,
     )
     realized_fills = float(summary["realized_pnl_proxy"])
     return {
         "equity": current_equity,
-        "init_balance": DEFAULT_INIT_BALANCE,
+        "init_balance": init_balance,
         "pnl": pnl,
-        "pnl_pct": pnl / DEFAULT_INIT_BALANCE,
+        "pnl_pct": pnl / init_balance if init_balance else 0.0,
         "realized_pnl_proxy": realized_fills,
         "realized_pnl_closed": realized_account,
         "realized_pnl_fills": realized_fills,
@@ -1417,7 +1473,8 @@ def _position_history_from_conn(
 
     rounds_price_pnl = float(summary["realized_pnl_proxy"])
     acct = _latest_account(conn, instance_id)
-    equity = float(acct["equity"]) if acct is not None else DEFAULT_INIT_BALANCE
+    init_balance = _init_balance_for_instance(conn, instance_id)
+    equity = float(acct["equity"]) if acct is not None else init_balance
     unrealized = 0.0
     if acct is not None:
         try:
@@ -1426,7 +1483,7 @@ def _position_history_from_conn(
             unrealized = 0.0
     account_realized = _account_realized_pnl(
         equity=equity,
-        init_balance=DEFAULT_INIT_BALANCE,
+        init_balance=init_balance,
         unrealized=unrealized,
     )
     as_of = None
@@ -1455,8 +1512,15 @@ def _position_history_from_conn(
     }
 
 
-def _decision_row(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+def _decision_row(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    strategy_id: str | None = None,
+) -> dict[str, Any]:
     payload = _loads(row["payload_json"])
+    sid = strategy_id or _strategy_id_for_instance(str(row["instance_id"]))
+    profile = resolve_strategy_ui(sid)
     risk = conn.execute(
         """
         SELECT action, requested_position, approved_position, rule_hits_json, payload_json, created_at
@@ -1478,6 +1542,10 @@ def _decision_row(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         }
     factors = (payload.get("factors") or {}) if isinstance(payload, dict) else {}
     signal = (payload.get("signal") or {}) if isinstance(payload, dict) else {}
+    factor_values = factors.get("values") or {}
+    regime = factors.get("regime")
+    quality = factors.get("quality")
+    score_parts = payload.get("legacy_score_parts") if isinstance(payload, dict) else None
     return {
         "decision_id": row["decision_id"],
         "bar_id": row["bar_id"],
@@ -1487,11 +1555,22 @@ def _decision_row(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         "target_after": int(row["target_after"]),
         "legacy_signal": int(row["legacy_signal"]),
         "created_at": row["created_at"],
-        "regime": factors.get("regime"),
-        "factor_values": factors.get("values") or {},
-        "factor_quality": factors.get("quality"),
+        "strategy_id": sid,
+        "regime": regime,
+        "factor_values": factor_values,
+        "factor_quality": quality,
+        "factor_summary": profile.format_factor_summary(
+            regime=str(regime) if regime else None,
+            quality=str(quality) if quality else None,
+            values=factor_values if isinstance(factor_values, dict) else {},
+        ),
         "reason_codes": factors.get("reason_codes") or signal.get("reason_codes") or [],
-        "score_parts": payload.get("legacy_score_parts") if isinstance(payload, dict) else None,
+        "score_parts": score_parts,
+        "score_parts_schema": profile.score_parts_schema,
+        "score_parts_label": profile.format_score_parts(
+            score_parts if isinstance(score_parts, list) else None
+        ),
+        "pipeline_risk_label": format_pipeline_risk(payload if isinstance(payload, dict) else {}),
         "signal": signal,
         "target": payload.get("target") if isinstance(payload, dict) else None,
         "risk": risk_out,
@@ -1536,9 +1615,11 @@ def sim_catalog() -> dict[str, Any]:
                 "name": s.name,
                 "description": s.description,
                 "ready": s.runner != "run_vwap_stub",
+                "presentation": presentation_catalog().get(s.id),
             }
             for s in STRATEGIES.values()
         ],
+        "presentation": presentation_catalog(),
         "symbols": symbols,
         "launchers": [
             {
@@ -1565,14 +1646,140 @@ def sim_catalog() -> dict[str, Any]:
     }
 
 
+def _leg_snapshot(instance_id: str) -> dict[str, Any]:
+    meta = SIM_LAUNCHERS.get(instance_id) or {}
+    proc = _process_status(instance_id)
+    out: dict[str, Any] = {
+        "instance_id": instance_id,
+        "symbol_id": meta.get("symbol_id"),
+        "strategy_id": meta.get("strategy_id"),
+        "label": meta.get("label") or instance_id,
+        "process_running": bool(proc.get("process_running")),
+        "pid": proc.get("pid"),
+        "status": "IDLE",
+        "net_position": 0,
+        "unrealized_pnl": 0.0,
+        "equity": None,
+        "symbol": None,
+        "open_positions": [],
+    }
+    path = _db_path(instance_id)
+    if not path.is_file():
+        return out
+    try:
+        conn = _open_ro(path)
+    except FileNotFoundError:
+        return out
+    try:
+        state = conn.execute(
+            """
+            SELECT instance_id, strategy_id, account_id, symbol, runtime_state,
+                   payload_json, updated_at
+            FROM strategy_state WHERE instance_id = ?
+            """,
+            (instance_id,),
+        ).fetchone()
+        if state is None:
+            return out
+        updated = state["updated_at"]
+        status = _status_from_updated(updated)
+        if not out["process_running"] and status == "RUNNING":
+            status = "STALE"
+        position = _latest_position(conn, instance_id)
+        account = _latest_account(conn, instance_id)
+        live = _live_quote(conn, instance_id)
+        payload = _loads(state["payload_json"])
+        open_positions = _open_positions_view(
+            position=position,
+            account=account,
+            state_payload=payload,
+            last_price=live.get("last_price"),
+        )
+        net = int(position["net_position"]) if position else 0
+        out.update(
+            {
+                "status": status,
+                "net_position": net,
+                "unrealized_pnl": float((position or {}).get("unrealized_pnl") or 0),
+                "equity": None if account is None else account.get("equity"),
+                "symbol": state["symbol"],
+                "open_positions": open_positions,
+            }
+        )
+        return out
+    finally:
+        conn.close()
+
+
+def _strategy_book(strategy_id: str) -> dict[str, Any]:
+    legs = [
+        _leg_snapshot(iid)
+        for iid, meta in SIM_LAUNCHERS.items()
+        if meta.get("strategy_id") == strategy_id
+    ]
+    open_positions: list[dict[str, Any]] = []
+    for leg in legs:
+        for pos in leg.get("open_positions") or []:
+            open_positions.append(
+                {
+                    **pos,
+                    "instance_id": leg["instance_id"],
+                    "symbol_id": leg.get("symbol_id"),
+                }
+            )
+    return {
+        "strategy_id": strategy_id,
+        "legs": legs,
+        "open_positions": open_positions,
+        "running_count": sum(1 for leg in legs if leg.get("process_running")),
+        "unrealized_pnl": sum(float(leg.get("unrealized_pnl") or 0) for leg in legs),
+    }
+
+
+def _idle_session_payload(instance_id: str, launcher: dict[str, Any]) -> dict[str, Any]:
+    proc = _process_status(instance_id)
+    strategy_id = str(launcher.get("strategy_id") or "")
+    script = launcher.get("script")
+    return {
+        "instance_id": instance_id,
+        "framework": "tq",
+        "framework_label": "天勤模拟盘",
+        "strategy_id": strategy_id,
+        "account_id": "local",
+        "symbol": "",
+        "runtime_state": "IDLE",
+        "status": "IDLE",
+        "status_label": _status_label("IDLE"),
+        "label": launcher.get("label") or instance_id,
+        "updated_at": None,
+        "payload": {},
+        "account": None,
+        "position": None,
+        "open_positions": [],
+        "position_note": None,
+        "market_session": _shfe_precious_session_open(),
+        "last_decision_at": None,
+        "last_price": None,
+        "last_price_source": None,
+        "last_price_as_of": None,
+        "cli_hint": (
+            f"python strategies/{Path(script).name}" if script else "python strategies/falcon_au_sim.py"
+        ),
+        "book": _strategy_book(strategy_id) if strategy_id else None,
+        **proc,
+    }
+
+
 @router.get("/sessions")
 def list_sessions() -> dict[str, Any]:
     if sim_cloud_read.is_cloud():
-        return sim_cloud_read.list_sessions_cloud(
+        payload = sim_cloud_read.list_sessions_cloud(
             root=ROOT,
             process_status=_process_status,
             launchers=SIM_LAUNCHERS,
         )
+        payload["fleet"] = [_leg_snapshot(iid) for iid in SIM_LAUNCHERS]
+        return payload
     sessions: list[dict[str, Any]] = []
     for path in _discover_dbs():
         instance_id = _instance_id_from_path(path)
@@ -1653,7 +1860,11 @@ def list_sessions() -> dict[str, Any]:
             )
         finally:
             conn.close()
-    return {"sessions": sessions, "count": len(sessions)}
+    return {
+        "sessions": sessions,
+        "count": len(sessions),
+        "fleet": [_leg_snapshot(iid) for iid in SIM_LAUNCHERS],
+    }
 
 
 @router.get("/sessions/{instance_id}/summary")
@@ -1666,8 +1877,18 @@ def session_summary(instance_id: str) -> dict[str, Any]:
             launchers=SIM_LAUNCHERS,
             market_session=_shfe_precious_session_open(),
         )
-    path = _resolve_db(instance_id)
-    conn = _open_ro(path)
+    path = _db_path(instance_id)
+    launcher = SIM_LAUNCHERS.get(instance_id)
+    if not path.is_file():
+        if not launcher:
+            raise HTTPException(404, f"no strategy_state for {instance_id}")
+        return _idle_session_payload(instance_id, launcher)
+    try:
+        conn = _open_ro(path)
+    except FileNotFoundError:
+        if not launcher:
+            raise HTTPException(404, f"no strategy_state for {instance_id}") from None
+        return _idle_session_payload(instance_id, launcher)
     try:
         state = conn.execute(
             """
@@ -1678,6 +1899,8 @@ def session_summary(instance_id: str) -> dict[str, Any]:
             (instance_id,),
         ).fetchone()
         if state is None:
+            if launcher:
+                return _idle_session_payload(instance_id, launcher)
             raise HTTPException(404, f"no strategy_state for {instance_id}")
         launcher = SIM_LAUNCHERS.get(instance_id)
         updated = state["updated_at"]
@@ -1754,6 +1977,9 @@ def session_summary(instance_id: str) -> dict[str, Any]:
             "last_price_source": live["last_price_source"],
             "last_price_as_of": live["last_price_as_of"],
             "cli_hint": f"python strategies/{Path(launcher['script']).name}" if launcher else "python strategies/falcon_au_sim.py",
+            "book": _strategy_book(
+                str(state["strategy_id"] or (launcher or {}).get("strategy_id") or "")
+            ),
             **proc,
         }
     finally:
@@ -1767,7 +1993,51 @@ def session_process(instance_id: str) -> dict[str, Any]:
 
 @router.post("/sessions/{instance_id}/start")
 def session_start(instance_id: str) -> dict[str, Any]:
-    """Start local TqKq sim process (CLI equivalent)."""
+    """Start one strategy×symbol sim process. Does not stop other instances."""
+    return _start_instance(instance_id)
+
+
+@router.post("/strategies/{strategy_id}/start")
+def strategy_start(strategy_id: str, body: StrategyStartBody) -> dict[str, Any]:
+    """Start selected symbols for one strategy; other strategies keep running."""
+    from dashboard.safe_path import validate_safe_id
+
+    validate_safe_id(strategy_id, field="strategy_id")
+    if strategy_id not in READY_SIM_STRATEGIES:
+        raise HTTPException(400, f"暂不支持启动策略：{strategy_id}")
+    seen: set[str] = set()
+    symbol_ids: list[str] = []
+    for raw in body.symbol_ids:
+        sid = str(raw or "").strip().lower()
+        if not sid or sid in seen:
+            continue
+        if sid not in SYMBOLS:
+            raise HTTPException(400, f"未知品种：{sid}")
+        seen.add(sid)
+        symbol_ids.append(sid)
+    if not symbol_ids:
+        raise HTTPException(400, "请至少选择一个品种")
+    results = []
+    for sid in symbol_ids:
+        results.append(_start_instance(sim_instance_id(strategy_id, sid)))
+    started = sum(1 for row in results if row.get("ok") and not row.get("already_running"))
+    running = sum(1 for row in results if row.get("process_running") or row.get("already_running"))
+    return {
+        "ok": True,
+        "strategy_id": strategy_id,
+        "symbol_ids": symbol_ids,
+        "started": started,
+        "running": running,
+        "results": results,
+        "message": (
+            f"已启动 {started} 个品种进程"
+            if started
+            else f"所选 {running} 个品种已在运行"
+        ),
+    }
+
+
+def _start_instance(instance_id: str) -> dict[str, Any]:
     from dashboard.safe_path import validate_safe_id
 
     validate_safe_id(instance_id, field="instance_id")
@@ -1780,6 +2050,7 @@ def session_start(instance_id: str) -> dict[str, Any]:
             return {
                 "ok": True,
                 "already_running": True,
+                "instance_id": instance_id,
                 "message": "模拟盘进程已在运行",
                 **proc,
             }
@@ -1790,6 +2061,13 @@ def session_start(instance_id: str) -> dict[str, Any]:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
         env.setdefault("FALCON_PROFILE", "falcon_legacy_v1")
+        env["IQ_SIM_INSTANCE_ID"] = instance_id
+        env["IQ_SIM_STRATEGY_ID"] = str(launcher.get("strategy_id") or "")
+        env["IQ_SIM_SYMBOL_ID"] = str(launcher.get("symbol_id") or "au")
+        env["IQ_SIM_STRATEGY_LABEL"] = str(launcher.get("label") or instance_id)
+        # Isolated local sim account so Falcon / GMA can trade the same product in parallel.
+        env["IQ_SIM_ACCOUNT"] = "tqsim"
+        env["IQ_SIM_WEB_GUI"] = "0"
         creationflags = 0
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
@@ -1814,7 +2092,8 @@ def session_start(instance_id: str) -> dict[str, Any]:
         return {
             "ok": True,
             "already_running": False,
-            "message": "已启动天勤模拟盘进程",
+            "instance_id": instance_id,
+            "message": "已启动模拟盘进程",
             "pid": child.pid,
             "log_path": str(log_path),
             "process_running": True,
@@ -1834,7 +2113,10 @@ def session_repair_fills(instance_id: str) -> dict[str, Any]:
 
 
 @router.post("/sessions/{instance_id}/catch-up-bars")
-def session_catch_up_bars(instance_id: str) -> dict[str, Any]:
+def session_catch_up_bars(
+    instance_id: str,
+    bootstrap_today: bool = Query(False, description="无 last_bar_id 时从当日 0 点补信号（GMA 推荐）"),
+) -> dict[str, Any]:
     """Replay missed completed 5m bars into decision chain (local sqlite only).
 
     Does not place live broker orders from the API. If the sim process is running,
@@ -1843,8 +2125,14 @@ def session_catch_up_bars(instance_id: str) -> dict[str, Any]:
     """
     from dashboard.safe_path import validate_safe_id
     from ignitequant.engine.catch_up import catch_up_session_db
+    from ignitequant.persistence.sqlite import open_sqlite
 
     validate_safe_id(instance_id, field="instance_id")
+    meta = SIM_LAUNCHERS.get(instance_id) or {}
+    strategy_id = str(meta.get("strategy_id") or "falcon_v2")
+    if strategy_id.startswith("gma"):
+        bootstrap_today = True
+
     if sim_cloud_read.is_cloud():
         # Allow if local sqlite exists (trade PC with cloud default); else 503-ish.
         try:
@@ -1855,10 +2143,14 @@ def session_catch_up_bars(instance_id: str) -> dict[str, Any]:
                 "云端只读模式且无本地 sqlite：请在交易机执行补跑（或设 SIM_DATA_SOURCE=local）。",
             ) from None
     else:
-        path = _resolve_db(instance_id)
+        path = _db_path(instance_id)
+        if not path.is_file():
+            if instance_id not in SIM_LAUNCHERS:
+                raise HTTPException(404, f"session not found: {instance_id}")
+            conn = open_sqlite(path)
+            conn.close()
 
     proc = _process_status(instance_id)
-    meta = SIM_LAUNCHERS.get(instance_id) or {}
     signal_symbol = "KQ.m@SHFE.au"
     sid = meta.get("symbol_id") or "au"
     if sid in INSTRUMENTS:
@@ -1867,9 +2159,11 @@ def session_catch_up_bars(instance_id: str) -> dict[str, Any]:
     result = catch_up_session_db(
         path,
         instance_id,
+        strategy_id=strategy_id,
         runtime_dir=RUNTIME_DIR,
         root=ROOT,
         signal_symbol=signal_symbol,
+        bootstrap_today=bootstrap_today,
     )
     body = result.to_dict()
     body["instance_id"] = instance_id
@@ -1902,26 +2196,58 @@ def overseas_bars(
 ) -> dict[str, Any]:
     pair = OVERSEAS_PAIRS.get(symbol_id)
     if not pair:
+        empty = _empty_chart_enrichment("falcon_v2")
         return {
             "symbol_id": symbol_id,
             "supported": False,
             "bars": [],
             "last_price": None,
-            "overlays": {"ma7": [], "ma14": [], "ma52": [], "signal": []},
+            "overlays": empty["overlays"],
+            "overlay_specs": empty.get("overlay_specs") or [],
             "bar_meta": [],
             "has_more": False,
             "hint": "当前品种暂无配置外盘对照。",
         }
     # Deep fetch once (TTL-cached); slice for visible window / before pagination.
     bars_all, source = _fetch_overseas_5m_bars(pair, limit=_OVERSEAS_FETCH_DEPTH)
+    strategy_id = (
+        _strategy_id_for_instance(instance_id) if instance_id else "falcon_v2"
+    )
+    from dashboard.sim_strategy_ui import resolve_strategy_ui
+    from ignitequant.market.overseas_bars import (
+        dataframe_to_bar_dicts,
+        load_overseas_cache_bars,
+        merge_overseas_bars,
+    )
+
+    profile = resolve_strategy_ui(strategy_id)
+    # GMA chart overlays need ~320 5m bars (15m HMA90 / VP96); not the 8k decision window.
+    if profile.family == "gma" and pair.get("signal_symbol"):
+        try:
+            frame = load_overseas_cache_bars(str(pair["signal_symbol"]), duration_seconds=300)
+            if not frame.empty:
+                need = max(limit + 320, 500)
+                cached = dataframe_to_bar_dicts(
+                    frame.iloc[-need:] if len(frame) > need else frame
+                )
+                bars_all = merge_overseas_bars(cached, bars_all or [], limit=need)
+                source = f"{source}+market_cache" if source else "market_cache"
+        except Exception:
+            pass
     pool = list(bars_all) if bars_all else []
     if before is not None:
         before_i = int(before)
         pool = [b for b in pool if int(b["time"]) < before_i]
     visible = list(pool[-limit:]) if pool else []
     has_more = len(pool) > len(visible)
-    # Warmup extras for MA when not paginating older history.
-    compute = list(bars_all) if bars_all and before is None else (pool or visible)
+    # Warmup extras for indicators when not paginating older history.
+    if before is None and bars_all:
+        warmup = max(200, int(getattr(profile, "warmup_bars", 200) or 200))
+        if profile.family == "gma":
+            warmup = max(warmup, 320)
+        compute = list(bars_all[-(limit + warmup) :])
+    else:
+        compute = pool or visible
     decisions: list[dict[str, Any]] = []
     if instance_id and visible:
         try:
@@ -1938,6 +2264,7 @@ def overseas_bars(
     enrichment = build_chart_enrichment(
         visible,
         compute or visible,
+        strategy_id=strategy_id,
         decisions=decisions,
         price_lines=None,
     )
@@ -1954,7 +2281,9 @@ def overseas_bars(
         "pair": pair,
         "bars": visible,
         "overlays": enrichment["overlays"],
+        "overlay_specs": enrichment.get("overlay_specs") or [],
         "bar_meta": enrichment["bar_meta"],
+        "score_parts_schema": enrichment.get("score_parts_schema"),
         "has_more": has_more,
         "last_price": last_price,
         "last_bar_open": last_open,
@@ -1984,12 +2313,15 @@ def market_bars(
     symbol_id: str = Query("au"),
     limit: int = Query(DEFAULT_VISIBLE_BARS, ge=10, le=2000),
     before: int | None = Query(None, description="unix seconds; return bars strictly before this"),
+    strategy_id: str | None = Query(None, description="strategy overlay profile for chart enrichment"),
 ) -> dict[str, Any]:
     """Sim Cockpit bars: Tq live JSON snapshot, SQLite fallback, then market_cache history."""
     try:
         spec = INSTRUMENTS[symbol_id]
     except KeyError as exc:
         raise HTTPException(404, f"未知品种：{symbol_id}") from exc
+
+    chart_strategy_id = (strategy_id or "falcon_v2").strip() or "falcon_v2"
 
     # Pull a wider hot window so assemble_visible can trim + prepend cache.
     hot_limit = min(max(limit + 80, 200), 2000)
@@ -2051,6 +2383,7 @@ def market_bars(
     visible, enrichment, assembled_source = _enrich_visible_chart(
         hot_bars,
         signal_symbol=spec.signal_symbol,
+        strategy_id=chart_strategy_id,
         limit=limit,
         before_sec=before,
         decisions=None,
@@ -2070,7 +2403,7 @@ def market_bars(
             "trade_symbol": spec.signal_symbol,
             "bars": [],
             "markers": [],
-            **_empty_chart_enrichment(),
+            **_empty_chart_enrichment(chart_strategy_id),
             "last_price": None,
             "last_price_source": None,
             "hint": "暂无天勤模拟盘 K 线快照，且本地 market_cache 也无可用历史。请先启动模拟盘或下载行情缓存。",
@@ -2101,14 +2434,20 @@ def market_bars(
         "bars": visible,
         "markers": [],
         "overlays": enrichment["overlays"],
+        "overlay_specs": enrichment.get("overlay_specs") or [],
         "bar_meta": enrichment["bar_meta"],
         "price_lines": enrichment["price_lines"],
+        "score_parts_schema": enrichment.get("score_parts_schema"),
         "last_price": float(last_price) if last_price is not None else None,
         "last_price_source": source,
         "updated_at": (snap or {}).get("updated_at"),
         "hint": hint,
         "source": source,
-        "chart_context": _chart_context_from_bars(visible),
+        "chart_context": build_chart_context(
+            chart_strategy_id,
+            visible,
+            short_bias=_short_bias_from_closes([float(b["close"]) for b in visible[-20:]]),
+        ),
         "market_session": session,
         "has_more": len(visible) >= limit,
     }
@@ -2118,8 +2457,9 @@ def market_bars(
 def session_metrics(instance_id: str) -> dict[str, Any]:
     if sim_cloud_read.is_cloud():
         return sim_cloud_read.session_metrics_cloud(instance_id, root=ROOT)
-    path = _resolve_db(instance_id)
-    conn = _open_ro(path)
+    conn = _open_session_ro(instance_id)
+    if conn is None:
+        return _idle_metrics(instance_id)
     try:
         metrics = _compute_metrics(conn, instance_id)
         return {"instance_id": instance_id, **metrics}
@@ -2137,8 +2477,9 @@ def session_decisions(
         return sim_cloud_read.session_decisions_cloud(
             instance_id, limit=limit, before=before, root=ROOT
         )
-    path = _resolve_db(instance_id)
-    conn = _open_ro(path)
+    conn = _open_session_ro(instance_id)
+    if conn is None:
+        return {"instance_id": instance_id, "count": 0, "decisions": []}
     try:
         if before:
             rows = conn.execute(
@@ -2158,7 +2499,8 @@ def session_decisions(
                 """,
                 (instance_id, limit),
             ).fetchall()
-        items = [_decision_row(conn, r) for r in rows]
+        sid = _strategy_id_for_instance(instance_id)
+        items = [_decision_row(conn, r, strategy_id=sid) for r in rows]
         return {"instance_id": instance_id, "count": len(items), "decisions": items}
     finally:
         conn.close()
@@ -2171,8 +2513,9 @@ def session_intents(
 ) -> dict[str, Any]:
     if sim_cloud_read.is_cloud():
         return sim_cloud_read.session_intents_cloud(instance_id, limit=limit, root=ROOT)
-    path = _resolve_db(instance_id)
-    conn = _open_ro(path)
+    conn = _open_session_ro(instance_id)
+    if conn is None:
+        return {"instance_id": instance_id, "count": 0, "intents": []}
     try:
         rows = conn.execute(
             """
@@ -2212,8 +2555,9 @@ def session_fills(
 ) -> dict[str, Any]:
     if sim_cloud_read.is_cloud():
         return sim_cloud_read.session_fills_cloud(instance_id, limit=limit, root=ROOT)
-    path = _resolve_db(instance_id)
-    conn = _open_ro(path)
+    conn = _open_session_ro(instance_id)
+    if conn is None:
+        return {"instance_id": instance_id, "count": 0, "fills": []}
     try:
         rows = conn.execute(
             """
@@ -2256,8 +2600,9 @@ def session_position_history(
         return sim_cloud_read.session_position_history_cloud(
             instance_id, limit=limit, root=ROOT
         )
-    path = _resolve_db(instance_id)
-    conn = _open_ro(path)
+    conn = _open_session_ro(instance_id)
+    if conn is None:
+        return {"instance_id": instance_id, "count": 0, "positions": []}
     try:
         return _position_history_from_conn(conn, instance_id, limit=limit)
     finally:
@@ -2274,6 +2619,7 @@ def session_bars(
 ) -> dict[str, Any]:
     """Bars for cockpit: live snapshot + market_cache history + strategy overlays."""
     hot_limit = min(max(limit + 80, 200), 2000)
+    strategy_id = _strategy_id_for_instance(instance_id)
     if sim_cloud_read.is_cloud():
         trade_symbol = symbol or "KQ.m@SHFE.au"
         last_price = None
@@ -2323,6 +2669,7 @@ def session_bars(
         visible, enrichment, assembled_source = _enrich_visible_chart(
             hot_bars,
             signal_symbol=signal_symbol,
+            strategy_id=strategy_id,
             limit=limit,
             before_sec=before,
             decisions=None,
@@ -2331,13 +2678,16 @@ def session_bars(
         )
         return {
             "instance_id": instance_id,
+            "strategy_id": strategy_id,
             "signal_symbol": signal_symbol,
             "trade_symbol": trade_symbol,
             "bars": visible,
             "markers": markers,
             "overlays": enrichment["overlays"],
+            "overlay_specs": enrichment.get("overlay_specs") or [],
             "bar_meta": enrichment["bar_meta"],
             "price_lines": enrichment["price_lines"],
+            "score_parts_schema": enrichment.get("score_parts_schema"),
             "last_price": last_price,
             "last_price_source": "cloud_payload" if last_price else None,
             "last_price_as_of": None,
@@ -2349,10 +2699,36 @@ def session_bars(
             "source": assembled_source if visible else "cloud_readonly",
             "data_source": "cloud",
             "has_more": len(visible) >= limit,
-            "chart_context": _chart_context_from_bars(visible) if visible else None,
+            "chart_context": build_chart_context(
+                strategy_id,
+                visible,
+                short_bias=_short_bias_from_closes([float(b["close"]) for b in visible[-20:]])
+                if visible
+                else None,
+            )
+            if visible
+            else None,
         }
-    path = _resolve_db(instance_id)
-    conn = _open_ro(path)
+    conn = _open_session_ro(instance_id)
+    if conn is None:
+        meta = SIM_LAUNCHERS.get(instance_id) or {}
+        sid = str(meta.get("symbol_id") or "au")
+        spec = SYMBOLS.get(sid)
+        signal_symbol = spec.signal_symbol if spec else "KQ.m@SHFE.au"
+        return {
+            "instance_id": instance_id,
+            "strategy_id": strategy_id,
+            "signal_symbol": signal_symbol,
+            "trade_symbol": "",
+            "bars": [],
+            "markers": [],
+            **_empty_chart_enrichment(strategy_id),
+            "last_price": None,
+            "hint": "该策略×品种尚未启动，没有本会话 K 线与成交标记。",
+            "source": "idle",
+            "has_more": False,
+            "chart_context": None,
+        }
     try:
         state = conn.execute(
             "SELECT symbol, payload_json FROM strategy_state WHERE instance_id = ?",
@@ -2432,6 +2808,7 @@ def session_bars(
         visible, enrichment, assembled_source = _enrich_visible_chart(
             hot_bars,
             signal_symbol=signal_symbol,
+            strategy_id=strategy_id,
             limit=limit,
             before_sec=before,
             decisions=decisions,
@@ -2439,14 +2816,16 @@ def session_bars(
             use_cache=True,
         )
 
+        latest_decision = decisions[0] if decisions else None
         if not visible:
             return {
                 "instance_id": instance_id,
+                "strategy_id": strategy_id,
                 "signal_symbol": signal_symbol,
                 "trade_symbol": trade_symbol,
                 "bars": [],
                 "markers": markers,
-                **_empty_chart_enrichment(),
+                **_empty_chart_enrichment(strategy_id),
                 "last_price": live["last_price"],
                 "last_price_source": live["last_price_source"],
                 "last_price_as_of": live["last_price_as_of"],
@@ -2467,13 +2846,16 @@ def session_bars(
 
         return {
             "instance_id": instance_id,
+            "strategy_id": strategy_id,
             "signal_symbol": str((snap or {}).get("signal_symbol") or signal_symbol),
             "trade_symbol": trade_out,
             "bars": visible,
             "markers": markers,
             "overlays": enrichment["overlays"],
+            "overlay_specs": enrichment.get("overlay_specs") or [],
             "bar_meta": enrichment["bar_meta"],
             "price_lines": enrichment["price_lines"],
+            "score_parts_schema": enrichment.get("score_parts_schema"),
             "last_price": float(last_price) if last_price is not None else None,
             "last_price_source": live["last_price_source"] or assembled_source,
             "last_price_as_of": live["last_price_as_of"] or ((snap or {}).get("updated_at")),
@@ -2481,7 +2863,12 @@ def session_bars(
             "source": assembled_source,
             "updated_at": (snap or {}).get("updated_at"),
             "has_more": len(visible) >= limit,
-            "chart_context": _chart_context_from_bars(visible),
+            "chart_context": build_chart_context(
+                strategy_id,
+                visible,
+                latest_decision=latest_decision,
+                short_bias=_short_bias_from_closes([float(b["close"]) for b in visible[-20:]]),
+            ),
         }
     finally:
         conn.close()
@@ -2536,8 +2923,13 @@ def session_replay(
         ).fetchall()
         # Metrics up to at: filter fills temporarily via subquery logic
         # Reuse compute on a filtered set by reading equity at time
-        equity = float(acct["equity"]) if acct else DEFAULT_INIT_BALANCE
-        decision = _decision_row(conn, dec) if dec is not None else None
+        equity = float(acct["equity"]) if acct else _init_balance_for_instance(conn, instance_id)
+        init_balance = _init_balance_for_instance(conn, instance_id)
+        decision = (
+            _decision_row(conn, dec, strategy_id=_strategy_id_for_instance(instance_id))
+            if dec is not None
+            else None
+        )
         return {
             "instance_id": instance_id,
             "at": at_iso,
@@ -2580,7 +2972,7 @@ def session_replay(
             ],
             "metrics_snapshot": {
                 "equity": equity,
-                "pnl": equity - DEFAULT_INIT_BALANCE,
+                "pnl": equity - init_balance,
                 "fill_count": len(fills),
             },
         }

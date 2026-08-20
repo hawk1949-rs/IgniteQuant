@@ -31,14 +31,14 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from falcon.sizing import LOT_BY_SIGNAL
-from ignitequant.config import load_active_decision_config
+from ignitequant.config import load_active_decision_config as _impl_load_active_decision_config
 from ignitequant.domain.enums import ReasonCode, RiskAction
 from ignitequant.domain.models import AccountSnapshot, FillEvent, PositionSnapshot
 from ignitequant.engine import (
     BrokerFacts,
-    FalconDecisionPipeline,
+    FalconDecisionPipeline as _ImplFalconDecisionPipeline,
     LocalProjection,
-    annotate_klines,
+    annotate_klines as _impl_annotate_klines,
     apply_pretrade,
     atr_of,
     close_of,
@@ -47,13 +47,20 @@ from ignitequant.engine import (
     make_risk_engine,
     market_closed_reject_decision,
     may_submit_domestic_order,
-    score_parts,
+    score_parts as _impl_score_parts,
 )
+
+# Module-level bindings so gma_*_sim.py wrappers can patch decision core.
+load_active_decision_config = _impl_load_active_decision_config
+FalconDecisionPipeline = _ImplFalconDecisionPipeline
+annotate_klines = _impl_annotate_klines
+score_parts = _impl_score_parts
 from ignitequant.execution import TargetPositionExecutor
 from ignitequant.market.cache import resolve_instrument
 from ignitequant.market.overseas_bars import (
     bars_dicts_to_dataframe,
     drop_forming_5m_bar,
+    fetch_decision_window_for_signal_source,
     fetch_for_signal_source,
 )
 from ignitequant.market.session import shfe_precious_session_open
@@ -95,6 +102,105 @@ RECON_EVERY_BARS = 12  # ~1 hour on 5m bars
 MAX_CONSECUTIVE_ERRORS = 5
 OVERSEAS_POLL_SECONDS = 20
 OVERSEAS_BAR_SECONDS = 300
+
+
+def apply_runtime_identity() -> None:
+    """Apply optional cockpit env so one script can run many strategy×symbol slots.
+
+    CLI ``python strategies/falcon_au_sim.py`` without env stays Falcon / 沪金 / TqKq.
+    """
+    global INSTANCE_ID, STRATEGY_ID, STRATEGY_LABEL, SIGNAL_SYMBOL, PERSIST_DB, PID_FILE
+
+    instance = os.environ.get("IQ_SIM_INSTANCE_ID", "").strip()
+    if instance:
+        INSTANCE_ID = instance
+    strategy = os.environ.get("IQ_SIM_STRATEGY_ID", "").strip()
+    if strategy:
+        STRATEGY_ID = strategy
+    label = os.environ.get("IQ_SIM_STRATEGY_LABEL", "").strip()
+    if label:
+        STRATEGY_LABEL = label
+    symbol_id = os.environ.get("IQ_SIM_SYMBOL_ID", "").strip().lower()
+    if symbol_id:
+        from ignitequant.market.symbols import instrument_by_id
+
+        SIGNAL_SYMBOL = instrument_by_id(symbol_id).signal_symbol
+    PERSIST_DB = ROOT / "data" / "runtime" / f"{INSTANCE_ID}.sqlite"
+    PID_FILE = PERSIST_DB.parent / f"{INSTANCE_ID}.pid"
+
+
+DEFAULT_SIM_INIT_BALANCE = 1_000_000.0
+
+
+def _sim_init_balance() -> float:
+    raw = os.environ.get("IQ_SIM_INIT_BALANCE", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return DEFAULT_SIM_INIT_BALANCE
+
+
+def _sim_account():
+    mode = os.environ.get("IQ_SIM_ACCOUNT", "tqkq").strip().lower()
+    if mode in {"tqsim", "sim", "local"}:
+        from tqsdk import TqSim
+
+        init_bal = _sim_init_balance()
+        print(
+            f"账户=TqSim（进程隔离 init={init_bal:,.0f}，供多策略并行）",
+            flush=True,
+        )
+        return TqSim(init_balance=init_bal)
+    return TqKq()
+
+
+def _seed_init_balance_if_needed(
+    persist: PersistenceSession | None,
+    payload: dict,
+    *,
+    symbol: str,
+    net: int,
+    pipeline: FalconDecisionPipeline,
+    config_hash: str,
+    account_balance: float,
+) -> dict:
+    """Each strategy×symbol instance keeps its own init_balance baseline."""
+    if persist is None or payload.get("init_balance") is not None:
+        return payload
+    mode = os.environ.get("IQ_SIM_ACCOUNT", "tqkq").strip().lower()
+    init_bal = (
+        _sim_init_balance()
+        if mode in {"tqsim", "sim", "local"}
+        else float(account_balance)
+    )
+    payload = {**payload, "init_balance": init_bal}
+    rs = pipeline.risk.state
+    persist.save_state(
+        symbol=symbol,
+        current_target=int(pipeline.current_target),
+        confirmed_net=int(net),
+        cooldown_left=int(rs.cooldown_left),
+        entry_price=rs.entry_price,
+        stop_price=rs.stop_price,
+        take_price=rs.take_price,
+        entry_signal=rs.entry_signal,
+        last_bar_id=str(payload.get("last_bar_id") or "boot"),
+        config_hash=config_hash,
+        extra={"init_balance": init_bal},
+    )
+    return payload
+
+
+def _sim_web_gui():
+    raw = os.environ.get("IQ_SIM_WEB_GUI")
+    if raw is None:
+        return WEB_GUI
+    value = raw.strip().lower()
+    if value in {"0", "false", "off", "none", ""}:
+        return False
+    return raw.strip()
 
 
 def _write_pid_file() -> None:
@@ -243,9 +349,10 @@ def _persist_state(
                 "display_entry_price",
                 "display_stop_price",
                 "display_take_price",
+                "init_balance",
             ):
                 if key in prev_payload and prev_payload[key] is not None:
-                    extra[key] = float(prev_payload[key])
+                    extra[key] = prev_payload[key]
         except Exception:
             pass
     session.save_state(
@@ -746,6 +853,7 @@ def _wait_fill_briefly(
 
 def main() -> None:
     load_dotenv(ROOT / ".env")
+    apply_runtime_identity()
     user = os.environ.get("TQ_USER", "").strip()
     password = os.environ.get("TQ_PASS", "").strip()
     if not user or not password:
@@ -766,19 +874,21 @@ def main() -> None:
     instrument = resolve_instrument(SIGNAL_SYMBOL)
     signal_source = resolve_signal_source(instrument)
     overseas_mode = signal_source.pricing_basis == "overseas"
+    web_gui = _sim_web_gui()
     print(
-        f"账户=TqKq | K线={KLINE_SECONDS // 60}分钟 | 仓位映射={LOT_BY_SIGNAL} | "
+        f"账户={'TqSim' if os.environ.get('IQ_SIM_ACCOUNT', 'tqkq').strip().lower() in {'tqsim', 'sim', 'local'} else 'TqKq'} | "
+        f"K线={KLINE_SECONDS // 60}分钟 | 仓位映射={LOT_BY_SIGNAL} | "
         f"pricing={signal_source.pricing_basis} "
         f"decision={signal_source.decision_symbol} exec={SIGNAL_SYMBOL} | "
         f"config={cfg.config_version} entry={cfg.entry_mode} | RiskEngine+Executor | "
         f"persist={'ON ' + str(PERSIST_DB) if persist else 'OFF'} | "
-        f"Web UI: http://127.0.0.1{WEB_GUI}",
+        f"Web UI: {'off' if web_gui is False else f'http://127.0.0.1{web_gui}'}",
         flush=True,
     )
 
     api = TqApi(
-        TqKq(),
-        web_gui=WEB_GUI,
+        _sim_account(),
+        web_gui=web_gui,
         auth=TqAuth(user, password),
     )
 
@@ -853,6 +963,15 @@ def main() -> None:
                     stop_price=payload.get("stop_price"),
                     take_price=payload.get("take_price"),
                     entry_signal=payload.get("entry_signal"),
+                )
+                payload = _seed_init_balance_if_needed(
+                    persist,
+                    payload,
+                    symbol=trade_symbol,
+                    net=_broker_net(position),
+                    pipeline=pipeline,
+                    config_hash=cfg.config_hash(),
+                    account_balance=float(account.balance),
                 )
                 # Stale flat pos with occupied margin / pending target → re-fetch.
                 pending_boot = payload.get("pending_desired")
@@ -1020,20 +1139,60 @@ def main() -> None:
                             source="broker_boot_flatten",
                         )
 
+            # Overseas decision clock first (GMA/Falcon au): catch-up + replay HTF
+            # must use the same price scale as live decisions. Domestic Tq klines
+            # here would poison prepare_replay and force HTF onto SHFE.au prices.
+            boot_klines = klines
+            boot_overseas_close: float | None = None
+            if overseas_mode:
+                live_bars, live_src = fetch_decision_window_for_signal_source(
+                    signal_source, limit=max(int(DATA_LENGTH), 400)
+                )
+                if live_bars:
+                    if len(live_bars) > 1:
+                        live_bars = drop_forming_5m_bar(live_bars, now=time.time())
+                    boot_klines = bars_dicts_to_dataframe(
+                        live_bars,
+                        underlying_symbol=signal_source.overseas_signal_symbol or "",
+                    )
+                    decision_klines = boot_klines
+                    last_seen_overseas_ts = int(live_bars[-1]["time"])
+                    try:
+                        boot_overseas_close = float(live_bars[-1]["close"])
+                        last_overseas_close = boot_overseas_close
+                    except (TypeError, ValueError, KeyError):
+                        boot_overseas_close = None
+                    print(
+                        f"启动外盘窗口 | source={live_src} bars={len(live_bars)} "
+                        f"symbol={signal_source.decision_symbol} "
+                        f"tip={boot_overseas_close}",
+                        flush=True,
+                    )
+
             # 启动补跑：把 last_bar_id 之后漏掉的已完成 5m K 写入决策链，并推进内存目标。
-            if persist is not None and len(klines) >= 2:
+            catch_up_frame = boot_klines if overseas_mode else klines
+            if persist is not None and len(catch_up_frame) >= 2:
                 try:
                     from ignitequant.engine.catch_up import catch_up_missed_bars
 
-                    completed = klines.iloc[:-1]
+                    completed = catch_up_frame.iloc[:-1]
                     last_id = str(payload.get("last_bar_id") or "") if payload else ""
+                    bootstrap_today = STRATEGY_ID.startswith("gma") and not last_id.strip()
+                    if hasattr(pipeline, "prepare_replay"):
+                        pipeline.prepare_replay(completed)
                     cu = catch_up_missed_bars(
                         session=persist,
                         pipeline=pipeline,
                         bars=completed,
                         last_bar_id=last_id or None,
                         confirmed_net=_broker_net(position),
-                        source="tq_startup_klines",
+                        data_length=DATA_LENGTH,
+                        source=(
+                            "overseas_startup_klines"
+                            if overseas_mode
+                            else "tq_startup_klines"
+                        ),
+                        bootstrap_today=bootstrap_today,
                     )
                     if cu.missed:
                         print(
@@ -1089,30 +1248,9 @@ def main() -> None:
                 except Exception as exc:  # noqa: BLE001
                     print(f"启动补跑跳过: {exc}", flush=True)
 
-            # Prefer overseas decision window on boot when pricing_basis=overseas.
-            boot_klines = klines
-            boot_overseas_close: float | None = None
-            if overseas_mode:
-                live_bars, live_src = fetch_for_signal_source(signal_source, limit=400)
-                if live_bars:
-                    if len(live_bars) > 1:
-                        live_bars = drop_forming_5m_bar(live_bars, now=time.time())
-                    boot_klines = bars_dicts_to_dataframe(
-                        live_bars,
-                        underlying_symbol=signal_source.overseas_signal_symbol or "",
-                    )
-                    decision_klines = boot_klines
-                    last_seen_overseas_ts = int(live_bars[-1]["time"])
-                    try:
-                        boot_overseas_close = float(live_bars[-1]["close"])
-                        last_overseas_close = boot_overseas_close
-                    except (TypeError, ValueError, KeyError):
-                        boot_overseas_close = None
-                    print(
-                        f"启动外盘窗口 | source={live_src} bars={len(live_bars)} "
-                        f"symbol={signal_source.decision_symbol}",
-                        flush=True,
-                    )
+            # Keep HTF replay cache on the same clock as live decisions.
+            if hasattr(pipeline, "prepare_replay") and len(boot_klines) >= 2:
+                pipeline.prepare_replay(boot_klines)
 
             boot_net = _broker_net(position)
             need_orphan_rearm = (
@@ -1426,7 +1564,9 @@ def main() -> None:
             if overseas_mode:
                 if now - last_overseas_poll >= OVERSEAS_POLL_SECONDS:
                     last_overseas_poll = now
-                    live_bars, live_src = fetch_for_signal_source(signal_source, limit=400)
+                    live_bars, live_src = fetch_decision_window_for_signal_source(
+                        signal_source, limit=max(int(DATA_LENGTH), 400)
+                    )
                     if live_bars:
                         # Decision clock uses completed 5m only (drop open bucket).
                         completed = drop_forming_5m_bar(live_bars, now=now)
@@ -1441,11 +1581,14 @@ def main() -> None:
                             new_bar = True
                             last_seen_overseas_ts = last_ts
                             cur_kline_ns = last_ts * 1_000_000_000
+                            if hasattr(pipeline, "prepare_replay"):
+                                pipeline.prepare_replay(decision_klines)
                             tip_age = max(0.0, now - last_ts - OVERSEAS_BAR_SECONDS)
                             print(
                                 f"[外盘K] source={live_src} bars={len(completed)} "
                                 f"last={datetime.datetime.fromtimestamp(last_ts):%Y-%m-%d %H:%M} "
-                                f"lag≈{tip_age:.0f}s session={session['label']}",
+                                f"lag≈{tip_age:.0f}s session={session['label']} "
+                                f"tip={float(completed[-1]['close']):.2f}",
                                 flush=True,
                             )
             else:

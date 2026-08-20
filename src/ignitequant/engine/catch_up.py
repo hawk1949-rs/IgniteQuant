@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,8 @@ from ignitequant.config import default_decision_config, load_active_decision_con
 from ignitequant.domain.models import PipelineResult
 from ignitequant.engine.decision_pipeline import FalconDecisionPipeline
 from ignitequant.persistence.session import PersistenceSession
+
+_CST = timezone(timedelta(hours=8))
 
 
 def parse_bar_id_ns(bar_id: str | None) -> int | None:
@@ -39,6 +41,37 @@ def parse_bar_id_ns(bar_id: str | None) -> int | None:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def cst_day_start_ns(now: datetime | None = None) -> int:
+    """Asia/Shanghai calendar-day start (00:00) as bar datetime ns."""
+    cst = datetime.now(_CST) if now is None else now.astimezone(_CST)
+    day_start = cst.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(day_start.timestamp() * 1_000_000_000)
+
+
+def build_catch_up_pipeline(
+    strategy_id: str,
+    signal_symbol: str,
+) -> tuple[Any, int, str]:
+    """Return (pipeline, data_length, persistence strategy_id)."""
+    sid = (strategy_id or "falcon_v2").strip()
+    if sid.startswith("gma"):
+        from ignitequant.strategies.gma import GMADecisionPipeline, load_gma_runtime
+
+        profile = "gma_v2" if sid == "gma_v2" else "gma_v1"
+        runtime = load_gma_runtime(profile)
+        cfg = replace(runtime.decision, entry_mode="fill_confirmed", symbol=signal_symbol)
+        return GMADecisionPipeline(cfg, runtime=runtime), 8000, sid
+    try:
+        cfg = load_active_decision_config()
+    except Exception:
+        cfg = default_decision_config()
+    try:
+        cfg = replace(cfg, entry_mode="fill_confirmed", symbol=signal_symbol)
+    except TypeError:
+        cfg = replace(cfg, symbol=signal_symbol)
+    return FalconDecisionPipeline(cfg), 400, sid
 
 
 @dataclass
@@ -153,13 +186,15 @@ def load_catch_up_bars(
 def catch_up_missed_bars(
     *,
     session: PersistenceSession,
-    pipeline: FalconDecisionPipeline,
+    pipeline: Any,
     bars: pd.DataFrame,
     last_bar_id: str | None,
     confirmed_net: int,
     data_length: int = 400,
     source: str = "",
     max_bars: int = 500,
+    bootstrap_today: bool = False,
+    bootstrap_from_ns: int | None = None,
 ) -> CatchUpResult:
     """Replay completed bars after last_bar_id; persist decisions; advance state.
 
@@ -177,22 +212,34 @@ def catch_up_missed_bars(
         return result
 
     after_ns = parse_bar_id_ns(last_bar_id)
-    # If never decided, only catch up the most recent few bars (avoid full history).
-    if after_ns is None:
-        # Keep warmup: process only last N completed bars as "missed" window? 
-        # Safer: if no last_bar_id, do nothing unless caller wants bootstrap.
-        result.message = "无 last_bar_id，跳过补跑（避免全历史重放）"
+    if after_ns is None and bootstrap_today and bootstrap_from_ns is None:
+        bootstrap_from_ns = cst_day_start_ns()
+    if after_ns is None and bootstrap_from_ns is not None:
+        idxs = [
+            i
+            for i, ns in enumerate(bars["datetime"].astype("int64").tolist())
+            if int(ns) >= int(bootstrap_from_ns)
+        ]
+        if not idxs:
+            result.message = "当日尚无已完成 K 线可补信号"
+            result.last_bar_id_after = last_bar_id
+            return result
+    elif after_ns is None:
+        result.message = "无 last_bar_id，跳过补跑（避免全历史重放；GMA 可用 bootstrap_today）"
         return result
+    else:
+        idxs = [
+            i
+            for i, ns in enumerate(bars["datetime"].astype("int64").tolist())
+            if int(ns) > after_ns
+        ]
+        if not idxs:
+            result.message = "没有漏掉的已完成 K 线"
+            result.last_bar_id_after = last_bar_id
+            return result
 
-    idxs = [
-        i
-        for i, ns in enumerate(bars["datetime"].astype("int64").tolist())
-        if int(ns) > after_ns
-    ]
-    if not idxs:
-        result.message = "没有漏掉的已完成 K 线"
-        result.last_bar_id_after = last_bar_id
-        return result
+    if hasattr(pipeline, "prepare_replay"):
+        pipeline.prepare_replay(bars)
 
     if len(idxs) > max_bars:
         idxs = idxs[-max_bars:]
@@ -239,10 +286,16 @@ def catch_up_missed_bars(
         result.final_applied_action = final.applied_action
         result.last_bar_id_after = final.bar_id
         if not result.message:
-            result.message = (
-                f"补跑完成：漏 {result.missed} 根，新记决策 {result.recorded}，"
-                f"已有跳过 {result.skipped_existing}；目标={result.final_target}"
-            )
+            if bootstrap_from_ns is not None and after_ns is None:
+                result.message = (
+                    f"当日补信号完成：共 {result.missed} 根，新记决策 {result.recorded}，"
+                    f"已有跳过 {result.skipped_existing}；目标={result.final_target}"
+                )
+            else:
+                result.message = (
+                    f"补跑完成：漏 {result.missed} 根，新记决策 {result.recorded}，"
+                    f"已有跳过 {result.skipped_existing}；目标={result.final_target}"
+                )
     return result
 
 
@@ -250,10 +303,12 @@ def catch_up_session_db(
     db_path: Path | str,
     instance_id: str,
     *,
+    strategy_id: str = "falcon_v2",
     runtime_dir: Path | None = None,
     root: Path | None = None,
     signal_symbol: str = "KQ.m@SHFE.au",
     max_bars: int = 500,
+    bootstrap_today: bool = False,
 ) -> CatchUpResult:
     """Open local sqlite, load bars, restore pipeline, catch up (no live orders)."""
     path = Path(db_path)
@@ -273,18 +328,20 @@ def catch_up_session_db(
             message="无 K 线来源（需要 *.klines.json 或 market_cache）",
         )
 
-    try:
-        cfg = load_active_decision_config()
-    except Exception:
-        cfg = default_decision_config()
-    cfg = replace(cfg, symbol=signal_symbol)
+    pipeline, data_length, persist_strategy_id = build_catch_up_pipeline(
+        strategy_id,
+        signal_symbol,
+    )
 
-    session = PersistenceSession.open(path, instance_id=instance_id, strategy_id="falcon_v2")
+    session = PersistenceSession.open(
+        path,
+        instance_id=instance_id,
+        strategy_id=persist_strategy_id,
+    )
     try:
         state = session.repo.load_strategy_state(instance_id)
         payload = dict(state.payload) if state else {}
         confirmed = int(payload.get("confirmed_net", 0))
-        pipeline = FalconDecisionPipeline(cfg)
         pipeline.restore_runtime(
             current_target=int(payload.get("current_target", confirmed)),
             cooldown_left=int(payload.get("cooldown_left", 0)),
@@ -301,8 +358,10 @@ def catch_up_session_db(
             bars=bars,
             last_bar_id=payload.get("last_bar_id"),
             confirmed_net=confirmed,
+            data_length=data_length,
             source=source,
             max_bars=max_bars,
+            bootstrap_today=bootstrap_today,
         )
         try:
             from ignitequant.persistence.cloud_sync import try_push_outbox

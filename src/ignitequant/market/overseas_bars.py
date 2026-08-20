@@ -363,6 +363,114 @@ def fetch_for_signal_source(
     )
 
 
+def dataframe_to_bar_dicts(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    if frame is None or frame.empty:
+        return []
+    try:
+        ns = frame["datetime"].to_numpy(dtype="int64", copy=False)
+        times = (ns // 1_000_000_000).astype(int)
+        opens = frame["open"].to_numpy(dtype=float, copy=False)
+        highs = frame["high"].to_numpy(dtype=float, copy=False)
+        lows = frame["low"].to_numpy(dtype=float, copy=False)
+        closes = frame["close"].to_numpy(dtype=float, copy=False)
+        vols = frame["volume"].fillna(0).to_numpy(dtype=float, copy=False)
+        return [
+            {
+                "time": int(times[i]),
+                "open": float(opens[i]),
+                "high": float(highs[i]),
+                "low": float(lows[i]),
+                "close": float(closes[i]),
+                "volume": float(vols[i]),
+            }
+            for i in range(len(times))
+        ]
+    except (TypeError, ValueError, KeyError):
+        out: list[dict[str, Any]] = []
+        for _, row in frame.iterrows():
+            try:
+                ns_i = int(row["datetime"])
+                t = ns_i // 1_000_000_000
+                out.append(
+                    {
+                        "time": t,
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                        "volume": float(row["volume"] or 0),
+                    }
+                )
+            except (TypeError, ValueError, KeyError):
+                continue
+        return out
+
+
+# Backward-compatible alias for internal callers.
+_dataframe_to_bar_dicts = dataframe_to_bar_dicts
+
+
+def merge_overseas_bars(
+    older: list[dict[str, Any]],
+    newer: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Merge cache + live bars by open time; newer wins on overlap."""
+    by_t: dict[int, dict[str, Any]] = {}
+    for b in older:
+        try:
+            by_t[int(b["time"])] = b
+        except (TypeError, ValueError, KeyError):
+            continue
+    for b in newer:
+        try:
+            by_t[int(b["time"])] = b
+        except (TypeError, ValueError, KeyError):
+            continue
+    times = sorted(by_t)
+    if limit > 0:
+        times = times[-int(limit) :]
+    return [by_t[t] for t in times]
+
+
+def fetch_decision_window_for_signal_source(
+    source: SignalSource,
+    *,
+    limit: int = 8000,
+    live_limit: int = 400,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Build a deep overseas decision window: market_cache history + live tip.
+
+    Live eastmoney/yahoo feeds typically return only a few hundred 5m bars, which
+    is not enough for GMA HTF TenW (HMA 90 on 4h). Prepend archived XAUUSD cache.
+    """
+    if source.pricing_basis != "overseas":
+        return [], None
+    live_cap = max(10, min(int(live_limit), int(limit)))
+    live, live_src = fetch_for_signal_source(source, limit=live_cap)
+    cached: list[dict[str, Any]] = []
+    if source.overseas_signal_symbol:
+        frame = load_overseas_cache_bars(
+            source.overseas_signal_symbol, duration_seconds=300
+        )
+        if not frame.empty:
+            # Only need the tail of cache that can contribute to the window.
+            if len(frame) > int(limit) + 50:
+                frame = frame.iloc[-(int(limit) + 50) :].copy()
+            cached = _dataframe_to_bar_dicts(frame)
+    if not live and not cached:
+        return [], None
+    merged = merge_overseas_bars(cached, live, limit=max(int(limit), 1))
+    if live_src and cached:
+        source_label = f"{live_src}+market_cache"
+    elif live_src:
+        source_label = live_src
+    else:
+        source_label = "market_cache"
+    return merged, source_label
+
+
 def bars_dicts_to_dataframe(
     bars: list[dict[str, Any]],
     *,
