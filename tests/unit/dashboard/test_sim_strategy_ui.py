@@ -32,6 +32,22 @@ def test_gma_format_factor_summary_reads_replay_meta_fields() -> None:
     assert "POC 881.50" in summary
 
 
+def test_gma_format_factor_summary_marks_overseas_poc() -> None:
+    summary = GMA_V1_UI.format_factor_summary(
+        regime="TREND_UP",
+        quality="READY",
+        values={"alignment": 2.0, "close": 4490.0, "poc": 4046.5, "_chart_close": 973.0},
+    )
+    assert "外盘POC 4046.50" in summary
+    domestic = GMA_V1_UI.format_factor_summary(
+        regime="TREND_UP",
+        quality="READY",
+        values={"alignment": 2.0, "close": 973.0, "poc": 972.5, "_chart_close": 973.0},
+    )
+    assert "外盘POC" not in domestic
+    assert "POC 972.50" in domestic
+
+
 def test_build_chart_context_prefers_live_decision() -> None:
     decision = {
         "regime": "RANGE",

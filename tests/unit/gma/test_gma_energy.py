@@ -162,6 +162,19 @@ def test_v2_profile_enables_energy() -> None:
     assert v1.indicators.energy_enabled is False
 
 
+def test_pipeline_loads_v2_indicators_from_decision_config() -> None:
+    """Sim shell only passes DecisionConfig; indicators must follow config_version."""
+    from ignitequant.strategies.gma.pipeline import GMADecisionPipeline
+
+    runtime = load_gma_runtime("gma_v2")
+    pipe = GMADecisionPipeline(runtime.decision)
+    assert pipe.runtime.indicators.energy_enabled is True
+    assert pipe.config.config_version == "gma_v2"
+
+    v1_pipe = GMADecisionPipeline(load_gma_runtime("gma_v1").decision)
+    assert v1_pipe.runtime.indicators.energy_enabled is False
+
+
 def test_energy_disabled_matches_v1_generate_signal() -> None:
     from tests.unit.gma.test_gma_core import _bars
 

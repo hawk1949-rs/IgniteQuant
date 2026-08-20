@@ -311,8 +311,15 @@ class GmaUIProfile(StrategyUIProfile):
             _quality_label(quality),
         ]
         poc = _finite(vals.get("poc")) or _finite(vals.get("gma_poc"))
+        # Prefer the visible chart candle when present (domestic ~970 vs overseas ~4500).
+        chart_close = _finite(vals.get("_chart_close"))
+        signal_close = _finite(vals.get("close")) or _finite(vals.get("gma_close"))
         if poc is not None:
-            parts.append(f"POC {poc:.2f}")
+            ref = chart_close if chart_close is not None else signal_close
+            if ref is not None and not _same_price_scale(poc, ref):
+                parts.append(f"外盘POC {poc:.2f}")
+            else:
+                parts.append(f"POC {poc:.2f}")
         return " · ".join(p for p in parts if p and p != "—")
 
     def replay_bar_meta(self, bars: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -581,9 +588,13 @@ def build_chart_context(
     *,
     latest_decision: Mapping[str, Any] | None = None,
     short_bias: str | None = None,
+    chart_close: float | None = None,
 ) -> dict[str, Any] | None:
     """Strategy-aware chart context; prefers persisted decision over replay."""
     profile = resolve_strategy_ui(strategy_id)
+    tip_close = chart_close
+    if tip_close is None and bars:
+        tip_close = _finite(bars[-1].get("close"))
     if latest_decision:
         factors = latest_decision.get("factor_values") or {}
         if not isinstance(factors, dict):
@@ -592,6 +603,9 @@ def build_chart_context(
             factors = inner.get("values") if isinstance(inner, dict) else {}
             if not isinstance(factors, dict):
                 factors = {}
+        values = dict(factors)
+        if tip_close is not None:
+            values["_chart_close"] = tip_close
         regime = latest_decision.get("regime")
         quality = None
         payload = latest_decision.get("payload") or {}
@@ -607,7 +621,7 @@ def build_chart_context(
             "factor_summary": profile.format_factor_summary(
                 regime=str(regime) if regime else None,
                 quality=str(quality) if quality else None,
-                values=factors,
+                values=values,
             ),
             "score_parts_schema": profile.score_parts_schema,
             "source": "live_decision",
@@ -619,6 +633,9 @@ def build_chart_context(
     if not replay:
         return None
     last = replay[-1]
+    values = {k: last.get(k) for k in last if k not in {"time", "source", "signal", "score_parts", "regime"}}
+    if tip_close is not None:
+        values["_chart_close"] = tip_close
     return {
         "strategy_id": strategy_id,
         "regime": last.get("regime"),
@@ -626,7 +643,7 @@ def build_chart_context(
         "factor_summary": profile.format_factor_summary(
             regime=str(last.get("regime")) if last.get("regime") else None,
             quality=FactorQuality.READY.value,
-            values={k: last.get(k) for k in last if k not in {"time", "source", "signal", "score_parts", "regime"}},
+            values=values,
         ),
         "score_parts_schema": profile.score_parts_schema,
         "source": "replay",

@@ -57,6 +57,14 @@ def _alignment_regime(alignment: Alignment, direction: int) -> Regime:
     return Regime.TREND_DOWN
 
 
+def _gma_profile_from_decision(config: DecisionConfig) -> str | None:
+    for key in (getattr(config, "config_version", None), getattr(config, "decision_mode", None)):
+        text = str(key or "").strip()
+        if text.startswith("gma"):
+            return text
+    return None
+
+
 class GMADecisionPipeline:
     """Bar-by-bar GMA core. Same runner-facing surface as FalconDecisionPipeline."""
 
@@ -65,12 +73,25 @@ class GMADecisionPipeline:
         config: DecisionConfig | None = None,
         runtime: GMARuntimeConfig | None = None,
     ) -> None:
-        self.runtime = runtime or load_gma_runtime()
-        if config is not None:
+        if runtime is not None:
+            self.runtime = runtime
+            if config is not None:
+                self.runtime = GMARuntimeConfig(
+                    indicators=runtime.indicators,
+                    decision=config,
+                )
+        elif config is not None:
+            # Falcon sim shell only passes DecisionConfig. Resolve indicators from
+            # decision_mode / config_version (gma_v1 vs gma_v2), otherwise v2
+            # would silently run with v1 indicators (energy_enabled=false).
+            profile = _gma_profile_from_decision(config)
+            base = load_gma_runtime(profile)
             self.runtime = GMARuntimeConfig(
-                indicators=self.runtime.indicators,
+                indicators=base.indicators,
                 decision=config,
             )
+        else:
+            self.runtime = load_gma_runtime()
         self.config = self.runtime.decision
         self.risk = RiskManager(**self.config.risk_kwargs())
         self.current_target = 0
