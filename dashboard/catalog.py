@@ -31,7 +31,10 @@ STRATEGIES: dict[str, StrategyInfo] = {
     "falcon_v2": StrategyInfo(
         id="falcon_v2",
         name="Falcon v2",
-        description="ADX 行情状态 + 格兰维尔/量能/KDJ 评分 + ATR 止盈止损（5 分钟）",
+        description=(
+            "ADX 行情状态 + 格兰维尔/量能/KDJ 评分 + ATR 止盈止损（5 分钟）。"
+            "决策档案默认 falcon_legacy_v1（legacy_compatible），可用 FALCON_PROFILE 切换。"
+        ),
         runner="run_falcon_v2",
     ),
     "gma_v1": StrategyInfo(

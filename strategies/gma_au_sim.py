@@ -23,6 +23,7 @@ from ignitequant.strategies.gma import (
     gma_score_parts,
     load_gma_runtime,
 )
+from ignitequant.strategies.gma.config import GMARuntimeConfig
 
 sim.INSTANCE_ID = "gma_au_sim"
 sim.STRATEGY_ID = "gma_v1"
@@ -30,17 +31,29 @@ sim.STRATEGY_LABEL = "GMA v1"
 sim.PERSIST_DB = ROOT / "data" / "runtime" / "gma_au_sim.sqlite"
 sim.PID_FILE = sim.PERSIST_DB.parent / f"{sim.INSTANCE_ID}.pid"
 sim.DATA_LENGTH = 8000
-sim.FalconDecisionPipeline = GMADecisionPipeline
 sim.annotate_klines = annotate_gma_klines
 sim.score_parts = gma_score_parts
 
 
 def _load_gma_decision_config():
-    runtime = load_gma_runtime()
+    runtime = load_gma_runtime("gma_v1")
     return replace(runtime.decision, entry_mode="fill_confirmed")
 
 
+def _gma_v1_pipeline(config=None, runtime=None):  # type: ignore[no-untyped-def]
+    base = load_gma_runtime("gma_v1")
+    if runtime is not None:
+        return GMADecisionPipeline(config, runtime=runtime)
+    if config is not None:
+        return GMADecisionPipeline(
+            config,
+            runtime=GMARuntimeConfig(indicators=base.indicators, decision=config),
+        )
+    return GMADecisionPipeline(runtime=base)
+
+
 sim.load_active_decision_config = _load_gma_decision_config
+sim.FalconDecisionPipeline = _gma_v1_pipeline  # type: ignore[assignment]
 
 
 if __name__ == "__main__":
