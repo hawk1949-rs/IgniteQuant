@@ -191,6 +191,10 @@ export function OverviewPanel() {
     summary?.read_only_hint ||
     '当前为云端只读座舱：决策/意图/成交来自 Supabase 投影；请在交易机运行模拟盘推送。'
   const isGmaStrategy = strategyId.startsWith('gma')
+  const showEnergyProfile =
+    strategyId === 'gma_v2' ||
+    bars?.score_parts_schema === 'gma_v2' ||
+    Boolean(bars?.energy_profile?.bins?.length)
   const [catchingUp, setCatchingUp] = useState(false)
   const selectedSymbol = catalog?.symbols?.find((s) => s.id === symbolId)
   const launcherSymbolId =
@@ -1092,6 +1096,8 @@ export function OverviewPanel() {
               overlaySpecs={domesticChart.overlaySpecs}
               barMeta={domesticChart.barMeta}
               priceLines={domesticChart.priceLines}
+              energyProfile={chartTf === '5m' ? bars?.energy_profile : null}
+              showEnergyProfile={showEnergyProfile}
               height={chartHeight}
               onLoadMore={() => {
                 void loadMoreHistory()
@@ -1142,6 +1148,8 @@ export function OverviewPanel() {
                 overlays={overseasChart.overlays}
                 overlaySpecs={overseasChart.overlaySpecs}
                 barMeta={overseasChart.barMeta}
+                energyProfile={chartTf === '5m' ? overseas?.energy_profile : null}
+                showEnergyProfile={showEnergyProfile}
                 height={chartHeight}
                 onLoadMore={() => {
                   void loadMoreOverseasHistory()

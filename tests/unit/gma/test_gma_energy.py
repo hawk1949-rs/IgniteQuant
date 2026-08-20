@@ -183,3 +183,33 @@ def test_energy_disabled_matches_v1_generate_signal() -> None:
     a = generate_signal(bars, indicators=off, current_target=0)
     b = generate_signal(bars, indicators=GMAIndicatorConfig(), current_target=0)
     assert a == b
+
+
+def test_volume_profile_returns_histogram_bins() -> None:
+    from ignitequant.strategies.gma.indicators import volume_profile
+
+    n = 40
+    high = np.linspace(100, 110, n)
+    low = high - 1.5
+    close = (high + low) / 2
+    volume = np.full(n, 10.0)
+    volume[15:25] = 80.0
+    vp = volume_profile(high, low, close, volume, bins=50, value_pct=0.7)
+    assert vp.histogram
+    assert vp.poc is not None
+    assert vp.vah is not None and vp.val is not None
+    assert vp.vah >= vp.poc >= vp.val
+    assert sum(b.volume for b in vp.histogram) > 0
+
+
+def test_teaching_vp_defaults_match_energy_pdf() -> None:
+    """《能量分布详解》: VA=70%, Visible Bars 分箱≈50。"""
+    from ignitequant.strategies.gma.config import GMAIndicatorConfig, load_gma_runtime
+
+    cfg = GMAIndicatorConfig()
+    assert cfg.vp_bins == 50
+    assert abs(cfg.vp_value_pct - 0.70) < 1e-9
+    v2 = load_gma_runtime("gma_v2").indicators
+    assert v2.vp_bins == 50
+    assert abs(v2.vp_value_pct - 0.70) < 1e-9
+    assert v2.energy_enabled is True

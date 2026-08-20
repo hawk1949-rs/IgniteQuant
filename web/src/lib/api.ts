@@ -591,6 +591,28 @@ export type SimPriceLine = {
   color: string
 }
 
+export type SimEnergyBin = {
+  price_low: number
+  price_high: number
+  volume: number
+  in_va: boolean
+  is_poc?: boolean
+}
+
+export type SimEnergyProfile = {
+  poc: number | null
+  vah: number | null
+  val: number | null
+  edge_high?: number | null
+  edge_low?: number | null
+  gap_high?: number | null
+  gap_low?: number | null
+  bins: SimEnergyBin[]
+  mode?: string
+  bins_count?: number
+  value_pct?: number
+}
+
 export type SimBarsResponse = {
   instance_id?: string
   symbol_id?: string
@@ -621,6 +643,7 @@ export type SimBarsResponse = {
   score_parts_schema?: string
   bar_meta?: SimBarMeta[]
   price_lines?: SimPriceLine[]
+  energy_profile?: SimEnergyProfile | null
   has_more?: boolean
   source?: string | null
   last_price?: number | null
@@ -658,6 +681,8 @@ export type SimOverseasBars = {
   overlays?: SimChartOverlays
   overlay_specs?: SimOverlaySpec[]
   bar_meta?: SimBarMeta[]
+  score_parts_schema?: string
+  energy_profile?: SimEnergyProfile | null
   has_more?: boolean
   last_price?: number | null
   last_bar_open?: number | null

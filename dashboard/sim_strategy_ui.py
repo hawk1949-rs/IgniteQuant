@@ -109,6 +109,13 @@ class StrategyUIProfile:
         """Attach strategy-specific overlay fields from a persisted decision."""
         del live, values, item  # default: no extra fields
 
+    def energy_profile(
+        self, bars: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any] | None:
+        """Optional right-side volume-profile payload for cockpit charts."""
+        del bars
+        return None
+
 
 def _finite(value: Any) -> float | None:
     try:
@@ -376,9 +383,9 @@ class GmaUIProfile(StrategyUIProfile):
 
         out: list[dict[str, Any]] = []
         lookback = max(8, int(ind.vp_lookback_15m))
-        # VP is relatively expensive; only fill POC for the tip window used by the chart.
+        # VP is relatively expensive; only fill POC/VA for the tip window used by the chart.
         poc_from = max(0, len(rows) - 160)
-        poc_by_j: dict[int, float] = {}
+        vp_by_j: dict[int, dict[str, float]] = {}
         for i, row in enumerate(rows):
             t = int(row["datetime"] // 1_000_000_000)
             meta: dict[str, Any] = {
@@ -390,6 +397,8 @@ class GmaUIProfile(StrategyUIProfile):
                 "gma_slow": None,
                 "gma_mid": None,
                 "gma_poc": None,
+                "gma_vah": None,
+                "gma_val": None,
                 "atr": None,
                 "close": _finite(row.get("close")),
                 "source": "replay",
@@ -401,7 +410,7 @@ class GmaUIProfile(StrategyUIProfile):
                     meta["gma_fast"] = _nan_to_none(float(f15[j])) if j < len(f15) else None
                     meta["gma_slow"] = _nan_to_none(float(s15[j])) if j < len(s15) else None
                     if i >= poc_from and j + 1 >= lookback and m15 is not None:
-                        if j not in poc_by_j:
+                        if j not in vp_by_j:
                             sl = m15.iloc[max(0, j + 1 - lookback) : j + 1]
                             try:
                                 vp = volume_profile(
@@ -414,12 +423,24 @@ class GmaUIProfile(StrategyUIProfile):
                                 )
                                 poc = _finite(vp.poc)
                                 if poc is not None:
-                                    poc_by_j[j] = poc
+                                    entry: dict[str, float] = {"poc": poc}
+                                    vah = _finite(vp.vah)
+                                    val = _finite(vp.val)
+                                    if vah is not None:
+                                        entry["vah"] = vah
+                                    if val is not None:
+                                        entry["val"] = val
+                                    vp_by_j[j] = entry
                             except Exception:
                                 pass
-                        if j in poc_by_j:
-                            meta["gma_poc"] = poc_by_j[j]
-                            meta["poc"] = meta["gma_poc"]
+                        if j in vp_by_j:
+                            levels = vp_by_j[j]
+                            meta["gma_poc"] = levels["poc"]
+                            meta["poc"] = levels["poc"]
+                            if "vah" in levels:
+                                meta["gma_vah"] = levels["vah"]
+                            if "val" in levels:
+                                meta["gma_val"] = levels["val"]
             if len(t1):
                 k = int(np.searchsorted(t1, t, side="right") - 1)
                 if k >= 0:
@@ -446,6 +467,8 @@ class GmaUIProfile(StrategyUIProfile):
             "m15_slow": "gma_slow",
             "h1_mid": "gma_mid",
             "poc": "gma_poc",
+            "vah": "gma_vah",
+            "val": "gma_val",
             "atr": "atr",
         }
         for src, dst in mapping.items():
@@ -455,6 +478,69 @@ class GmaUIProfile(StrategyUIProfile):
             item[dst] = float(val) * scale
         if scale != 1.0 and signal_close is not None and chart_close is not None:
             item["close"] = chart_close
+
+    def energy_profile(
+        self, bars: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any] | None:
+        """Visible-window volume profile for the right-side energy histogram."""
+        from ignitequant.strategies.gma import load_gma_runtime
+        from ignitequant.strategies.gma.indicators import volume_profile
+
+        if len(bars) < 8:
+            return None
+        runtime = load_gma_runtime(self.runtime_profile)
+        ind = runtime.indicators
+        # Histogram is the GMA 2.0 energy view; v1 keeps POC line only.
+        if not bool(getattr(ind, "energy_enabled", False)):
+            return None
+        high = np.array([float(b["high"]) for b in bars], dtype=float)
+        low = np.array([float(b["low"]) for b in bars], dtype=float)
+        close = np.array([float(b["close"]) for b in bars], dtype=float)
+        volume = np.array([float(b.get("volume") or 0) for b in bars], dtype=float)
+        vp = volume_profile(
+            high,
+            low,
+            close,
+            volume,
+            bins=ind.vp_bins,
+            value_pct=ind.vp_value_pct,
+        )
+        if not vp.histogram:
+            return None
+        vah = _finite(vp.vah)
+        val = _finite(vp.val)
+        poc = _finite(vp.poc)
+        bins_out: list[dict[str, Any]] = []
+        for row in vp.histogram:
+            mid = 0.5 * (row.price_low + row.price_high)
+            in_va = True
+            if vah is not None and val is not None:
+                in_va = float(val) <= mid <= float(vah)
+            is_poc = poc is not None and abs(mid - float(poc)) <= max(
+                (row.price_high - row.price_low) * 0.51, 1e-9
+            )
+            bins_out.append(
+                {
+                    "price_low": float(row.price_low),
+                    "price_high": float(row.price_high),
+                    "volume": float(row.volume),
+                    "in_va": in_va,
+                    "is_poc": is_poc,
+                }
+            )
+        return {
+            "poc": poc,
+            "vah": vah,
+            "val": val,
+            "edge_high": _finite(vp.edge_high),
+            "edge_low": _finite(vp.edge_low),
+            "gap_high": _finite(vp.gap_high),
+            "gap_low": _finite(vp.gap_low),
+            "bins": bins_out,
+            "mode": "Visible Bars",
+            "bins_count": int(ind.vp_bins),
+            "value_pct": float(ind.vp_value_pct),
+        }
 
 
 @dataclass(frozen=True)
@@ -521,7 +607,9 @@ GMA_V2_UI = GmaUIProfile(
         OverlayLineSpec("gma_fast", "15m快", "#64d2ff"),
         OverlayLineSpec("gma_slow", "15m慢", "#ffd60a"),
         OverlayLineSpec("gma_mid", "1H中", "#bf5af2"),
-        OverlayLineSpec("gma_poc", "POC", "#ff9f0a"),
+        OverlayLineSpec("gma_poc", "POC", "#bf5af2"),
+        OverlayLineSpec("gma_vah", "VAH", "#30d158"),
+        OverlayLineSpec("gma_val", "VAL", "#30d158"),
         OverlayLineSpec("signal", "信号", "#30d158", pane="signal"),
     ),
     warmup_bars=200,

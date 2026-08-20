@@ -182,6 +182,13 @@ def tenw_state(close: np.ndarray, *, fast_period: int, slow_period: int) -> TenW
 
 
 @dataclass(frozen=True)
+class VolumeBin:
+    price_low: float
+    price_high: float
+    volume: float
+
+
+@dataclass(frozen=True)
 class VolumeProfile:
     poc: float | None
     vah: float | None
@@ -190,6 +197,7 @@ class VolumeProfile:
     edge_low: float | None
     gap_high: float | None
     gap_low: float | None
+    histogram: tuple[VolumeBin, ...] = ()
 
 
 def volume_profile(
@@ -198,17 +206,21 @@ def volume_profile(
     close: np.ndarray,
     volume: np.ndarray,
     *,
-    bins: int = 48,
+    bins: int = 50,
     value_pct: float = 0.70,
 ) -> VolumeProfile:
-    """Visible-window Volume Profile (能量分布): POC / 70% VA / histogram gaps."""
+    """Visible-window Volume Profile (能量分布): POC / 70% VA / histogram gaps.
+
+    Teaching defaults: Visible Bars window, ~50 price rows, VA=70%.
+    """
+    empty: tuple[VolumeBin, ...] = ()
     if len(close) == 0:
-        return VolumeProfile(None, None, None, None, None, None, None)
+        return VolumeProfile(None, None, None, None, None, None, None, empty)
     lo = float(np.nanmin(low))
     hi = float(np.nanmax(high))
     if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
         last = float(close[-1])
-        return VolumeProfile(last, last, last, last, last, None, None)
+        return VolumeProfile(last, last, last, last, last, None, None, empty)
     edges = np.linspace(lo, hi, bins + 1)
     hist = np.zeros(bins, dtype=float)
     for h, l, v in zip(high, low, volume):
@@ -221,7 +233,7 @@ def volume_profile(
         hist[left : right + 1] += vol / span
     if hist.sum() <= 0:
         last = float(close[-1])
-        return VolumeProfile(last, last, last, hi, lo, None, None)
+        return VolumeProfile(last, last, last, hi, lo, None, None, empty)
     poc_i = int(np.argmax(hist))
     centers = (edges[:-1] + edges[1:]) / 2.0
     poc = float(centers[poc_i])
@@ -250,7 +262,16 @@ def volume_profile(
         valley = int(np.argmin(rel))
         if 0 < valley < len(rel) - 1 and rel[valley] < 0.25:
             gap_low = float(centers[valley])
-    return VolumeProfile(poc, vah, val, hi, lo, gap_high, gap_low)
+    histogram = tuple(
+        VolumeBin(
+            price_low=float(edges[i]),
+            price_high=float(edges[i + 1]),
+            volume=float(hist[i]),
+        )
+        for i in range(bins)
+        if hist[i] > 0
+    )
+    return VolumeProfile(poc, vah, val, hi, lo, gap_high, gap_low, histogram)
 
 
 def last_valid(values: np.ndarray) -> float | None:

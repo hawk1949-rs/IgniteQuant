@@ -101,6 +101,31 @@ def test_build_chart_enrichment_trims_to_visible() -> None:
     assert len(enrichment["bar_meta"]) == 40
     assert enrichment["bar_meta"][0]["time"] == visible[0]["time"]
     assert enrichment["overlays"]["ma52"]
+    assert enrichment.get("energy_profile") is None
+
+
+def test_gma_v2_enrichment_includes_energy_histogram() -> None:
+    """GMA 2.0 chart payload must carry right-side volume-profile bins."""
+    all_bars = _synthetic_bars(80)
+    visible = all_bars[-40:]
+    enrichment = build_chart_enrichment(visible, all_bars, strategy_id="gma_v2")
+    profile = enrichment.get("energy_profile")
+    assert profile is not None
+    assert profile["bins"]
+    assert profile["poc"] is not None
+    assert profile["vah"] is not None
+    assert profile["val"] is not None
+    assert any(b.get("in_va") for b in profile["bins"])
+    assert enrichment["overlay_specs"]
+    keys = {s["key"] for s in enrichment["overlay_specs"]}
+    assert {"gma_poc", "gma_vah", "gma_val"} <= keys
+
+
+def test_gma_v1_enrichment_skips_energy_histogram() -> None:
+    all_bars = _synthetic_bars(80)
+    visible = all_bars[-40:]
+    enrichment = build_chart_enrichment(visible, all_bars, strategy_id="gma_v1")
+    assert enrichment.get("energy_profile") is None
 
 
 def test_assemble_visible_without_cache() -> None:

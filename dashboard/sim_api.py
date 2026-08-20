@@ -817,6 +817,7 @@ def _empty_chart_enrichment(strategy_id: str = "falcon_v2") -> dict[str, Any]:
         "bar_meta": [],
         "price_lines": [],
         "score_parts_schema": profile.score_parts_schema,
+        "energy_profile": None,
     }
 
 
@@ -2284,6 +2285,7 @@ def overseas_bars(
         "overlay_specs": enrichment.get("overlay_specs") or [],
         "bar_meta": enrichment["bar_meta"],
         "score_parts_schema": enrichment.get("score_parts_schema"),
+        "energy_profile": enrichment.get("energy_profile"),
         "has_more": has_more,
         "last_price": last_price,
         "last_bar_open": last_open,
@@ -2438,6 +2440,7 @@ def market_bars(
         "bar_meta": enrichment["bar_meta"],
         "price_lines": enrichment["price_lines"],
         "score_parts_schema": enrichment.get("score_parts_schema"),
+        "energy_profile": enrichment.get("energy_profile"),
         "last_price": float(last_price) if last_price is not None else None,
         "last_price_source": source,
         "updated_at": (snap or {}).get("updated_at"),
@@ -2688,6 +2691,7 @@ def session_bars(
             "bar_meta": enrichment["bar_meta"],
             "price_lines": enrichment["price_lines"],
             "score_parts_schema": enrichment.get("score_parts_schema"),
+            "energy_profile": enrichment.get("energy_profile"),
             "last_price": last_price,
             "last_price_source": "cloud_payload" if last_price else None,
             "last_price_as_of": None,
@@ -2856,6 +2860,7 @@ def session_bars(
             "bar_meta": enrichment["bar_meta"],
             "price_lines": enrichment["price_lines"],
             "score_parts_schema": enrichment.get("score_parts_schema"),
+            "energy_profile": enrichment.get("energy_profile"),
             "last_price": float(last_price) if last_price is not None else None,
             "last_price_source": live["last_price_source"] or assembled_source,
             "last_price_as_of": live["last_price_as_of"] or ((snap or {}).get("updated_at")),

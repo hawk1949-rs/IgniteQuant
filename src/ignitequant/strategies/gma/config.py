@@ -45,7 +45,7 @@ class GMAIndicatorConfig:
     donchian_mid: int = 444
     donchian_long: int = 1600
     vp_lookback_15m: int = 96
-    vp_bins: int = 48
+    vp_bins: int = 50
     vp_value_pct: float = 0.70
     pullback_near_pct: float = 0.002
     breakout_lookback: int = 20

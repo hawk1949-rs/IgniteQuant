@@ -12,7 +12,14 @@ import {
   type LineData,
   type Time,
 } from 'lightweight-charts'
-import type { SimBarMeta, SimChartOverlays, SimOverlaySpec, SimPriceLine } from '../../lib/api'
+import type {
+  SimBarMeta,
+  SimChartOverlays,
+  SimEnergyProfile,
+  SimOverlaySpec,
+  SimPriceLine,
+} from '../../lib/api'
+import { computeEnergyProfile, type EnergyProfile } from './energyProfile'
 import { DEFAULT_OVERLAY_SPECS, resolveOverlaySpecs } from './strategyPresentation'
 
 export type MiniBar = {
@@ -39,6 +46,9 @@ type Props = {
   overlaySpecs?: SimOverlaySpec[] | null
   barMeta?: SimBarMeta[] | null
   priceLines?: SimPriceLine[] | null
+  /** GMA 2.0 right-side volume profile; recomputed from visible bars when omitted. */
+  energyProfile?: SimEnergyProfile | null
+  showEnergyProfile?: boolean
   height?: number
   showSignalPane?: boolean
   onLoadMore?: () => void
@@ -168,6 +178,117 @@ function sourceLabel(source?: string | null): string {
   return source || '—'
 }
 
+const ENERGY_WIDTH = 128
+/** 教程配色：VA 内绿、边缘灰、POC 紫、缺口亮绿 */
+const ENERGY_COLORS = {
+  va: 'rgba(34, 140, 70, 0.72)',
+  edge: 'rgba(120, 120, 128, 0.55)',
+  poc: 'rgba(191, 90, 242, 0.95)',
+  vahVal: '#30d158',
+  gap: '#00e676',
+  volumeText: 'rgba(255,255,255,0.92)',
+} as const
+
+function formatVolLabel(v: number): string {
+  if (v >= 1000) return String(Math.round(v))
+  if (v >= 10) return v.toFixed(0)
+  return v.toFixed(1)
+}
+
+function drawEnergyHistogram(
+  canvas: HTMLCanvasElement,
+  series: ISeriesApi<'Candlestick'>,
+  profile: EnergyProfile,
+  chartHeight: number,
+) {
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  const dpr = window.devicePixelRatio || 1
+  const cssW = ENERGY_WIDTH
+  const cssH = chartHeight
+  canvas.width = Math.floor(cssW * dpr)
+  canvas.height = Math.floor(cssH * dpr)
+  canvas.style.width = `${cssW}px`
+  canvas.style.height = `${cssH}px`
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, cssW, cssH)
+
+  const bins = profile.bins || []
+  if (!bins.length) return
+  const maxVol = Math.max(...bins.map((b) => b.volume), 1e-9)
+  const padRight = 2
+  const labelReserve = 34
+  const maxBarW = cssW - padRight - labelReserve - 4
+
+  for (const bin of bins) {
+    const yHigh = series.priceToCoordinate(bin.price_high)
+    const yLow = series.priceToCoordinate(bin.price_low)
+    if (yHigh == null || yLow == null) continue
+    const top = Math.min(yHigh, yLow)
+    const h = Math.max(Math.abs(yLow - yHigh) - 0.5, 1.2)
+    const w = Math.max(2, (bin.volume / maxVol) * maxBarW)
+    const x = cssW - padRight - w
+    if (bin.is_poc) {
+      ctx.fillStyle = ENERGY_COLORS.poc
+    } else if (bin.in_va) {
+      ctx.fillStyle = ENERGY_COLORS.va
+    } else {
+      ctx.fillStyle = ENERGY_COLORS.edge
+    }
+    ctx.fillRect(x, top, w, h)
+
+    // 教程：每档左侧标注成交量数字
+    if (h >= 7) {
+      ctx.fillStyle = ENERGY_COLORS.volumeText
+      ctx.font = `${bin.is_poc ? 'bold ' : ''}9px ui-sans-serif, system-ui, sans-serif`
+      ctx.textAlign = 'right'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(formatVolLabel(bin.volume), x - 3, top + h / 2)
+    }
+  }
+
+  const drawLevel = (
+    price: number | null | undefined,
+    color: string,
+    label: string,
+    dashed = false,
+  ) => {
+    if (price == null || !Number.isFinite(price)) return
+    const y = series.priceToCoordinate(price)
+    if (y == null) return
+    ctx.strokeStyle = color
+    ctx.lineWidth = label === 'POC' ? 1.5 : 1
+    ctx.setLineDash(dashed ? [4, 3] : [])
+    ctx.beginPath()
+    ctx.moveTo(0, y)
+    ctx.lineTo(cssW, y)
+    ctx.stroke()
+    ctx.setLineDash([])
+    ctx.fillStyle = color
+    ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'bottom'
+    ctx.fillText(label, 2, Math.max(11, y - 1))
+  }
+  drawLevel(profile.vah, ENERGY_COLORS.vahVal, 'VAH')
+  drawLevel(profile.val, ENERGY_COLORS.vahVal, 'VAL')
+  drawLevel(profile.poc, ENERGY_COLORS.poc, 'POC')
+  drawLevel(profile.gap_high, ENERGY_COLORS.gap, '缺口', true)
+  drawLevel(profile.gap_low, ENERGY_COLORS.gap, '缺口', true)
+}
+
+function barsInVisibleRange(
+  bars: MiniBar[],
+  range: { from: number; to: number } | null,
+): MiniBar[] {
+  if (!bars.length) return []
+  if (!range) return bars
+  const from = Math.max(0, Math.floor(range.from))
+  const to = Math.min(bars.length - 1, Math.ceil(range.to))
+  if (to < from) return bars
+  return bars.slice(from, to + 1)
+}
+
 export function MiniCandleChart({
   bars,
   markers = [],
@@ -175,27 +296,38 @@ export function MiniCandleChart({
   overlaySpecs = null,
   barMeta = null,
   priceLines = null,
+  energyProfile: _energyProfileUnused = null,
+  showEnergyProfile = false,
   height = 280,
   showSignalPane = true,
   onLoadMore,
 }: Props) {
+  // energyProfile API 载荷仅作调试参考；教程要求 Visible Bars，图上始终按视窗重算。
+  void _energyProfileUnused
   const specs = resolveOverlaySpecs(overlaySpecs)
   const hasSignalPane = showSignalPane && specs.some((s) => s.pane === 'signal')
   const containerRef = useRef<HTMLDivElement | null>(null)
   const tooltipRef = useRef<HTMLDivElement | null>(null)
+  const energyCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const overlaySeriesRef = useRef<Map<string, ISeriesApi<'Line'>>>(new Map())
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null)
   const priceLineObjsRef = useRef<IPriceLine[]>([])
+  const energyLevelLinesRef = useRef<IPriceLine[]>([])
   const appliedRef = useRef<AppliedSnapshot | null>(null)
   const markersCacheRef = useRef<MiniMarker[]>([])
   const fittedRef = useRef(false)
   const loadMoreLockRef = useRef(false)
   const barByLocalTimeRef = useRef<Map<number, MiniBar>>(new Map())
   const metaByLocalTimeRef = useRef<Map<number, SimBarMeta>>(new Map())
+  const barsRef = useRef(bars)
   const onLoadMoreRef = useRef(onLoadMore)
   const [chartReady, setChartReady] = useState(0)
+
+  useEffect(() => {
+    barsRef.current = bars
+  }, [bars])
 
   useEffect(() => {
     onLoadMoreRef.current = onLoadMore
@@ -222,6 +354,7 @@ export function MiniCandleChart({
         borderColor: 'rgba(180,200,230,0.28)',
         timeVisible: true,
         secondsVisible: false,
+        rightOffset: showEnergyProfile ? 12 : 0,
       },
       rightPriceScale: { borderColor: 'rgba(180,200,230,0.28)' },
       crosshair: {
@@ -342,10 +475,11 @@ export function MiniCandleChart({
       overlaySeriesRef.current = new Map()
       markersRef.current = null
       priceLineObjsRef.current = []
+      energyLevelLinesRef.current = []
       appliedRef.current = null
       fittedRef.current = false
     }
-  }, [height, hasSignalPane, specs.map((s) => s.key).join('|')])
+  }, [height, hasSignalPane, specs.map((s) => s.key).join('|'), showEnergyProfile])
 
   useEffect(() => {
     const series = seriesRef.current
@@ -448,9 +582,84 @@ export function MiniCandleChart({
     }
   }, [bars, markers, overlays, overlaySpecs, barMeta, priceLines, chartReady, specs])
 
+  useEffect(() => {
+    const canvas = energyCanvasRef.current
+    const series = seriesRef.current
+    const chart = chartRef.current
+    if (!canvas || !series || !chart || chartReady === 0 || !showEnergyProfile) return
+
+    const clearEnergyLevels = () => {
+      for (const line of energyLevelLinesRef.current) {
+        try {
+          series.removePriceLine(line)
+        } catch {
+          /* ignore */
+        }
+      }
+      energyLevelLinesRef.current = []
+    }
+
+    const syncEnergyLevels = (profile: EnergyProfile | null) => {
+      clearEnergyLevels()
+      if (!profile) return
+      const levels: { price: number | null | undefined; title: string; color: string; style: number }[] =
+        [
+          { price: profile.vah, title: 'VAH', color: ENERGY_COLORS.vahVal, style: 0 },
+          { price: profile.val, title: 'VAL', color: ENERGY_COLORS.vahVal, style: 0 },
+          { price: profile.poc, title: 'POC', color: ENERGY_COLORS.poc, style: 0 },
+          { price: profile.gap_high, title: '缺口', color: ENERGY_COLORS.gap, style: 2 },
+          { price: profile.gap_low, title: '缺口', color: ENERGY_COLORS.gap, style: 2 },
+        ]
+      for (const lv of levels) {
+        if (lv.price == null || !Number.isFinite(lv.price)) continue
+        energyLevelLinesRef.current.push(
+          series.createPriceLine({
+            price: lv.price,
+            color: lv.color,
+            lineWidth: 1,
+            lineStyle: lv.style,
+            axisLabelVisible: true,
+            title: lv.title,
+          }),
+        )
+      }
+    }
+
+    const paint = () => {
+      const range = chart.timeScale().getVisibleLogicalRange()
+      const visibleBars = barsInVisibleRange(barsRef.current, range)
+      // 教程：Visible Bars — 仅用当前视窗内 K 线重算能量分布
+      const profile = computeEnergyProfile(visibleBars)
+      if (!profile?.bins?.length) {
+        const ctx = canvas.getContext('2d')
+        ctx?.clearRect(0, 0, canvas.width, canvas.height)
+        syncEnergyLevels(null)
+        return
+      }
+      drawEnergyHistogram(canvas, series, profile, height)
+      syncEnergyLevels(profile)
+    }
+
+    paint()
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => paint())
+    const raf = requestAnimationFrame(paint)
+    return () => {
+      cancelAnimationFrame(raf)
+      clearEnergyLevels()
+    }
+  }, [bars, chartReady, height, showEnergyProfile, overlays, priceLines])
+
   return (
     <div className="relative w-full">
       <div ref={containerRef} className="w-full overflow-hidden rounded-xl" />
+      {showEnergyProfile ? (
+        <canvas
+          ref={energyCanvasRef}
+          className="pointer-events-none absolute top-0 z-[5]"
+          style={{ right: 48 }}
+          aria-hidden
+        />
+      ) : null}
       <div
         ref={tooltipRef}
         className="pointer-events-none absolute z-10 hidden max-w-[min(220px,calc(100vw-2rem))] min-w-0 rounded-lg border border-white/10 bg-[#0f1a2c]/95 px-2.5 py-2 text-xs leading-5 text-slate-200 shadow-lg backdrop-blur sm:min-w-[220px]"
@@ -462,6 +671,27 @@ export function MiniCandleChart({
             {spec.label}
           </span>
         ))}
+        {showEnergyProfile ? (
+          <>
+            <span className="inline-flex items-center gap-1">
+              <i className="inline-block h-2 w-2 rounded-sm" style={{ background: ENERGY_COLORS.va }} />{' '}
+              VA(70%)
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <i className="inline-block h-2 w-2 rounded-sm" style={{ background: ENERGY_COLORS.edge }} />{' '}
+              边缘
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <i className="inline-block h-2 w-2 rounded-sm" style={{ background: ENERGY_COLORS.poc }} />{' '}
+              POC
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <i className="inline-block h-2 w-2 rounded-sm" style={{ background: ENERGY_COLORS.gap }} />{' '}
+              缺口
+            </span>
+            <span className="text-faint/80">Visible Bars · 50档</span>
+          </>
+        ) : null}
       </div>
     </div>
   )

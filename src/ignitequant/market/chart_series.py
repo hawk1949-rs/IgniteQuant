@@ -324,6 +324,7 @@ def build_chart_enrichment(
             "bar_meta": [],
             "price_lines": list(price_lines or []),
             "score_parts_schema": profile.score_parts_schema,
+            "energy_profile": None,
         }
 
     replay = replay_series(compute_bars or visible_bars, strategy_id=strategy_id)
@@ -356,6 +357,7 @@ def build_chart_enrichment(
         "bar_meta": ordered,
         "price_lines": list(price_lines or []),
         "score_parts_schema": profile.score_parts_schema,
+        "energy_profile": profile.energy_profile(visible_bars),
     }
 
 

@@ -35,6 +35,8 @@ export function ReplayPanel() {
       bars?.price_lines,
     ],
   )
+  const showEnergyProfile =
+    bars?.score_parts_schema === 'gma_v2' || Boolean(bars?.energy_profile?.bins?.length)
 
   const timeline = useMemo(() => {
     const stamps = new Set<string>()
@@ -158,6 +160,8 @@ export function ReplayPanel() {
                 overlaySpecs={replayChart.overlaySpecs}
                 barMeta={replayChart.barMeta}
                 priceLines={replayChart.priceLines}
+                energyProfile={bars?.energy_profile}
+                showEnergyProfile={showEnergyProfile}
                 height={chartHeight}
               />
             ) : (

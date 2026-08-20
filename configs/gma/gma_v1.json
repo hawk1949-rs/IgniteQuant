@@ -21,7 +21,7 @@
     "donchian_mid": 444,
     "donchian_long": 1600,
     "vp_lookback_15m": 96,
-    "vp_bins": 48,
+    "vp_bins": 50,
     "vp_value_pct": 0.7,
     "pullback_near_pct": 0.002,
     "breakout_lookback": 20,
